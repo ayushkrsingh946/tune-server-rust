@@ -1,6 +1,6 @@
 {
   "genere_depuis": {
-    "web_sha": "6309565045b7e3d9aeab8234f7115ae7634f4434",
+    "web_sha": "f972adc05498806bebcc3c34451f8f5ced213cd8",
     "regenerer": "scripts/web-contract-map.py --web <tune-web-client> --web-sha <sha> -o docs/contrat-web.json",
     "gardee_par": [
       "tune-server/tests/web_response_contracts.rs (la_carte_web_ne_cite_que_des_routes_encore_servies)",
@@ -651,7 +651,7 @@
       ]
     },
     {
-      "route": "/home/recently-added/summary",
+      "route": "/home/recently-added/summary{}",
       "methode": "GET",
       "type": "ResumeAjoutsRecents",
       "liste": false,
@@ -662,10 +662,7 @@
         "duration_ms",
         "duration_seconds"
       ],
-      "champs_optionnels": [
-        "tri",
-        "tracks_without_creation_date"
-      ]
+      "champs_optionnels": []
     },
     {
       "route": "/library/albums",
@@ -3226,9 +3223,30 @@
       "champs_optionnels": []
     },
     {
-      "route": "/streaming/youtube/moods",
+      "route": "/streaming/youtube/charts",
       "methode": "GET",
       "type": "(en ligne)",
+      "liste": false,
+      "champs_obligatoires": [
+        "country",
+        "sections"
+      ],
+      "champs_optionnels": []
+    },
+    {
+      "route": "/streaming/youtube/home",
+      "methode": "GET",
+      "type": "(en ligne)",
+      "liste": false,
+      "champs_obligatoires": [
+        "sections"
+      ],
+      "champs_optionnels": []
+    },
+    {
+      "route": "/streaming/youtube/moods",
+      "methode": "GET",
+      "type": "YtCategorieAmbiances",
       "liste": true,
       "champs_obligatoires": [
         "title",
@@ -3240,12 +3258,9 @@
       "route": "/streaming/youtube/moods/{}",
       "methode": "GET",
       "type": "(en ligne)",
-      "liste": true,
+      "liste": false,
       "champs_obligatoires": [
-        "title",
-        "playlistId",
-        "description",
-        "cover_path"
+        "sections"
       ],
       "champs_optionnels": []
     },
@@ -6037,11 +6052,6 @@
       "raison": "type non structurel"
     },
     {
-      "route": "/library/tracks",
-      "type": "any",
-      "raison": "type non structurel"
-    },
-    {
       "route": "/network/media-servers",
       "type": "any",
       "raison": "type non structurel"
@@ -6184,11 +6194,6 @@
     {
       "route": "/streaming/youtube/auth/logout",
       "type": "any",
-      "raison": "type non structurel"
-    },
-    {
-      "route": "/streaming/youtube/charts",
-      "type": "Record<string, any[]>",
       "raison": "type non structurel"
     },
     {
@@ -6648,7 +6653,7 @@
     }
   ],
   "resume": {
-    "routes_cartographiees": 327,
-    "appels_non_resolus": 161
+    "routes_cartographiees": 329,
+    "appels_non_resolus": 159
   }
 }

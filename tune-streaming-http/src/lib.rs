@@ -585,6 +585,7 @@ where
         .route("/youtube/home", get(youtube_home))
         .route("/youtube/charts", get(youtube_charts))
         .route("/youtube/moods", get(youtube_moods))
+        .route("/youtube/moods/{params}", get(youtube_mood))
         .route("/youtube/library", get(youtube_library))
         .route("/spotify/callback", get(spotify_callback))
         .route("/tidal/callback", get(tidal_callback))
@@ -1081,6 +1082,9 @@ async fn service_add_favorite(
     // playlist, quel que soit l'endpoint amont que le connecteur choisit : la
     // purge n'a pas à connaître ce détail.
     purge_contenu_utilisateur(&service);
+    // #5997 — écriture directe chez le service : le miroir des favoris est
+    // périmé, la prochaine lecture de la liste le rafraîchit.
+    tune_core::streaming::favorites_mirror::invalider(&service);
     reponse
 }
 
@@ -1092,6 +1096,7 @@ async fn service_remove_favorite(
         .remove_favorite(&fav_type, &item_id)
         .await);
     purge_contenu_utilisateur(&service);
+    tune_core::streaming::favorites_mirror::invalider(&service);
     reponse
 }
 
@@ -1642,31 +1647,114 @@ async fn service_auth_url(
 }
 
 // ---------------------------------------------------------------------------
-// Stubs & OAuth callbacks
+// YouTube Music : découverte et bibliothèque du compte (#1897, #5247)
 // ---------------------------------------------------------------------------
+//
+// Ces quatre routes étaient des talons : listes vides et « not yet
+// implemented ». Elles rendent désormais les rayons réels de YouTube Music, ou
+// une erreur franche (502 si YouTube refuse ou si sa réponse n'est plus
+// lisible, 404 pour un pays ou une ambiance invalide, 409 service désactivé).
 
-async fn youtube_home() -> Json<Value> {
-    Json(json!({"sections": [], "message": "YouTube home not yet implemented"}))
+/// Le service YouTube TYPÉ : la découverte n'appartient pas au trait commun,
+/// aucun autre service n'a d'ambiances ni de tendances par pays.
+macro_rules! with_youtube {
+    ($state:expr, |$yt:ident| $body:expr) => {{
+        let arc = match get_svc_actif($state, "youtube").await {
+            Ok(s) => s,
+            Err(e) => return e.into_response(),
+        };
+        let svc = arc.read().await;
+        let Some($yt) = svc
+            .as_any()
+            .downcast_ref::<tune_core::streaming::youtube::YouTubeService>()
+        else {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                "le service inscrit sous « youtube » n'est pas YouTube Music",
+            )
+                .into_response();
+        };
+        $body
+    }};
 }
 
-async fn youtube_charts() -> Json<Value> {
-    Json(json!({"charts": [], "message": "YouTube charts not yet implemented"}))
+/// GET /streaming/youtube/home → `{sections: Rayon[]}`.
+async fn youtube_home(State(state): State<StreamingHttpState>) -> Response {
+    with_youtube!(&state, |yt| svc_response_editorial(
+        yt.accueil()
+            .await
+            .map(|sections| json!({ "sections": sections }))
+    ))
 }
 
-/// Talon : aucune catégorie d'ambiance tant que le service n'est pas branché.
-///
-/// La forme est celle que les clients LISENT — un TABLEAU de catégories
-/// (`api.ts:getYouTubeMoods`, `tune_api_client.dart` : `as List<dynamic>`).
-/// L'ancien talon rendait un objet `{moods, message}` : le client Flutter
-/// échouait sur sa conversion, et l'écran web recevait un objet là où il
-/// attend une liste (#1897, balayage des lectures cartographiées).
-async fn youtube_moods() -> Json<Value> {
-    Json(json!([]))
+#[derive(Deserialize)]
+struct ChartsQuery {
+    country: Option<String>,
 }
 
-async fn youtube_library() -> Json<Value> {
-    Json(json!({"playlists": [], "albums": [], "artists": []}))
+/// GET /streaming/youtube/charts?country=FR → `{country, country_source,
+/// sections: Rayon[]}`. Pays : réglage `youtube_charts_country`, sinon
+/// `country`, sinon le monde (`ZZ`).
+async fn youtube_charts(
+    State(state): State<StreamingHttpState>,
+    Query(q): Query<ChartsQuery>,
+) -> Response {
+    // Le réglage explicite du service l'emporte ; à défaut, le `?country=`
+    // (le web y envoie la région de la langue du navigateur), puis le monde.
+    let reglage = SettingsRepo::with_backend(state.backend.clone())
+        .get(tune_core::streaming::youtube_decouverte::CLE_PAYS_TENDANCES)
+        .ok()
+        .flatten();
+    let (pays, origine) = tune_core::streaming::youtube_decouverte::choisir_pays(
+        reglage.as_deref(),
+        q.country.as_deref(),
+    );
+    // PAS de cache navigateur ici (`svc_response`, pas `_editorial`) : la même
+    // URL change de pays dès que le réglage change, et le serveur garde déjà
+    // les rayons trente minutes.
+    with_youtube!(&state, |yt| svc_response(yt.tendances(&pays).await.map(
+        |sections| json!({
+            "country": pays.trim().to_ascii_uppercase(),
+            "country_source": origine.cle(),
+            "sections": sections,
+        })
+    )))
 }
+
+/// GET /streaming/youtube/moods → `CategorieAmbiances[]` (un TABLEAU : c'est
+/// ce que lisent le web et Flutter).
+async fn youtube_moods(State(state): State<StreamingHttpState>) -> Response {
+    with_youtube!(&state, |yt| svc_response_editorial(yt.ambiances().await))
+}
+
+/// GET /streaming/youtube/moods/{params} → `{sections: Rayon[]}`, les
+/// playlists d'une ambiance ou d'un genre.
+async fn youtube_mood(
+    State(state): State<StreamingHttpState>,
+    Path(params): Path<String>,
+) -> Response {
+    with_youtube!(&state, |yt| svc_response_editorial(
+        yt.contenu_ambiance(&params)
+            .await
+            .map(|sections| json!({ "sections": sections }))
+    ))
+}
+
+/// GET /streaming/youtube/library → `{playlists, tracks}` du compte (#5247),
+/// ou l'erreur de Google telle quelle. Les mêmes lectures servent
+/// `/streaming/youtube/playlists` et `/favorites/tracks`.
+async fn youtube_library(State(state): State<StreamingHttpState>) -> Response {
+    with_svc!(&state, "youtube", |svc| async {
+        let playlists = svc.get_user_playlists().await?;
+        let tracks = svc.get_user_tracks().await?;
+        Ok::<_, tune_core::TuneError>(json!({ "playlists": playlists, "tracks": tracks }))
+    }
+    .await)
+}
+
+// ---------------------------------------------------------------------------
+// OAuth callbacks
+// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct SpotifyCallbackQuery {
@@ -2237,6 +2325,23 @@ mod tests_cache_utilisateur {
                 id: "r1".into(),
                 title: format!("{section_id}|{genre_id}|{limit}"),
                 ..StreamAlbum::default()
+            }])
+        }
+        /// #5313 — les playlists éditoriales : le nom dit ce qui est arrivé
+        /// au connecteur (catégorie, genre ; `-` quand absent).
+        async fn get_featured_playlists(
+            &self,
+            tag: Option<&str>,
+            genre: Option<&str>,
+        ) -> Result<Vec<StreamPlaylist>, TuneError> {
+            Ok(vec![StreamPlaylist {
+                id: "p1".into(),
+                name: format!("{}|{}", tag.unwrap_or("-"), genre.unwrap_or("-")),
+                description: None,
+                cover_path: None,
+                track_count: 0,
+                owner: None,
+                covers: Vec::new(),
             }])
         }
     }
@@ -3375,6 +3480,66 @@ mod tests_route_rubrique_par_genre {
     }
 }
 
+/// #5313 — `?genre=` sur `/{service}/featured-playlists` : la bande
+/// « Playlists du genre » de la vue d'un genre (tune-web-client#2034) lit
+/// cette route. Le genre et la catégorie doivent parvenir au connecteur ; sans
+/// eux, chaque genre recevrait les mêmes playlists éditoriales.
+#[cfg(test)]
+mod tests_route_playlists_du_genre_5313 {
+    use super::tests_cache_utilisateur::{RecherchesVues, etat_essai_complet};
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    async fn noms(nom: &str, tag: Option<&str>, genre: Option<&str>) -> Vec<String> {
+        let etat = etat_essai_complet(
+            nom,
+            Arc::new(AtomicUsize::new(0)),
+            Duration::ZERO,
+            RecherchesVues::default(),
+        );
+        let r = service_featured_playlists(
+            State(etat),
+            Path(nom.to_string()),
+            Query(FeaturedPlaylistsQuery {
+                tag: tag.map(str::to_string),
+                genre: genre.map(str::to_string),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let corps = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .expect("corps lisible");
+        let v: Value = serde_json::from_slice(&corps).expect("JSON");
+        v.as_array()
+            .expect("un tableau de playlists")
+            .iter()
+            .map(|p| p["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+    /// LE besoin de #5313 : le genre demandé parvient au connecteur.
+    #[tokio::test]
+    async fn le_genre_demande_parvient_au_connecteur_5313() {
+        let vus = noms("essai-playlists-genre", None, Some("10")).await;
+        assert_eq!(
+            vus,
+            vec![String::from("-|10")],
+            "`?genre=` doit filtrer les playlists éditoriales du genre (#5313)"
+        );
+    }
+    /// Catégorie et genre ensemble : aucun des deux n'efface l'autre.
+    #[tokio::test]
+    async fn categorie_et_genre_parviennent_ensemble_5313() {
+        let vus = noms("essai-playlists-genre-tag", Some("mood"), Some("6")).await;
+        assert_eq!(vus, vec![String::from("mood|6")]);
+    }
+    /// Non-régression : sans `?genre=`, la route rend les playlists de tous
+    /// les genres, comme pour les clients installés.
+    #[tokio::test]
+    async fn sans_genre_la_route_ne_filtre_pas_5313() {
+        let vus = noms("essai-playlists-sans-genre", None, None).await;
+        assert_eq!(vus, vec![String::from("-|-")]);
+    }
+}
 /// 🔴 Fuites de français — la réponse éditoriale sort dans la langue demandée.
 ///
 /// Qobuz sert ses libellés de rubriques en objet multilingue ; le connecteur
@@ -3484,3 +3649,6 @@ mod temoin_rubriques_dans_la_langue_demandee {
 
 #[cfg(test)]
 mod service_desactive_jamais_appele_tests;
+
+#[cfg(test)]
+mod youtube_decouverte_tests;

@@ -16,10 +16,15 @@ use axum::extract::{Query, RawQuery, State};
 use serde_json::{Value, json};
 use tune_http_types::panne_sql::OuDefautJournalise;
 
+use tune_core::db::backend::SqlValue;
+use tune_core::db::engine::Engine;
+
 use crate::error::AppError;
 use crate::state::AppState;
 
-use super::facets::{FacetQuery, build_conditions, hors_executeur, resolve_collection};
+use super::facets::{
+    FacetQuery, SocleResolu, build_conditions, hors_executeur, resolve_collection,
+};
 
 /// Une piste sans `album_id` n'est pas un album : elle n'a ni pochette, ni
 /// numéro de disque fiable, et regrouper toutes les orphelines sous une carte
@@ -68,7 +73,13 @@ pub(super) async fn albums_detailed(
 }
 
 /// Le corps de `GET /library/albums-detailed`, exécuté HORS de l'exécuteur.
-fn lire_les_cartes(state: &AppState, q: FacetQuery) -> Value {
+pub(super) fn lire_les_cartes(state: &AppState, q: FacetQuery) -> Value {
+    lire_les_cartes_sur(state, q, &SocleResolu::resoudre(state))
+}
+
+/// [`lire_les_cartes`], le socle déjà résolu — séparé pour que les témoins
+/// de #5993 comparent la correction par album au socle posé en SQL.
+pub(super) fn lire_les_cartes_sur(state: &AppState, q: FacetQuery, socle: &SocleResolu) -> Value {
     let engine = state.backend.engine();
     // Même résolution que le rail ET que la liste (#1864) : le nom d'une
     // collection manuelle vit dans un JSON de réglages, celui d'une collection
@@ -82,7 +93,20 @@ fn lire_les_cartes(state: &AppState, q: FacetQuery) -> Value {
     // `exclude` vide : ici AUCUNE facette n'est exclue. Le rail exclut la
     // facette qu'il compte pour garder ses alternatives visibles ; une liste
     // d'albums, elle, doit refléter la sélection entière.
-    let (mut conds, params) = build_conditions(&q, engine, "", coll.as_ref());
+    //
+    // #5993 — le socle de la liste (#5977), SANS sonde par piste. Les pistes
+    // repliées (double distant, copie de moindre qualité) n'appartiennent qu'à
+    // quelques albums : on agrège tous les albums sur le socle réduit aux
+    // albums masqués, on retire au niveau du GROUPE ceux que touche un repli,
+    // et l'on recalcule ces seuls albums-là, pistes repliées exclues. La carte
+    // d'un album ne dépend que de ses propres pistes : le résultat est celui
+    // du socle complet. Poser `t.id NOT IN (…)` sur chaque piste coûtait une
+    // sonde par piste, deux fois (total et page).
+    let replis = replis_par_album(state, socle);
+    let (mut conds, params) = match replis {
+        Some(_) => build_conditions(&q, engine, "", coll.as_ref(), &SocleResolu::masques_seuls()),
+        None => build_conditions(&q, engine, "", coll.as_ref(), socle),
+    };
     conds.push(ONLY_REAL_ALBUMS.to_string());
     let where_clause = format!(" WHERE {}", conds.join(" AND "));
 
@@ -93,23 +117,35 @@ fn lire_les_cartes(state: &AppState, q: FacetQuery) -> Value {
         .iter()
         .map(|v| v as &dyn tune_core::db::backend::ToSqlValue)
         .collect();
+    let compter = |sql: &str| -> i64 {
+        state
+            .backend
+            .query_one(sql, &bound)
+            .ok()
+            .flatten()
+            .and_then(|row| row.into_iter().next())
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+    };
 
     // Total = nombre d'ALBUMS distincts, pas de pistes : c'est ce que la vue
     // pagine et ce que la barre d'état annonce.
     let total_sql = format!("SELECT COUNT(DISTINCT t.album_id) FROM tracks t{where_clause}");
-    let total = state
-        .backend
-        .query_one(&total_sql, &bound)
-        .ok()
-        .flatten()
-        .and_then(|row| row.into_iter().next())
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let total = match &replis {
+        None => compter(&total_sql),
+        // Tous les albums, moins ceux que touche un repli, plus ceux d'entre
+        // eux qui gardent au moins une piste une fois les replis retirés.
+        Some(r) => {
+            let touches = format!("{total_sql} AND t.album_id IN ({})", r.albums);
+            let gardes = format!("{touches} AND t.id NOT IN ({})", r.pistes);
+            compter(&total_sql) - compter(&touches) + compter(&gardes)
+        }
+    };
 
     // `MAX(...)` sur les colonnes d'album : elles sont constantes au sein d'un
     // groupe (même album), et un agrégat évite d'avoir à les lister dans le
     // GROUP BY — PostgreSQL l'exigerait, SQLite non. Écrire pour les deux.
-    let sql = format!(
+    let select_cartes = format!(
         "SELECT t.album_id, \
                 MAX(al.title), \
                 MAX({ARTISTE_DE_CARTE}), \
@@ -130,11 +166,42 @@ fn lire_les_cartes(state: &AppState, q: FacetQuery) -> Value {
          FROM tracks t \
          LEFT JOIN albums al ON al.id = t.album_id \
          LEFT JOIN artists ar ON ar.id = t.artist_id \
-         LEFT JOIN artists ar_al ON ar_al.id = al.artist_id{where_clause} \
-         GROUP BY t.album_id \
-         ORDER BY MAX({ARTISTE_DE_CARTE}), MAX(al.title) \
-         LIMIT {limit} OFFSET {offset}"
+         LEFT JOIN artists ar_al ON ar_al.id = al.artist_id{where_clause}"
     );
+    // Colonnes 3 et 2 : l'artiste de la carte, puis le titre de l'album.
+    let (sql, params_page): (String, Vec<SqlValue>) = match &replis {
+        None => (
+            format!(
+                "{select_cartes} GROUP BY t.album_id \
+                 ORDER BY MAX({ARTISTE_DE_CARTE}), MAX(al.title) \
+                 LIMIT {limit} OFFSET {offset}"
+            ),
+            params.clone(),
+        ),
+        Some(r) => (
+            format!(
+                "{select_cartes} GROUP BY t.album_id HAVING t.album_id NOT IN ({albums}) \
+                 UNION ALL \
+                 {select_cartes} AND t.album_id IN ({albums}) AND t.id NOT IN ({pistes}) \
+                 GROUP BY t.album_id \
+                 ORDER BY 3, 2 LIMIT {limit} OFFSET {offset}",
+                albums = r.albums,
+                pistes = r.pistes,
+            ),
+            // Le WHERE paraît DEUX fois. En SQLite les marqueurs sont des `?`
+            // liés dans l'ordre : il faut les valeurs deux fois. En PostgreSQL
+            // ils sont numérotés (`$1`…) et la seconde occurrence relit les
+            // mêmes : une seule fois.
+            match engine {
+                Engine::Sqlite => params.iter().chain(params.iter()).cloned().collect(),
+                Engine::Postgres => params.clone(),
+            },
+        ),
+    };
+    let bound: Vec<&dyn tune_core::db::backend::ToSqlValue> = params_page
+        .iter()
+        .map(|v| v as &dyn tune_core::db::backend::ToSqlValue)
+        .collect();
 
     let items: Vec<Value> = state
         .backend
@@ -197,6 +264,36 @@ fn lire_les_cartes(state: &AppState, q: FacetQuery) -> Value {
         "total": total,
         "limit": limit,
         "offset": offset,
+    })
+}
+
+/// #5993 — les pistes repliées par le socle et les albums qui les portent,
+/// en listes SQL d'entiers. `None` : rien n'est replié, ou le socle n'a pas
+/// pu être résolu (le socle complet est alors posé dans la requête).
+struct ReplisParAlbum {
+    pistes: String,
+    albums: String,
+}
+
+fn replis_par_album(state: &AppState, socle: &SocleResolu) -> Option<ReplisParAlbum> {
+    let pistes = socle.liste_des_ecartees()?;
+    let albums: Vec<String> = state
+        .backend
+        .query_many(
+            // Pas de `album_id IS NOT NULL` ici : SQLite parcourait alors
+            // l'index des albums (16 ms sur 100 000 pistes) au lieu de lire
+            // les pistes par leur clé. Le `NULL` est écarté en Rust.
+            &format!("SELECT DISTINCT album_id FROM tracks WHERE id IN ({pistes})"),
+            &[],
+        )
+        .ok()?
+        .iter()
+        .filter_map(|r| r.first().and_then(|v| v.as_i64()))
+        .map(|id| id.to_string())
+        .collect();
+    (!albums.is_empty()).then(|| ReplisParAlbum {
+        pistes,
+        albums: albums.join(","),
     })
 }
 
@@ -263,14 +360,30 @@ mod tests {
     fn le_tri_emploie_le_meme_artiste_que_l_affichage() {
         let fichier = include_str!("albums_detailed.rs");
         let sql = fichier
-            .split("let sql = format!(")
+            .split("let select_cartes = format!(")
             .nth(1)
+            .and_then(|s| s.split("let items: Vec<Value>").next())
             .expect("la requête");
         assert_eq!(
             sql.matches("MAX({ARTISTE_DE_CARTE})").count(),
             2,
             "une fois pour la colonne, une fois pour l'ORDER BY"
         );
+        // #5993 — la page corrigée par album trie sur les colonnes RENDUES :
+        // la 3e est `MAX({ARTISTE_DE_CARTE})`, la 2e le titre de l'album.
+        let colonnes: Vec<&str> = sql
+            .split("FROM tracks t")
+            .next()
+            .expect("colonnes")
+            .split(", \\")
+            .map(str::trim)
+            .collect();
+        assert!(
+            colonnes[2].starts_with("MAX({ARTISTE_DE_CARTE})"),
+            "{colonnes:?}"
+        );
+        assert!(colonnes[1].starts_with("MAX(al.title)"), "{colonnes:?}");
+        assert!(sql.contains("ORDER BY 3, 2"), "le tri de la page corrigée");
     }
 
     /// 🔴 L'épreuve qui MESURE, par la route et une vraie base — les deux
@@ -483,5 +596,85 @@ mod tests {
     fn le_total_compte_des_albums_distincts() {
         let sql = "SELECT COUNT(DISTINCT t.album_id) FROM tracks t";
         assert!(sql.contains("COUNT(DISTINCT t.album_id)"));
+    }
+    /// Fil 1684 — la recherche de la Bibliothèque (`albums-detailed?q=`)
+    /// trouve un album par le COMPOSITEUR de ses pistes : « Ravel » rend le
+    /// Boléro joué par un orchestre, alors qu'aucun titre, artiste, album,
+    /// label ni chemin ne porte « Ravel ». Une SEULE piste de l'album le
+    /// porte. Témoin : un album sans ce compositeur ne sort pas. La casse et
+    /// les accents sont repliés, comme pour les autres champs.
+    #[tokio::test]
+    async fn la_recherche_trouve_un_album_par_le_compositeur_d_une_piste() {
+        use crate::state::AppState;
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        use tune_core::db::backend::ToSqlValue;
+        let state = AppState::new(":memory:", 0, Default::default()).expect("état");
+        let b = &state.backend;
+        b.execute(
+            "INSERT INTO artists (id, name) VALUES (1, 'Orchestre de Paris'), (2, 'Quatuor Ebène')",
+            &[],
+        )
+        .expect("artistes");
+        b.execute(
+            "INSERT INTO albums (id, title, artist_id) VALUES (1, 'Boléro', 1), (2, 'Quatuors', 2)",
+            &[],
+        )
+        .expect("albums");
+        for (titre, artiste, album, compositeur, chemin) in [
+            ("Boléro", 1, 1, Some("Maurice Ravel"), "/m/OP/01.flac"),
+            ("Pavane", 1, 1, None, "/m/OP/02.flac"),
+            ("Quatuor n°1", 2, 2, Some("Claude Debussy"), "/m/QE/01.flac"),
+        ] {
+            b.execute(
+                "INSERT INTO tracks (title, artist_id, album_id, composer, source, file_path) \
+                 VALUES (?1, ?2, ?3, ?4, 'local', ?5)",
+                &[
+                    &titre as &dyn ToSqlValue,
+                    &(artiste as i64),
+                    &(album as i64),
+                    &compositeur,
+                    &chemin,
+                ],
+            )
+            .expect("piste");
+        }
+        let albums = |q: &'static str| {
+            let state = state.clone();
+            async move {
+                let reponse = super::super::router()
+                    .with_state(state)
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/albums-detailed?limit=10&q={q}"))
+                            .body(Body::empty())
+                            .expect("requête"),
+                    )
+                    .await
+                    .expect("réponse");
+                let octets = axum::body::to_bytes(reponse.into_body(), usize::MAX)
+                    .await
+                    .expect("corps");
+                let v: Value = serde_json::from_slice(&octets).expect("json");
+                let mut ids: Vec<i64> = v["items"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("items absents : {v}"))
+                    .iter()
+                    .filter_map(|c| c["album_id"].as_i64())
+                    .collect();
+                ids.sort_unstable();
+                ids
+            }
+        };
+        assert_eq!(albums("ravel").await, vec![1], "par le compositeur");
+        assert_eq!(albums("RAVEL").await, vec![1], "casse repliée");
+        assert_eq!(albums("rav%C3%A9l").await, vec![1], "accent replié");
+        assert_eq!(albums("debussy").await, vec![2]);
+        assert_eq!(
+            albums("stravinsky").await,
+            Vec::<i64>::new(),
+            "témoin : aucun compositeur ne correspond"
+        );
     }
 }
