@@ -234,19 +234,12 @@ impl RelayClient {
                 let ws_tx = self.ws_tx.clone();
                 let id_clone = id.clone();
                 tokio::spawn(async move {
-                    let (status, resp_headers, resp_body) = match req.send().await {
+                    let resp = match req.send().await {
                         Ok(resp) => {
                             let status = resp.status().as_u16();
-                            let ct = resp
-                                .headers()
-                                .get("content-type")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("application/json")
-                                .to_string();
-                            let body = resp.text().await.unwrap_or_default();
-                            let mut hdrs = serde_json::Map::new();
-                            hdrs.insert("content-type".to_string(), serde_json::Value::String(ct));
-                            (status, hdrs, body)
+                            let hdrs = entetes_de_reponse_dapi(resp.headers());
+                            let octets = resp.bytes().await.unwrap_or_default();
+                            reponse_dapi(&id_clone, status, hdrs, &octets)
                         }
                         Err(e) => {
                             warn!(id = %id_clone, error = %e, "relay local dispatch failed");
@@ -255,21 +248,10 @@ impl RelayClient {
                                 "content-type".to_string(),
                                 serde_json::Value::String("application/json".into()),
                             );
-                            (
-                                502,
-                                hdrs,
-                                format!("{{\"error\": \"local dispatch failed: {e}\"}}"),
-                            )
+                            let corps = format!("{{\"error\": \"local dispatch failed: {e}\"}}");
+                            reponse_dapi(&id_clone, 502, hdrs, corps.as_bytes())
                         }
                     };
-
-                    let resp = serde_json::json!({
-                        "type": "relay.response",
-                        "id": id_clone,
-                        "status": status,
-                        "headers": resp_headers,
-                        "body": resp_body,
-                    });
 
                     emettre_vers_le_relais(&ws_tx, resp.to_string()).await;
                 });
@@ -360,7 +342,8 @@ impl RelayClient {
     ///   par la connexion authentifiée au pont (le seul canal qui porte ce
     ///   message). Ce serveur ne garde rien du cercle.
     /// * **Le propriétaire garde la main** : greffon `circle` désinstallé ou
-    ///   désactivé → 404, sans appel local.
+    ///   désactivé, ou réglage [`super::CLE_ECOUTE_DE_CERCLE`] qui ne vaut pas
+    ///   `true` (le défaut) → 404, sans appel local.
     /// * **Même chemin de morceaux** que `relay.stream_request`, `Range`
     ///   compris : le fichier d'origine, octet pour octet (bit-perfect).
     /// * **Journal** : piste, statut, octets, durée. Ni identité, ni billet —
@@ -376,17 +359,19 @@ impl RelayClient {
             .and_then(|r| r.as_str())
             .map(|s| s.to_string());
 
-        let permis = self
-            .reglages
-            .as_ref()
-            .is_some_and(|b| greffon_circle_actif(&SettingsRepo::with_backend(b.clone())));
+        // Greffon actif ET interrupteur local ouvert (fermé par défaut,
+        // décision produit du 10/10). Relus à chaque demande.
+        let permis = self.reglages.as_ref().is_some_and(|b| {
+            let reglages = SettingsRepo::with_backend(b.clone());
+            greffon_circle_actif(&reglages) && super::ecoute_de_cercle_ouverte(&reglages)
+        });
         let track_id = track_id_de_cercle(v.get("track_id"));
 
         let (Some(track_id), true) = (track_id, permis) else {
             if permis {
                 warn!("circle_ecoute_track_id_refuse");
             } else {
-                info!("circle_ecoute_refusee_greffon_inactif");
+                info!("circle_ecoute_refusee_greffon_inactif_ou_ecoute_fermee");
             }
             let refus = serde_json::json!({
                 "type": "relay.stream_start",
@@ -656,6 +641,67 @@ mod emission_vers_le_relais_tests {
 ///
 /// Le repli `application/octet-stream` est conserve : un flux sans type
 /// declare vaut mieux qu'un flux sans en-tete du tout.
+/// En-têtes d'une réponse d'API rendus au navigateur distant.
+///
+/// Le type de contenu (repli `application/json`, comme avant), plus ce qui
+/// change ce que le navigateur fait de la réponse : le nom du fichier d'un
+/// export (`content-disposition`) et les validateurs de cache d'une pochette
+/// (`cache-control`, `etag`, `last-modified`). Pas `content-length` : le pont
+/// le recalcule sur le corps qu'il rend.
+pub(crate) fn entetes_de_reponse_dapi(
+    entetes: &reqwest::header::HeaderMap,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut sortie = serde_json::Map::new();
+    let type_contenu = entetes
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json");
+    sortie.insert(
+        "content-type".to_string(),
+        serde_json::Value::String(type_contenu.to_string()),
+    );
+    for nom in [
+        "content-disposition",
+        "cache-control",
+        "etag",
+        "last-modified",
+    ] {
+        if let Some(valeur) = entetes.get(nom).and_then(|v| v.to_str().ok()) {
+            sortie.insert(
+                nom.to_string(),
+                serde_json::Value::String(valeur.to_string()),
+            );
+        }
+    }
+    sortie
+}
+
+/// La trame `relay.response` d'une réponse d'API.
+///
+/// Un corps valide en UTF-8 part dans `body`, en texte, comme toujours : un
+/// pont plus ancien le lit sans changement, et l'aller-retour est exact. Tout
+/// autre corps — une pochette JPEG, une archive — part en base64 dans
+/// `body_base64` : passé par `text()`, chaque octet invalide devenait U+FFFD
+/// et l'image arrivait corrompue.
+pub(crate) fn reponse_dapi(
+    id: &str,
+    status: u16,
+    entetes: serde_json::Map<String, serde_json::Value>,
+    octets: &[u8],
+) -> serde_json::Value {
+    let mut trame = serde_json::json!({
+        "type": "relay.response",
+        "id": id,
+        "status": status,
+        "headers": entetes,
+    });
+    match std::str::from_utf8(octets) {
+        Ok(texte) => trame["body"] = serde_json::Value::String(texte.to_string()),
+        Err(_) => trame["body_base64"] = serde_json::Value::String(base64_encode(octets)),
+    }
+    trame
+}
+
 pub(crate) fn entetes_de_flux(
     entetes: &reqwest::header::HeaderMap,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -876,7 +922,17 @@ mod flux_de_cercle_tests {
         (port, journal)
     }
 
+    /// Greffon tel que demandé, interrupteur d'écoute OUVERT : les tests du
+    /// chemin servi.
     fn base(installe: Option<&str>, active: Option<&str>) -> Arc<dyn DbBackend> {
+        base_avec_interrupteur(installe, active, Some("true"))
+    }
+
+    fn base_avec_interrupteur(
+        installe: Option<&str>,
+        active: Option<&str>,
+        ecoute: Option<&str>,
+    ) -> Arc<dyn DbBackend> {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
         migrations::run_migrations(&db).unwrap();
@@ -887,6 +943,9 @@ mod flux_de_cercle_tests {
         }
         if let Some(v) = active {
             s.set("plugin_circle_enabled", v).unwrap();
+        }
+        if let Some(v) = ecoute {
+            s.set(crate::cloud::CLE_ECOUTE_DE_CERCLE, v).unwrap();
         }
         backend
     }
@@ -1035,6 +1094,26 @@ mod flux_de_cercle_tests {
         assert!(journal.lock().unwrap().is_empty());
     }
 
+    /// Décision produit du 10/10 : greffon actif mais interrupteur d'écoute
+    /// absent (le défaut), `false` ou autre chose que `true` → 404, aucun
+    /// appel local. Le propriétaire dit non chez lui, quoi que fasse le pont.
+    #[tokio::test]
+    async fn interrupteur_d_ecoute_ferme_rien_n_est_servi() {
+        let (port, journal) = serveur_local().await;
+        for ecoute in [None, Some("false"), Some(""), Some("1")] {
+            let reglages = base_avec_interrupteur(Some("true"), None, ecoute);
+            let (c, mut rx) = client(port, Some(reglages)).await;
+            c.handle_message(&demande(serde_json::json!("42"), None))
+                .await;
+            assert_eq!(
+                json(&trame(&mut rx).await)["status"],
+                404,
+                "interrupteur {ecoute:?}"
+            );
+        }
+        assert!(journal.lock().unwrap().is_empty());
+    }
+
     /// Non-régression : `relay.stream_request` suit toujours `/stream/{id}`.
     #[tokio::test]
     async fn le_flux_d_orchestrateur_suit_toujours_son_chemin() {
@@ -1047,5 +1126,141 @@ mod flux_de_cercle_tests {
         .await;
         assert_eq!(json(&trame(&mut rx).await)["status"], 404);
         assert_eq!(journal.lock().unwrap()[0].0, "/stream/abc");
+    }
+}
+
+/// `relay.request` (l'API par le pont), contre un faux serveur local : ce que
+/// le navigateur distant reçoit doit être ce que le serveur a rendu.
+#[cfg(test)]
+mod reponse_dapi_tests {
+    use super::*;
+    use axum::Router;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, Uri};
+    use axum::response::{IntoResponse, Response};
+    use std::sync::Mutex as StdMutex;
+
+    const PATIENCE: Duration = Duration::from_secs(5);
+
+    /// En-tête JPEG : invalide en UTF-8, comme toute vraie pochette.
+    const JPEG: [u8; 4] = [0xFF, 0xD8, 0xFF, 0xE0];
+
+    /// (chemin + requête, `X-Tune-Profile`) de chaque appel reçu.
+    type Journal = Arc<StdMutex<Vec<(String, Option<String>)>>>;
+
+    async fn repondre(State(journal): State<Journal>, uri: Uri, headers: HeaderMap) -> Response {
+        let profil = headers
+            .get("x-tune-profile")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        journal.lock().unwrap().push((uri.to_string(), profil));
+        match uri.path() {
+            "/api/v1/library/artwork/a.jpg" => (
+                [
+                    ("content-type", "image/jpeg"),
+                    ("cache-control", "public, max-age=86400"),
+                    ("etag", "\"pochette-a\""),
+                ],
+                JPEG.to_vec(),
+            )
+                .into_response(),
+            _ => (
+                [
+                    ("content-type", "text/csv; charset=utf-8"),
+                    (
+                        "content-disposition",
+                        "attachment; filename=\"tune-history.csv\"",
+                    ),
+                ],
+                "date;titre\n2026-10-09;Écoute\n",
+            )
+                .into_response(),
+        }
+    }
+
+    async fn serveur_local() -> (u16, Journal) {
+        let journal: Journal = Arc::new(StdMutex::new(Vec::new()));
+        let app = Router::new().fallback(repondre).with_state(journal.clone());
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = ecoute.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(ecoute, app).await.unwrap();
+        });
+        (port, journal)
+    }
+
+    async fn reponse_a(port: u16, path: &str) -> serde_json::Value {
+        let c = RelayClient::new("srv".into(), "jeton".into(), "ws://x".into(), port);
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        *c.ws_tx.lock().await = Some(tx);
+        c.handle_message(
+            &serde_json::json!({
+                "type": "relay.request",
+                "id": "req-a",
+                "method": "GET",
+                "path": path,
+                "headers": {"x-tune-profile": "3"},
+            })
+            .to_string(),
+        )
+        .await;
+        let trame = tokio::time::timeout(PATIENCE, rx.recv())
+            .await
+            .expect("aucune reponse vers le pont")
+            .expect("canal ferme");
+        serde_json::from_str(&trame).unwrap()
+    }
+
+    /// LE défaut : une pochette passait par `text()`, qui remplace chaque
+    /// octet invalide en UTF-8 par U+FFFD. L'image arrivait corrompue.
+    #[tokio::test]
+    async fn une_pochette_binaire_arrive_intacte() {
+        let (port, _) = serveur_local().await;
+        let r = reponse_a(port, "/api/v1/library/artwork/a.jpg?size=300").await;
+        assert_eq!(r["type"], "relay.response");
+        assert_eq!(r["status"], 200);
+        assert_eq!(r["headers"]["content-type"], "image/jpeg");
+        assert_eq!(
+            r["body_base64"], "/9j/4A==",
+            "corps binaire non transmis en base64 : {r}"
+        );
+    }
+
+    /// Les validateurs de cache reviennent avec la pochette : sans eux, le
+    /// navigateur la redemande en entier à chaque écran.
+    #[tokio::test]
+    async fn les_entetes_de_cache_reviennent() {
+        let (port, _) = serveur_local().await;
+        let r = reponse_a(port, "/api/v1/library/artwork/a.jpg").await;
+        assert_eq!(r["headers"]["cache-control"], "public, max-age=86400");
+        assert_eq!(r["headers"]["etag"], "\"pochette-a\"");
+    }
+
+    /// Un export garde son nom de fichier, et un corps texte reste du texte
+    /// lisible par un pont plus ancien.
+    #[tokio::test]
+    async fn un_export_garde_son_nom_et_son_texte() {
+        let (port, _) = serveur_local().await;
+        let r = reponse_a(port, "/api/v1/history/export?limit=10000").await;
+        assert_eq!(
+            r["headers"]["content-disposition"],
+            "attachment; filename=\"tune-history.csv\""
+        );
+        assert_eq!(r["body"], "date;titre\n2026-10-09;Écoute\n");
+        assert!(r.get("body_base64").is_none());
+    }
+
+    /// La requête et le profil arrivent jusqu'à la route locale.
+    #[tokio::test]
+    async fn la_requete_et_le_profil_atteignent_la_route() {
+        let (port, journal) = serveur_local().await;
+        reponse_a(port, "/api/v1/library/artwork/a.jpg?size=300").await;
+        assert_eq!(
+            *journal.lock().unwrap(),
+            vec![(
+                "/api/v1/library/artwork/a.jpg?size=300".to_string(),
+                Some("3".to_string())
+            )]
+        );
     }
 }

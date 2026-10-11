@@ -355,6 +355,37 @@ impl Drop for SentinelleDuCorps {
     }
 }
 
+/// #6050 — une lecture depuis le DÉBUT d'une conversion dont le canal est FINI
+/// et dont le début a quitté la retenue.
+///
+/// Tidal AAC → WAV chunké sur un WiiM mini (`Lavf/58.76.100`, fil 2198) : la
+/// piste entière part dans une connexion, puis, en fin de piste, le renderer
+/// rouvre `bytes=0-` sur la piste EN COURS. Le début n'existe plus nulle part
+/// et le tuyau n'a plus rien : la réponse était un 200 portant l'en-tête WAV
+/// seul (44 octets), un fichier vide que le renderer redemandait toutes les
+/// 15 s — sans jamais passer à l'URL armée par `SetNextAVTransportURI`, ni
+/// laisser au poller l'arrêt qui déclenche son repli.
+///
+/// La fin n'est notée qu'une fois qu'une connexion a TIRÉ le dernier bloc du
+/// canal (`noter_fin_sous_verrou`) : on ne vide rien ici, une connexion qui
+/// rend encore la fin de piste garde ses octets. Rend `None` tant que le canal
+/// vit — la sonde de #5991 garde l'en-tête puis le direct.
+fn piste_finie_debut_perdu(session: &StreamSession, range_hdr: &str) -> Option<Response> {
+    let fin = session.fin_du_canal()?;
+    let (retenue_debut, retenue_fin) = session.etendue_retenue();
+    warn!(
+        stream_id = %session.id,
+        range = range_hdr,
+        retenue_debut,
+        retenue_fin,
+        fin,
+        "debut_de_piste_perdu_piste_finie — une lecture demande le DÉBUT d'une conversion \
+         déjà rendue en entier, dont le début a quitté la retenue : 404, pas un WAV vide \
+         qui ferait reboucler le renderer sur la piste en cours (#6050)"
+    );
+    Some(StatusCode::NOT_FOUND.into_response())
+}
+
 pub async fn handle_stream(
     Path(raw_id): Path<String>,
     State(sessions): State<SharedSessions>,
@@ -534,6 +565,9 @@ pub async fn handle_stream(
     if let (Some(n), Some(_), true) = (reprise_candidate, wav_length, retenue_possible) {
         let (retenue_debut, retenue_fin) = session.etendue_retenue();
         if n == 0 && n < retenue_fin && n < retenue_debut {
+            if let Some(reponse) = piste_finie_debut_perdu(&session, range_hdr) {
+                return reponse;
+            }
             warn!(
                 stream_id,
                 range = range_hdr,
@@ -612,6 +646,9 @@ pub async fn handle_stream(
                  après qu'une connexion précédente a tiré le tuyau ; servi à l'octet depuis 0"
             );
         } else {
+            if let Some(reponse) = piste_finie_debut_perdu(&session, range_hdr) {
+                return reponse;
+            }
             warn!(
                 stream_id,
                 range = range_hdr,
@@ -2517,6 +2554,7 @@ fn resumable_proxy_body(
     reresolve: Option<ReresolveFn>,
     compteur: std::sync::Arc<StreamSession>,
     bilan: BilanDeConnexion,
+    limite: Option<u64>,
 ) -> Body {
     let flux = async_stream::stream! {
         use futures_util::StreamExt;
@@ -2601,7 +2639,9 @@ fn resumable_proxy_body(
             }
         }
     };
-    corps_compte(flux, compteur)
+    // `limite` : la tranche d'un `Range: bytes=N-M` s'arrête à M — l'amont
+    // est lâché dès le dernier octet dû (sonde `bytes=0-1` d'AVPlayer).
+    corps_compte(borner_le_corps(flux, limite), compteur)
 }
 
 /// #5050 — la longueur TOTALE du flux amont, d'après la réponse du CDN.
@@ -2623,6 +2663,18 @@ fn longueur_totale_amont(
             .filter(|&n| n > 0),
         _ => None,
     }
+}
+
+/// Premier octet d'un `Content-Range: bytes a-b/total` amont : `a`.
+fn debut_de_tranche_amont(content_range: &str) -> Option<u64> {
+    content_range
+        .trim()
+        .strip_prefix("bytes ")?
+        .split('-')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// #5050 — faut-il écrire la ligne `proxy_get_amont` du `n`-ième `GET`
@@ -2737,9 +2789,25 @@ async fn proxy_stream(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ua| ua.to_ascii_lowercase().contains("lavf"));
     let resume_threshold = if is_lavf { RESUME_RANGE_THRESHOLD } else { 1 };
+    // Un suffixe `bytes=-n` se transmet au CDN comme `bytes=(total-n)-` quand
+    // une requête précédente de la session a appris la longueur ; sinon
+    // l'amont part de 0 et la tranche est atteinte par saut local.
+    let debut_du_suffixe = || {
+        let n = range_value
+            .as_deref()?
+            .strip_prefix("bytes=-")?
+            .split(',')
+            .next()?
+            .trim()
+            .parse::<u64>()
+            .ok()?;
+        let total = session.longueur_amont()?;
+        (n > 0).then(|| total.saturating_sub(n))
+    };
     let resume_start = range_value
         .as_deref()
         .and_then(parse_range_start)
+        .or_else(debut_du_suffixe)
         .filter(|&n| n >= resume_threshold);
 
     if let Some(start) = resume_start {
@@ -2839,6 +2907,106 @@ async fn proxy_stream(
         HeaderValue::from_static("Streaming"),
     );
 
+    // ── La plage EXACTE (écoute à distance iPhone, 10/10/2026) ──
+    //
+    // AVPlayer sonde avec `Range: bytes=0-1`. Le mandataire ne lisait que le
+    // DÉBUT de la plage : il répondait `206 bytes 0-41008206/41008207` et
+    // envoyait le fichier entier (1.0.0-rc3, zone « Ce téléphone » via le
+    // relais). AVPlayer rejette une réponse qui n'est pas la tranche demandée,
+    // et la zone restait muette. Le suffixe `bytes=-n` rendait un 200 depuis
+    // 0, et une plage hors fichier un 200 aussi.
+    //
+    // Dès que la longueur totale est connue (CDN qui dit `Content-Length` en
+    // 200 ou `Content-Range` en 206), la demande est lue par la même
+    // [`interpreter_range`] que `serve_file` : tranche bornée, ouverte ou
+    // suffixe → 206 aux bornes exactes ; hors fichier → 416 `bytes */total`.
+    // Ce que l'amont a commencé à rendre AVANT l'octet dû est sauté, ce qu'il
+    // rendrait APRÈS le dernier est coupé (l'amont est alors lâché).
+    // Longueur inconnue : rien ne change, les branches ci-dessous gardent
+    // leur contrat (un `Range` ignoré, RFC 9110 §14.2).
+    if !is_radio {
+        if upstream_resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            // Reprise transmise au CDN au-delà de la fin : il a dit 416, on le
+            // redit — avec la taille quand il l'a donnée.
+            let total = upstream_content_range
+                .as_deref()
+                .and_then(|cr| cr.rsplit('/').next())
+                .and_then(|t| t.trim().parse::<u64>().ok());
+            warn!(
+                stream_id = %session.id,
+                range = range_value.as_deref().unwrap_or("-"),
+                total = ?total,
+                "proxy_range_insatisfiable — le CDN a répondu 416, transmis tel quel"
+            );
+            let rep = match total {
+                Some(t) => reponse_416(t),
+                None => StatusCode::RANGE_NOT_SATISFIABLE.into_response(),
+            };
+            diag.journaliser(&session, StatusCode::RANGE_NOT_SATISFIABLE, rep.headers());
+            return rep;
+        }
+        let total_amont = longueur_totale_amont(
+            upstream_resp.status().as_u16(),
+            content_length,
+            upstream_content_range.as_deref(),
+        );
+        if let (Some(r), Some(total)) = (range_value.as_deref(), total_amont) {
+            match interpreter_range(r, total) {
+                DemandeDeRange::Insatisfiable => {
+                    warn!(
+                        stream_id = %session.id,
+                        range = r,
+                        total,
+                        "proxy_range_insatisfiable — 416, la plage ne désigne aucun octet du flux"
+                    );
+                    let rep = reponse_416(total);
+                    diag.journaliser(&session, StatusCode::RANGE_NOT_SATISFIABLE, rep.headers());
+                    return rep;
+                }
+                DemandeDeRange::Tranche { debut, fin } => {
+                    let amont_debut = match upstream_resp.status() {
+                        reqwest::StatusCode::OK => Some(0),
+                        reqwest::StatusCode::PARTIAL_CONTENT => upstream_content_range
+                            .as_deref()
+                            .and_then(debut_de_tranche_amont),
+                        _ => None,
+                    };
+                    if let Some(amont_debut) = amont_debut.filter(|&a| a <= debut) {
+                        let longueur = fin - debut + 1;
+                        headers.insert("Content-Length", HeaderValue::from(longueur));
+                        headers.insert(
+                            "Content-Range",
+                            HeaderValue::from_str(&format!("bytes {debut}-{fin}/{total}")).unwrap(),
+                        );
+                        info!(
+                            stream_id = %session.id,
+                            range = r,
+                            debut,
+                            fin,
+                            total,
+                            amont_debut,
+                            "proxy_206_tranche_exacte"
+                        );
+                        let body = resumable_proxy_body(
+                            client,
+                            upstream_url.to_string(),
+                            upstream_resp,
+                            amont_debut,
+                            debut - amont_debut,
+                            reresolve.clone(),
+                            session.clone(),
+                            BilanDeConnexion::mandataire(&session.id, req_headers),
+                            (fin + 1 < total).then_some(longueur),
+                        );
+                        diag.journaliser(&session, StatusCode::PARTIAL_CONTENT, &headers);
+                        return (StatusCode::PARTIAL_CONTENT, headers, body).into_response();
+                    }
+                }
+                DemandeDeRange::Totalite => {}
+            }
+        }
+    }
+
     // DLNA renderers (e.g. Eversolo DMP-A8 with Lavf) send Range: bytes=0-
     // and expect 206 Partial Content with Content-Range header.
     // Returning 200 OK causes them to abort after ~31 seconds.
@@ -2867,6 +3035,7 @@ async fn proxy_stream(
             reresolve.clone(),
             session.clone(),
             BilanDeConnexion::mandataire(&session.id, req_headers),
+            None,
         );
         diag.journaliser(&session, StatusCode::PARTIAL_CONTENT, &headers);
         return (StatusCode::PARTIAL_CONTENT, headers, body).into_response();
@@ -2911,6 +3080,7 @@ async fn proxy_stream(
             reresolve.clone(),
             session.clone(),
             BilanDeConnexion::mandataire(&session.id, req_headers),
+            None,
         );
         diag.journaliser(&session, StatusCode::PARTIAL_CONTENT, &headers);
         return (StatusCode::PARTIAL_CONTENT, headers, body).into_response();
@@ -2963,6 +3133,7 @@ async fn proxy_stream(
             reresolve.clone(),
             session.clone(),
             BilanDeConnexion::mandataire(&session.id, req_headers),
+            None,
         );
         diag.journaliser(&session, StatusCode::PARTIAL_CONTENT, &headers);
         return (StatusCode::PARTIAL_CONTENT, headers, body).into_response();
@@ -2981,6 +3152,7 @@ async fn proxy_stream(
         reresolve.clone(),
         session.clone(),
         BilanDeConnexion::mandataire(&session.id, req_headers),
+        None,
     );
     diag.journaliser(&session, StatusCode::OK, &headers);
     (StatusCode::OK, headers, body).into_response()
@@ -5177,6 +5349,9 @@ mod stream_url_distant_tests {
 }
 
 #[cfg(test)]
+mod fin_de_piste_relue_6050;
+
+#[cfg(test)]
 mod long_wav_4016;
 
 #[cfg(test)]
@@ -5184,6 +5359,9 @@ mod reprise_navigateur_5426;
 
 #[cfg(test)]
 mod relais_wav24_b209bf;
+
+#[cfg(test)]
+mod plages_avplayer_b209;
 
 /// #4645 — la mesure du terrain perdu pendant le service d'un fichier.
 ///
@@ -5793,7 +5971,11 @@ mod reprise_714_sink_strict_de_bout_en_bout {
         let base = format!("http://127.0.0.1:{port_r}");
         let sortie = DlnaOutput::new(
             "Parents".into(),
-            "uuid:28630ca6-cd4f-4a15-80ae-f170dc890b20".into(),
+            // Un UDN PAR TEST : le profil appris (`dlna_repli_set_uri::PROFILS`)
+            // vit pour le processus, clé (UDN, MIME). Partagé, l'essai
+            // `audio/x-flac` appris par le test de la reprise passait en tête
+            // du témoin selon l'ordre d'exécution.
+            format!("uuid:28630ca6-cd4f-4a15-80ae-{id}"),
             "127.0.0.1".into(),
             format!("{base}/AVTransport/control"),
             format!("{base}/RenderingControl/control"),

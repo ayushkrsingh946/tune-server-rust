@@ -40,14 +40,21 @@ use super::engine::{Engine, PostgresDialect, SqlDialect, SqliteDialect};
 /// Les champs que compare le TEXTE LIBRE d'Oxygen (#5192), dans l'ordre du
 /// prédicat de [`condition_texte_libre`] — et, mot pour mot, ceux que le
 /// client web compare dans sa fenêtre chargée (`OxygenView.svelte`) : le
-/// titre, l'artiste, l'album, le label, et les termes de chemin
+/// titre, l'artiste, l'album, le label, les termes de chemin
 /// (`path_terms`, que `/library/tracks` rend calculés, voir
-/// [`crate::library::full_text_search::termes_de_chemin`]).
+/// [`crate::library::full_text_search::termes_de_chemin`]) et le compositeur
+/// de la piste (fil 1684 : « Ravel » trouve le Boléro joué par un orchestre).
 ///
 /// Avant #5192, le serveur ne comparait que le titre et l'artiste, le
 /// navigateur les quatre premiers : les deux ne rendaient pas la même liste.
-pub const CHAMPS_DU_TEXTE_LIBRE: [&str; 5] =
-    ["title", "artist_name", "album_title", "label", "path_terms"];
+pub const CHAMPS_DU_TEXTE_LIBRE: [&str; 6] = [
+    "title",
+    "artist_name",
+    "album_title",
+    "label",
+    "path_terms",
+    "composer",
+];
 
 /// Le prédicat du texte libre d'Oxygen, pour la piste d'alias `t` : sous-
 /// chaîne, insensible à la casse et aux accents, de l'un des
@@ -77,6 +84,7 @@ pub fn condition_texte_libre(
     let album = like(ph);
     let label = like(ph);
     let chemin = like(ph);
+    let compositeur = like(ph);
     // Jamais l'expression pure ici : ~60 µs par piste, et ce prédicat
     // parcourt la bibliothèque entière. SQLite : la fonction Rust enregistrée.
     let termes = match ph.engine() {
@@ -91,7 +99,8 @@ pub fn condition_texte_libre(
          OR t.artist_id IN (SELECT id FROM artists WHERE LOWER(unaccent(name)) {artiste}) \
          OR t.album_id IN (SELECT id FROM albums WHERE LOWER(unaccent(title)) {album}) \
          OR LOWER(unaccent(t.label)) {label} \
-         OR LOWER(unaccent({termes})) {chemin})"
+         OR LOWER(unaccent({termes})) {chemin} \
+         OR LOWER(unaccent(t.composer)) {compositeur})"
     );
     let valeurs = (0..CHAMPS_DU_TEXTE_LIBRE.len())
         .map(|_| super::backend::SqlValue::Text(motif.clone()))
@@ -691,6 +700,87 @@ pub fn copie_de_moindre_qualite_exclue() -> String {
     )
 }
 
+/// Le SOCLE de la vue des pistes — alias `t` : les trois prédicats que
+/// `GET /library/tracks` pose TOUJOURS, hors de toute facette (#5977).
+///
+/// - albums masqués ([`hidden_tracks_excluded`], #1391) ;
+/// - pistes d'un album distant doublé par un local
+///   ([`pistes_album_distant_double_exclu`], #4146) ;
+/// - copie de moindre qualité ([`copie_de_moindre_qualite_exclue`], #4101).
+///
+/// Une SEULE définition pour la liste (`TrackRepo::conditions_du_filtre`) et
+/// pour le rail (`routes/library/facets.rs`, `build_conditions`, qui sert aussi
+/// `albums-detailed`, la facette Dossiers et les collections). Les deux
+/// derniers prédicats avaient été ajoutés à la liste seule (14/09 et 17/09) :
+/// chez Dominique Pamingle (fil 2180), chaque effectif du rail était le DOUBLE
+/// du total du bandeau. Un prédicat ajouté ici l'est aux deux à la fois.
+pub fn socle_de_la_vue_des_pistes(engine: Engine) -> [String; 3] {
+    [
+        hidden_tracks_excluded().to_string(),
+        pistes_album_distant_double_exclu(engine),
+        copie_de_moindre_qualite_exclue(),
+    ]
+}
+
+/// Les identifiants des pistes que les deux replis COÛTEUX du socle écartent
+/// — double distant (#4146) et copie de moindre qualité (#4101) —, alias `t`,
+/// bâtis sur les MÊMES fragments que [`socle_de_la_vue_des_pistes`] : une
+/// piste est dans ce jeu si et seulement si la liste la replie pour l'une de
+/// ces deux raisons. Les deux prédicats rendent vrai ou faux, jamais NULL :
+/// la négation est exacte.
+///
+/// #5977 — le rail évalue une vingtaine de requêtes sur le même socle.
+/// Chacune rejouait les deux sous-requêtes corrélées sur toute la
+/// bibliothèque : mesuré sur 104 317 pistes, le rail passait de 0,8 à 1,8 s.
+/// Résolu UNE fois par requête HTTP, le socle se pose ensuite en
+/// `t.id NOT IN (…)`.
+///
+/// Deux branches, chacune EXACTE et bornée à ses candidates :
+///
+/// - double distant : `NOT pistes_album_distant_double_exclu(t)` vaut
+///   « l'album de `t` est un album distant doublé par un local » — le même
+///   [`double_par_un_local`], évalué sur les albums (quelques milliers) et
+///   non sur chaque piste ;
+/// - copie de moindre qualité : une piste écartée a, dans son album, une
+///   sœur de même clé (disque, numéro, titre) ; seuls les albums où une clé
+///   se répète sont donc candidats (lecture de `idx_tracks_cle_de_copie`),
+///   et [`copie_de_moindre_qualite_exclue`] tranche parmi leurs pistes.
+pub fn sql_pistes_ecartees_par_le_socle(engine: Engine) -> String {
+    sql_pistes_ecartees(engine, None)
+}
+
+/// [`sql_pistes_ecartees_par_le_socle`], limité aux albums `albums` (liste
+/// SQL d'entiers, `12,57,…`) — #5993 : la facette Dossiers n'a besoin que
+/// des pistes repliées de SON dossier. La restriction porte sur l'ALBUM, pas
+/// sur le chemin : une copie se départage contre toutes les pistes de son
+/// album, même rangées ailleurs, exactement comme dans la liste.
+pub fn sql_pistes_ecartees_parmi_les_albums(engine: Engine, albums: &str) -> String {
+    sql_pistes_ecartees(engine, Some(albums))
+}
+
+fn sql_pistes_ecartees(engine: Engine, albums: Option<&str>) -> String {
+    let (parmi_dist, parmi_pistes) = match albums {
+        Some(a) => (
+            format!(" AND dist.id IN ({a})"),
+            format!(" AND album_id IN ({a})"),
+        ),
+        None => (String::new(), String::new()),
+    };
+    format!(
+        "SELECT t.id FROM tracks t WHERE t.album_id IN \
+           (SELECT dist.id FROM albums dist WHERE {double}{parmi_dist}) \
+         UNION \
+         SELECT t.id FROM tracks t WHERE t.album_id IN \
+           (SELECT album_id FROM tracks WHERE album_id IS NOT NULL{parmi_pistes} \
+            GROUP BY album_id, COALESCE(disc_number, 1), COALESCE(track_number, 0), \
+                     LOWER(TRIM(COALESCE(title, ''))) \
+            HAVING COUNT(*) > 1) \
+         AND NOT ({copie})",
+        double = double_par_un_local(engine, "dist"),
+        copie = copie_de_moindre_qualite_exclue(),
+    )
+}
+
 /// Prédicat SQL d'une étiquette manquante. Liste FERMÉE : toute autre valeur
 /// rend `None` et ne filtre rien, plutôt que d'injecter quoi que ce soit.
 ///
@@ -1177,5 +1267,50 @@ mod tests {
         assert_eq!(normalize(&v), vec!["flac".to_string(), "aiff".to_string()]);
         assert!(normalize(&[]).is_empty());
         assert_eq!(normalize_ints(&[44100, 96000, 44100]), vec![44100, 96000]);
+    }
+    /// Fil 1684 — le prédicat du texte libre compare le compositeur, en
+    /// SIXIÈME position, avec le même repli de casse et d'accents et le même
+    /// échappement que les cinq autres ; et il demande exactement autant de
+    /// marqueurs qu'il rend de valeurs, sur les DEUX moteurs (piège n°2).
+    #[test]
+    fn le_texte_libre_compare_le_compositeur_sur_les_deux_moteurs() {
+        assert_eq!(CHAMPS_DU_TEXTE_LIBRE.len(), 6);
+        assert_eq!(CHAMPS_DU_TEXTE_LIBRE[5], "composer");
+        let esc = super::super::track_repo::like_escape_clause();
+        for engine in [Engine::Sqlite, Engine::Postgres] {
+            let mut ph = Placeholders::resuming_at(engine, 3);
+            let (sql, valeurs) = condition_texte_libre(&mut ph, "Ravél 50%");
+            assert_eq!(valeurs.len(), CHAMPS_DU_TEXTE_LIBRE.len(), "{engine:?}");
+            assert_eq!(
+                ph.next_index(),
+                3 + CHAMPS_DU_TEXTE_LIBRE.len(),
+                "{engine:?} : un marqueur par champ"
+            );
+            assert_eq!(
+                sql.matches("LIKE LOWER(unaccent(").count(),
+                CHAMPS_DU_TEXTE_LIBRE.len(),
+                "{engine:?} : {sql}"
+            );
+            let sixieme = match engine {
+                Engine::Sqlite => "?",
+                Engine::Postgres => "$8",
+            };
+            assert!(
+                sql.contains(&format!(
+                    "OR LOWER(unaccent(t.composer)) LIKE LOWER(unaccent({sixieme})){esc})"
+                )),
+                "{engine:?} : le compositeur, sixième et dernier : {sql}"
+            );
+            let motif = format!(
+                "%{}%",
+                super::super::track_repo::echapper_jokers_like("Ravél 50%")
+            );
+            for v in &valeurs {
+                assert!(
+                    matches!(v, super::super::backend::SqlValue::Text(t) if *t == motif),
+                    "{engine:?} : même motif échappé pour chaque champ : {v:?}"
+                );
+            }
+        }
     }
 }
