@@ -520,4 +520,49 @@ mod tests {
             .unwrap();
         assert_eq!(permis.status(), StatusCode::OK);
     }
+
+    /// L'en-tete C (`include/tuneserver.h`, lu par l'app iOS) doit declarer
+    /// exactement les fonctions exportees ici : une entree ajoutee d'un cote
+    /// et oubliee de l'autre se verrait seulement a l'edition de liens Xcode.
+    #[test]
+    fn l_entete_c_suit_les_exports() {
+        let source = include_str!("lib.rs");
+        let entete = include_str!("../include/tuneserver.h");
+        let mut exports: Vec<&str> = Vec::new();
+        let mut apres_no_mangle = false;
+        for ligne in source.lines() {
+            let l = ligne.trim();
+            if l == "#[unsafe(no_mangle)]" {
+                apres_no_mangle = true;
+            } else if apres_no_mangle && l.starts_with("pub extern \"C\" fn ") {
+                let nom = l["pub extern \"C\" fn ".len()..]
+                    .split('(')
+                    .next()
+                    .unwrap_or("");
+                exports.push(nom);
+                apres_no_mangle = false;
+            }
+        }
+        assert!(exports.len() >= 5, "exports trouves : {exports:?}");
+        for nom in &exports {
+            assert!(
+                entete.contains(&format!("{nom}(")),
+                "{nom} absent de tuneserver.h"
+            );
+        }
+        let declares = entete
+            .lines()
+            .filter(|l| {
+                l.contains("tune_")
+                    && l.contains('(')
+                    && !l.trim_start().starts_with('*')
+                    && !l.trim_start().starts_with("/*")
+            })
+            .count();
+        assert_eq!(
+            declares,
+            exports.len(),
+            "tuneserver.h declare une fonction que lib.rs n'exporte pas"
+        );
+    }
 }
