@@ -331,10 +331,13 @@ async fn the_enabled_setting_keeps_a_plugin_out() {
         .iter()
         .map(|plugin| plugin.name.as_str())
         .collect();
+    // L'Assistant IA (chantier assistant-ia) est, comme l'égaliseur gratuit,
+    // compilé et chargé par défaut : rien ne part tant qu'aucune clé n'est
+    // posée.
     assert_eq!(
         names,
-        vec!["equalizer"],
-        "FREE EQ loads by default; the explicitly disabled injected plugin must stay absent"
+        vec!["equalizer", "assistant-ia"],
+        "FREE EQ and the AI assistant load by default; the explicitly disabled injected plugin must stay absent"
     );
 }
 
@@ -353,8 +356,8 @@ async fn an_injected_plugin_loads_and_mounts_its_router() {
     mounts.sort_unstable();
     assert_eq!(
         mounts,
-        vec!["equalizer", "injected"],
-        "FREE EQ and injected plugin both contribute their own router"
+        vec!["assistant-ia", "equalizer", "injected"],
+        "FREE EQ, the AI assistant and the injected plugin each contribute their own router"
     );
 
     let mut names: Vec<&str> = state
@@ -365,7 +368,7 @@ async fn an_injected_plugin_loads_and_mounts_its_router() {
         .map(|p| p.name.as_str())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["equalizer", "injected"]);
+    assert_eq!(names, vec!["assistant-ia", "equalizer", "injected"]);
 
     // End to end: the router it registered actually serves, under its own name.
     let app = tune_server::routes::router_with_plugins(state.clone(), routers);

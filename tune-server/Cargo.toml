@@ -101,6 +101,11 @@ tune-circle = { path = "../plugins/tune-circle", optional = true }
 tune-entree-audio = { path = "../plugins/tune-entree-audio", optional = true }
 tune-concerts = { path = "../plugins/tune-concerts", optional = true }
 tune-pont-roon = { path = "../plugins/tune-pont-roon", optional = true }
+# Assistant IA, étape 1 (chantier assistant-ia) : NON optionnel, sans feature.
+# Gratuit et pour tout le monde, il ne tire aucune dépendance que `tune-core`
+# ne porte déjà ; une feature de plus serait une ligne de plus à tenir dans
+# chaque build livré (`features_livrees_3355.rs`) pour ne rien gagner.
+tune-assistant-ia = { path = "../plugins/tune-assistant-ia" }
 tokio = { workspace = true }
 rayon = { workspace = true }
 axum = { workspace = true }

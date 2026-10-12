@@ -274,7 +274,7 @@ jobs:
       # `-p tune-server`. L'inserer au milieu de ce bloc fait rougir cette
       # garde-la — mesure sur Shrek avant de la deplacer ici.
       # plugin-catalog: {"features":"fast","base":["oaat","cloud-relay"],"packages":"workspace"}
-      - run: cargo test --no-fail-fast -p tune-core -p tune-http-types -p tune-smart-http -p tune-stream-http -p tune-streaming-http -p tune-server -p tune-output-api -p tune-cli -p tune-ffi -p tune-bridge -p tune-plugin-runtime-wasm -p tune-dj -p tune-karaoke -p tune-bandcamp -p tune-concerts -p tune-pont-roon -p tune-cd -p tune-entree-audio -p tune-playlists-converter -p tune-circle --no-default-features --features oaat,cloud-relay,bandcamp,cd,circle,entree-audio
+      - run: cargo test --no-fail-fast -p tune-core -p tune-http-types -p tune-smart-http -p tune-stream-http -p tune-streaming-http -p tune-server -p tune-output-api -p tune-cli -p tune-ffi -p tune-bridge -p tune-plugin-runtime-wasm -p tune-dj -p tune-karaoke -p tune-bandcamp -p tune-concerts -p tune-pont-roon -p tune-cd -p tune-entree-audio -p tune-playlists-converter -p tune-circle -p tune-assistant-ia --no-default-features --features oaat,cloud-relay,bandcamp,cd,circle,entree-audio
 
   # La CI validait `--features oaat` alors que les binaires publies embarquent
   # six fonctionnalites. Neuf tests de greffons echouaient donc en silence
@@ -784,7 +784,7 @@ jobs:
       # les tests de tune-server. Garde : toute_feature_declaree_est_activee_par_une_porte_clippy.
       # #5512 : `isolement-disque-de-test` (tune-core), même motif que `journal-de-test`.
       # plugin-catalog: {"features":"all","base":["oaat","cloud-relay","local-audio","postgres","audio-embedding","plugins-wasm","dst","journal-de-test","isolement-disque-de-test"],"packages":"workspace"}
-      - run: cargo clippy -p tune-core -p tune-http-types -p tune-smart-http -p tune-stream-http -p tune-streaming-http -p tune-server -p tune-output-api -p tune-cli -p tune-ffi -p tune-bridge -p tune-plugin-runtime-wasm -p tune-dj -p tune-karaoke -p tune-bandcamp -p tune-concerts -p tune-pont-roon -p tune-cd -p tune-entree-audio -p tune-playlists-converter -p tune-circle --all-targets --no-default-features --features oaat,cloud-relay,local-audio,postgres,audio-embedding,plugins-wasm,dst,journal-de-test,isolement-disque-de-test,dj,karaoke,bandcamp,concerts,pont-roon,cd,circle,entree-audio -- -D clippy::correctness
+      - run: cargo clippy -p tune-core -p tune-http-types -p tune-smart-http -p tune-stream-http -p tune-streaming-http -p tune-server -p tune-output-api -p tune-cli -p tune-ffi -p tune-bridge -p tune-plugin-runtime-wasm -p tune-dj -p tune-karaoke -p tune-bandcamp -p tune-concerts -p tune-pont-roon -p tune-cd -p tune-entree-audio -p tune-playlists-converter -p tune-circle -p tune-assistant-ia --all-targets --no-default-features --features oaat,cloud-relay,local-audio,postgres,audio-embedding,plugins-wasm,dst,journal-de-test,isolement-disque-de-test,dj,karaoke,bandcamp,concerts,pont-roon,cd,circle,entree-audio -- -D clippy::correctness
 
   audit:
     name: Security Audit
