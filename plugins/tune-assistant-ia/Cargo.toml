@@ -13,8 +13,9 @@ license.workspace = true
 # fournisseur (Anthropic, point d'accès compatible OpenAI, Ollama). Rien ne
 # passe par mozaiklabs.fr.
 #
-# Pas de feature cargo : le greffon est compilé dans tous les binaires, comme
-# le cœur. Il ne tire aucune dépendance que `tune-core` ne porte déjà.
+# Feature `assistant-ia` de tune-server, dans son `default`, inscrite à
+# `sdk/plugins.json`. Il ne tire aucune dépendance que `tune-core` ne porte
+# déjà.
 
 [dependencies]
 tune-core = { path = "../../tune-core", default-features = false, features = ["plugin-http"] }

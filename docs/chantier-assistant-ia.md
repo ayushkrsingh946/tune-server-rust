@@ -29,12 +29,13 @@ Le système de greffons **WASM** a été écarté : il n'offre ni l'accès à
 fournisseur arbitraire n'y est pas une permission prévue. Le cœur aussi :
 rien ici n'a besoin d'y vivre.
 
-Le greffon n'est **pas derrière une feature cargo** : il est compilé dans
-tous les binaires (dépendance non optionnelle de `tune-server`). Une feature
-de plus aurait été une ligne de plus à tenir dans chaque build livré
-(`features_livrees_3355.rs`) pour une fonction que tout le monde reçoit. Il est
-inscrit au workspace et aux portes `cargo test` / `cargo clippy` de `ci.yml`
-(gardes `workflows_bornes.rs`).
+Comme tout greffon in-tree, il porte une feature, `assistant-ia`, **dans le
+`default`** de `tune-server`, et il est inscrit à l'inventaire unique
+`sdk/plugins.json` (`fast_test: true`) : les lignes de build, de test et de
+clippy de `ci.yml`, `release.yml` et `docker.yml` en sont régénérées par
+`python scripts/plugin-catalog.py --write`, donc il est livré dans tous les
+binaires publiés. Il est chargé par défaut (`default_enabled`) : rien ne part
+tant qu'aucun fournisseur n'est réglé.
 
 ## 2. Fournisseurs : une interface, une implémentation par famille
 

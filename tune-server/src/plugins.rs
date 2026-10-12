@@ -214,6 +214,7 @@ async fn register_builtin_plugins(loader: &PluginLoader, state: &AppState) {
     // clé d'API de l'utilisateur (hors de la base elle-même) ; et les critères
     // du moteur des règles intelligentes, pour que le schéma imposé au modèle
     // soit celui du moteur et rien d'autre.
+    #[cfg(feature = "assistant-ia")]
     loader
         .register(Box::new(tune_assistant_ia::AssistantIaPlugin::new(
             tune_assistant_ia::HostServices {
@@ -239,6 +240,7 @@ async fn register_builtin_plugins(loader: &PluginLoader, state: &AppState) {
         .await;
 }
 
+#[cfg(feature = "assistant-ia")]
 /// Le dossier de la base retenue au démarrage (Docker : `/data`), sinon celui
 /// de `TUNE_DB_PATH`, sinon le dossier courant — là où `tune.db` se pose.
 fn dossier_de_la_base() -> std::path::PathBuf {
@@ -253,6 +255,7 @@ fn dossier_de_la_base() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
+#[cfg(feature = "assistant-ia")]
 /// Les critères du moteur des règles intelligentes, dans la forme du greffon.
 fn criteres_du_moteur() -> Vec<tune_assistant_ia::CritereMoteur> {
     tune_smart_http::criteres::criteres_exposes()
