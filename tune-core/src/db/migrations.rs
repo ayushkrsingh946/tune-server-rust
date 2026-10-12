@@ -2453,6 +2453,28 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "tracks_rating",
         up: "",
     },
+    // Chantier « artistes multiples » (docs/chantier-artistes-multiples.md) :
+    // la liaison piste ↔ artistes, À CÔTÉ de `tracks.artist_id` qui reste
+    // l'artiste principal. Le scan la remplit quand il découpe un crédit
+    // ARTIST (« The Beatles & Genesis ») ; une piste à un seul artiste n'y a
+    // aucune ligne. Jumelle PG : 089.
+    //
+    // ⚠ Numéro pris sur `batch/bugs-rc5-20261012` le 12/10 (dernière : 124).
+    // La branche `chantier/artistes-multiples` le gardera jusqu'à sa fusion :
+    // le revoir si une autre migration entre avant.
+    Migration {
+        version: 125,
+        name: "track_artists",
+        up: "
+CREATE TABLE IF NOT EXISTS track_artists (
+    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    rang INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (track_id, artist_id)
+);
+CREATE INDEX IF NOT EXISTS idx_track_artists_artist ON track_artists(artist_id);
+",
+    },
 ];
 
 /// SQL de la migration 121 (#2713) — voir son entrée dans `MIGRATIONS`. Le
@@ -5051,6 +5073,13 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         88,
         "tracks_rating",
         include_str!("../../migrations/postgres/088_tracks_rating.sql"),
+    ),
+    // Jumelle de la SQLite 125 (chantier artistes multiples) : la liaison
+    // piste ↔ artistes `track_artists`.
+    (
+        89,
+        "track_artists",
+        include_str!("../../migrations/postgres/089_track_artists.sql"),
     ),
 ];
 
@@ -8243,7 +8272,9 @@ mod tests {
         // Pose `queue_items.artist_ref`, que l'écriture de la file NOMME.
         // 88 : `tracks_rating` (#6123), jumelle de la SQLite 124. Pose
         // `tracks.rating`, que l'INSERT et l'UPDATE des pistes NOMMENT.
-        assert_eq!(pg_latest_version(), 88, "latest PG migration must be 88");
+        // 89 : `track_artists` (chantier artistes multiples), jumelle de la
+        // SQLite 125.
+        assert_eq!(pg_latest_version(), 89, "latest PG migration must be 89");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),

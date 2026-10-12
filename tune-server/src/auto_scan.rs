@@ -817,6 +817,9 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
                 let batch_inserted = track_repo.create_batch(&to_insert).unwrap_or(0) as u64;
                 let batch_updated = track_repo.update_batch(&to_update).unwrap_or(0) as u64;
                 exemplaires_du_lot.ecrire(&*db, &existing_copies, &to_insert);
+                // Chantier artistes multiples : la liaison piste ↔ artistes des
+                // crédits découpés, une fois les pistes écrites.
+                importer.ecrire_les_artistes_de_piste(&*db);
                 // La pochette PROPRE d'une piste se pose à part : `update_batch`
                 // n'écrit pas `cover_path`, faute de quoi une piste relue
                 // recopierait dans sa ligne la pochette de son ALBUM (la lecture

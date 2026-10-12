@@ -224,6 +224,10 @@ const MIGRATION_TABLES: &[&str] = &[
 /// donc pas encore au moment de la premiere passe (#5389). Les colonnes sont
 /// alors deja typees (BIGINT, BYTEA…) : `column_casts` lit ces types.
 const MIGRATION_TABLES_APRES_SCRIPTS: &[&str] = &[
+    // Liaison piste <-> artistes (chantier artistes multiples, script PG
+    // 089) : recalculable par un scan complet, mais copiee pour ne pas
+    // perdre les artistes secondaires a la bascule.
+    "track_artists",
     // Exemplaires d'une meme piste et repertoire prefere par album (#5034,
     // script PG 073) : le choix de l'utilisateur etait perdu a la bascule.
     "track_copies",
@@ -1716,6 +1720,9 @@ fn conflict_clause(table: &str) -> &'static str {
         "album_ratings" => "ON CONFLICT (album_id, profile_id) DO NOTHING",
         "offline_cache" => "ON CONFLICT (source, source_id) DO NOTHING",
         "track_source_links" => "ON CONFLICT (track_id, service) DO NOTHING",
+        // Pas de colonne `id` : la clef primaire est la paire (chantier
+        // artistes multiples, script PG 089).
+        "track_artists" => "ON CONFLICT (track_id, artist_id) DO NOTHING",
         // Pas de colonne `id` non plus : la clef primaire, lue dans les
         // migrations SQLite et PostgreSQL. Sans ces lignes, la clause par
         // defaut ci-dessous faisait echouer leur copie (« column "id" does not
