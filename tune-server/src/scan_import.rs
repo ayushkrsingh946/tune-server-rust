@@ -2763,7 +2763,7 @@ mod tests {
     fn le_scan_relie_la_piste_a_tous_les_artistes_du_credit() {
         use tune_core::db::track_artist_repo::artistes_de_la_piste;
         let tmp = tempfile::tempdir().unwrap();
-        let db = SqliteDb::open_in_memory().unwrap();
+        let db = tune_core::db::sqlite::SqliteDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
         tune_core::db::migrations::run_migrations(&db).unwrap();
         let backend: Arc<dyn tune_core::db::backend::DbBackend> = Arc::new(db);
