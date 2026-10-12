@@ -8,15 +8,54 @@
 //!    franchir ensemble un plafond que chacun aurait vu ouvert ;
 //! 3. l'appel, puis le comptage de SES jetons, au tarif de la table.
 
+use std::sync::{Arc, OnceLock};
+
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tracing::info;
+use tune_core::db::backend::DbBackend;
 
 use crate::Etat;
-use crate::cache;
+use crate::cache::{self, Cache};
+use crate::coffre::Coffre;
 use crate::couts;
-use crate::fournisseur::{Demande, ErreurFournisseur};
+use crate::fournisseur::{Demande, ErreurFournisseur, Fabrique};
 use crate::reglages::{self, EtatCle, Reglages};
+
+/// LE verrou de la consommation, unique pour tout le processus.
+///
+/// Étape 2 : le greffon n'est plus seul à dépenser — l'ancien `/ai/query` et
+/// la traduction des ambiances passent par [`crate::passerelle::Passerelle`],
+/// que l'hôte construit de son côté. Deux verrous distincts laisseraient deux
+/// appels franchir ensemble un plafond que chacun aurait vu ouvert.
+pub fn verrou_de_consommation() -> Arc<tokio::sync::Mutex<()>> {
+    static VERROU: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    VERROU
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// Ce dont un appel a besoin. Le greffon passe son [`Etat`] ; la passerelle
+/// de l'hôte, la même base, le même coffre, le même verrou — sans cache.
+pub struct Moyens<'a> {
+    pub backend: &'a Arc<dyn DbBackend>,
+    pub coffre: &'a Coffre,
+    pub fabrique: &'a Fabrique,
+    pub verrou: &'a tokio::sync::Mutex<()>,
+    pub cache: Option<&'a Cache>,
+}
+
+impl<'a> Moyens<'a> {
+    pub fn de(etat: &'a Etat) -> Self {
+        Self {
+            backend: &etat.backend,
+            coffre: &etat.coffre,
+            fabrique: &etat.fabrique,
+            verrou: &etat.verrou_conso,
+            cache: Some(&etat.cache),
+        }
+    }
+}
 
 /// Version des consignes : la changer invalide le cache.
 pub const VERSION_CONSIGNES: &str = "v1";
@@ -94,23 +133,51 @@ pub async fn appeler(
     max_jetons: u32,
     entree_cache: Option<&str>,
 ) -> Result<Resultat, ErreurAppel> {
-    let r = Reglages::charger(&etat.backend);
+    appeler_avec(
+        &Moyens::de(etat),
+        usage,
+        classique,
+        systeme,
+        message,
+        max_jetons,
+        entree_cache,
+        true,
+    )
+    .await
+}
+
+/// [`appeler`], avec des moyens explicites. Sans cache (`m.cache = None`),
+/// `entree_cache` est ignorée. `json` : demander au fournisseur une réponse
+/// JSON quand il sait la garantir (faux pour une traduction en texte brut).
+#[allow(clippy::too_many_arguments)]
+pub async fn appeler_avec(
+    m: &Moyens<'_>,
+    usage: &str,
+    classique: bool,
+    systeme: &str,
+    message: &str,
+    max_jetons: u32,
+    entree_cache: Option<&str>,
+    json: bool,
+) -> Result<Resultat, ErreurAppel> {
+    let r = Reglages::charger(m.backend);
     let famille = r.famille.ok_or(ErreurAppel::NonConfigure)?;
     let modele = r.modele_effectif(classique);
     if modele.is_empty() {
         return Err(ErreurAppel::NonConfigure);
     }
-    let cle_cache =
-        entree_cache.map(|e| cache::cle(&[VERSION_CONSIGNES, usage, famille.nom(), &modele, e]));
+    let cle_cache = entree_cache
+        .filter(|_| m.cache.is_some())
+        .map(|e| cache::cle(&[VERSION_CONSIGNES, usage, famille.nom(), &modele, e]));
 
     // 1. Le cache.
-    if let Some(k) = &cle_cache
-        && let Some(texte) = etat.cache.lire(k)
+    if let (Some(k), Some(cache)) = (&cle_cache, m.cache)
+        && let Some(texte) = cache.lire(k)
     {
-        let _verrou = etat.verrou_conso.lock().await;
-        let mut c = reglages::charger_consommation(&etat.backend);
+        let _verrou = m.verrou.lock().await;
+        let mut c = reglages::charger_consommation(m.backend);
         c.depuis_cache += 1;
-        let _ = reglages::ranger_consommation(&etat.backend, &c);
+        let _ = reglages::ranger_consommation(m.backend, &c);
         info!(usage, "assistant_ia_reponse_du_cache");
         return Ok(Resultat {
             texte,
@@ -120,59 +187,97 @@ pub async fn appeler(
     }
 
     // 2. La clé et le tarif.
-    let cle = match reglages::cle_en_clair(&etat.backend, &etat.coffre) {
-        EtatCle::Ouverte(k) => Some(k),
-        EtatCle::Illisible => return Err(ErreurAppel::CleIllisible),
-        EtatCle::Absente if famille.exige_une_cle() => return Err(ErreurAppel::NonConfigure),
-        EtatCle::Absente => None,
-    };
-    let tarif = r.tarif(&modele).ok_or(ErreurAppel::TarifInconnu)?;
-    let acces = reglages::acces(&r, cle).ok_or(ErreurAppel::NonConfigure)?;
+    let (acces, tarif) = acces_et_tarif(m.backend, m.coffre, &r, &modele)?;
 
     // 3. Le plafond, sous verrou jusqu'au comptage.
-    let _verrou = etat.verrou_conso.lock().await;
-    let mut c = reglages::charger_consommation(&etat.backend);
+    let _verrou = m.verrou.lock().await;
+    let mut c = reglages::charger_consommation(m.backend);
     if c.micro_eur >= r.plafond_micro_eur {
         info!(usage, "assistant_ia_plafond_atteint");
         return Err(ErreurAppel::PlafondAtteint);
     }
 
-    let fournisseur = (etat.fabrique)(acces);
+    let fournisseur = (m.fabrique)(acces);
     let demande = Demande {
         modele: modele.clone(),
         systeme: systeme.to_string(),
         message: message.to_string(),
         max_jetons,
-        json: true,
+        json,
     };
     let rep = fournisseur
         .completer(&demande)
         .await
         .map_err(ErreurAppel::Fournisseur)?;
 
-    let cout = couts::cout_micro_eur(tarif, rep.jetons_entree, rep.jetons_sortie, r.taux_usd_eur);
-    c.appels += 1;
-    c.jetons_entree += rep.jetons_entree;
-    c.jetons_sortie += rep.jetons_sortie;
-    c.micro_eur += cout;
-    let _ = reglages::ranger_consommation(&etat.backend, &c);
-    info!(
+    let cout = compter(
+        m.backend,
+        &mut c,
+        &r,
+        tarif,
         usage,
-        fournisseur = famille.nom(),
-        modele = %modele,
-        jetons_entree = rep.jetons_entree,
-        jetons_sortie = rep.jetons_sortie,
-        cout_micro_eur = cout,
-        "assistant_ia_appel"
+        &modele,
+        rep.jetons_entree,
+        rep.jetons_sortie,
     );
-    if let Some(k) = &cle_cache {
-        etat.cache.ecrire(k, &rep.texte);
+    if let (Some(k), Some(cache)) = (&cle_cache, m.cache) {
+        cache.ecrire(k, &rep.texte);
     }
     Ok(Resultat {
         texte: rep.texte,
         depuis_cache: false,
         cout_micro_eur: cout,
     })
+}
+
+/// La clé ouverte et le tarif du modèle, ou pourquoi l'appel ne peut partir.
+pub(crate) fn acces_et_tarif(
+    backend: &Arc<dyn DbBackend>,
+    coffre: &Coffre,
+    r: &Reglages,
+    modele: &str,
+) -> Result<(crate::fournisseur::Acces, couts::Tarif), ErreurAppel> {
+    let famille = r.famille.ok_or(ErreurAppel::NonConfigure)?;
+    let cle = match reglages::cle_en_clair(backend, coffre) {
+        EtatCle::Ouverte(k) => Some(k),
+        EtatCle::Illisible => return Err(ErreurAppel::CleIllisible),
+        EtatCle::Absente if famille.exige_une_cle() => return Err(ErreurAppel::NonConfigure),
+        EtatCle::Absente => None,
+    };
+    let tarif = r.tarif(modele).ok_or(ErreurAppel::TarifInconnu)?;
+    let acces = reglages::acces(r, cle).ok_or(ErreurAppel::NonConfigure)?;
+    Ok((acces, tarif))
+}
+
+/// Ajoute un appel à la consommation du mois et la range. À appeler SOUS le
+/// verrou de consommation, avec la consommation lue sous ce même verrou.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compter(
+    backend: &Arc<dyn DbBackend>,
+    c: &mut couts::Consommation,
+    r: &Reglages,
+    tarif: couts::Tarif,
+    usage: &str,
+    modele: &str,
+    jetons_entree: u64,
+    jetons_sortie: u64,
+) -> u64 {
+    let cout = couts::cout_micro_eur(tarif, jetons_entree, jetons_sortie, r.taux_usd_eur);
+    c.appels += 1;
+    c.jetons_entree += jetons_entree;
+    c.jetons_sortie += jetons_sortie;
+    c.micro_eur += cout;
+    let _ = reglages::ranger_consommation(backend, c);
+    info!(
+        usage,
+        fournisseur = r.famille.map(|f| f.nom()).unwrap_or(""),
+        modele = %modele,
+        jetons_entree,
+        jetons_sortie,
+        cout_micro_eur = cout,
+        "assistant_ia_appel"
+    );
+    cout
 }
 
 /// Retire d'une réponse ce qui entoure l'objet JSON (bloc ```json, phrase

@@ -241,6 +241,17 @@ async fn register_builtin_plugins(loader: &PluginLoader, state: &AppState) {
 }
 
 #[cfg(feature = "assistant-ia")]
+/// La passerelle de l'Assistant IA (étape 2) : l'ancien `/ai/query` et la
+/// traduction des ambiances y prennent la clé (coffre du greffon, après
+/// migration de l'ancienne clé en clair), le plafond et le fournisseur de
+/// l'assistant. Même base et même dossier de clé maîtresse que le greffon.
+pub(crate) fn passerelle_assistant(
+    backend: &Arc<dyn tune_core::db::backend::DbBackend>,
+) -> tune_assistant_ia::Passerelle {
+    tune_assistant_ia::Passerelle::new(backend.clone(), &dossier_de_la_base())
+}
+
+#[cfg(feature = "assistant-ia")]
 /// Le dossier de la base retenue au démarrage (Docker : `/data`), sinon celui
 /// de `TUNE_DB_PATH`, sinon le dossier courant — là où `tune.db` se pose.
 fn dossier_de_la_base() -> std::path::PathBuf {

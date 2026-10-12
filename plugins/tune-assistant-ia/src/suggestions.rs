@@ -34,6 +34,17 @@
 //! JSON trié) — le magasin clé-valeur est le seul endroit du schéma qui
 //! permette de qualifier un champ sans migration. Une annulation les retire.
 //!
+//! # Le genre vaut pour les pistes (étape 2)
+//!
+//! Comme l'édition manuelle de la fiche (#5314,
+//! `tune_core::db::genre_album_pistes`) : un genre ACCEPTÉ est recopié sur les
+//! pistes de l'album (`tracks.genre`, `tracks.genres`, `albums.genres` et le
+//! marqueur `genre_pistes` que le scan relit), sauf compilation aux genres de
+//! pistes différents. L'opération du journal garde, piste par piste, la
+//! valeur d'avant et celle d'après : l'annulation rend chaque piste dont le
+//! genre est encore celui que la recopie a posé, et laisse les autres
+//! (`pistes_modifiees_depuis`).
+//!
 //! # Les fichiers audio
 //!
 //! Comme l'édition manuelle de la fiche : la BASE seulement. Écrire dans les
@@ -47,7 +58,9 @@ use serde_json::{Value, json};
 use tune_core::db::album_metadata_repo::AlbumMetadataRepo;
 use tune_core::db::album_repo::AlbumRepo;
 use tune_core::db::artist_repo::ArtistRepo;
-use tune_core::db::backend::DbBackend;
+use tune_core::db::backend::{DbBackend, ToSqlValue};
+use tune_core::db::engine::Engine;
+use tune_core::db::genre_album_pistes::{self, CLE_GENRE_PISTES, Recopie};
 use tune_core::db::models::Album;
 use tune_core::db::track_repo::TrackRepo;
 
@@ -229,11 +242,14 @@ pub struct Suggestion {
 }
 
 /// Une suggestion écartée par la garde.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Ecartee {
     pub champ: String,
     pub valeur: Option<String>,
     pub raison: &'static str,
+    /// Étape 2 : la piste visée, pour une ligne de piste.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub piste_id: Option<i64>,
 }
 
 /// L'artiste d'un album se désigne par son NOM, comparé sans la casse
@@ -270,6 +286,7 @@ pub fn evaluer(
                 champ: champ.to_string(),
                 valeur: valeur.clone(),
                 raison,
+                piste_id: None,
             })
         };
         if lieu(champ).is_none() {
@@ -330,6 +347,33 @@ pub struct LigneJournal {
     pub champ: String,
     pub avant: Option<String>,
     pub apres: String,
+    /// Étape 2 : la ligne porte sur une PISTE (œuvre, mouvement), pas sur
+    /// l'album. Absent des opérations de l'étape 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub piste_id: Option<i64>,
+}
+
+/// Le genre d'une piste avant et après la recopie.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GenrePiste {
+    pub id: i64,
+    pub genre_avant: Option<String>,
+    pub genres_avant: Option<String>,
+    pub genre_apres: Option<String>,
+    pub genres_apres: Option<String>,
+}
+
+/// Ce que la recopie du genre sur les pistes a changé : de quoi la défaire.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PropagationGenre {
+    pub album_genres_avant: Option<String>,
+    pub album_genres_apres: Option<String>,
+    /// Le marqueur `genre_pistes` d'avant (`None` : absent).
+    pub marqueur_avant: Option<String>,
+    /// Les seules pistes que la recopie a changées.
+    pub pistes: Vec<GenrePiste>,
+    #[serde(default)]
+    pub compilation_epargnee: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -339,6 +383,9 @@ pub struct Operation {
     pub lignes: Vec<LigneJournal>,
     #[serde(default)]
     pub annulee: bool,
+    /// Étape 2 : la recopie du genre accepté sur les pistes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genre_pistes: Option<PropagationGenre>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -354,6 +401,17 @@ pub struct Rapport {
     pub appliquees: Vec<LigneJournal>,
     pub refusees: Vec<Ecartee>,
     pub operation_id: Option<String>,
+    /// Étape 2 : pistes dont le genre a été recopié (application) ou rendu
+    /// (annulation).
+    #[serde(default)]
+    pub pistes_genre: usize,
+    /// Compilation aux genres de pistes différents : pistes épargnées.
+    #[serde(default)]
+    pub compilation_epargnee: bool,
+    /// Annulation : pistes dont le genre a changé depuis la recopie,
+    /// laissées telles quelles.
+    #[serde(default)]
+    pub pistes_modifiees_depuis: usize,
 }
 
 pub fn journal(db: &Arc<dyn DbBackend>, album_id: i64) -> Result<Vec<Operation>, String> {
@@ -364,7 +422,11 @@ pub fn journal(db: &Arc<dyn DbBackend>, album_id: i64) -> Result<Vec<Operation>,
         .unwrap_or_default())
 }
 
-fn ranger_journal(db: &Arc<dyn DbBackend>, album_id: i64, ops: &[Operation]) -> Result<(), String> {
+pub(crate) fn ranger_journal(
+    db: &Arc<dyn DbBackend>,
+    album_id: i64,
+    ops: &[Operation],
+) -> Result<(), String> {
     let debut = ops.len().saturating_sub(OPERATIONS_MAX);
     let json = serde_json::to_string(&ops[debut..]).map_err(|e| e.to_string())?;
     AlbumMetadataRepo::with_backend(db.clone()).set(album_id, CLE_JOURNAL, &json)
@@ -445,7 +507,138 @@ fn ecrire(
     }
 }
 
-fn identifiant_d_operation() -> String {
+/// La marque de paramètre n° `n` du moteur de la base.
+pub(crate) fn marque(db: &Arc<dyn DbBackend>, n: usize) -> String {
+    match db.engine() {
+        Engine::Sqlite => "?".into(),
+        Engine::Postgres => format!("${n}"),
+    }
+}
+
+type GenresDePiste = (Option<String>, Option<String>);
+
+fn genres_des_pistes(
+    db: &Arc<dyn DbBackend>,
+    album_id: i64,
+) -> Result<Vec<(i64, GenresDePiste)>, String> {
+    let lignes = db.query_many(
+        &format!(
+            "SELECT id, genre, genres FROM tracks WHERE album_id = {} ORDER BY id",
+            marque(db, 1)
+        ),
+        &[&album_id as &dyn ToSqlValue],
+    )?;
+    Ok(lignes
+        .iter()
+        .filter_map(|l| {
+            let id = l.first().and_then(|v| v.as_i64())?;
+            Some((
+                id,
+                (
+                    l.get(1).and_then(|v| v.as_string()),
+                    l.get(2).and_then(|v| v.as_string()),
+                ),
+            ))
+        })
+        .collect())
+}
+
+fn genres_de_l_album(db: &Arc<dyn DbBackend>, album_id: i64) -> Result<Option<String>, String> {
+    Ok(db
+        .query_one(
+            &format!("SELECT genres FROM albums WHERE id = {}", marque(db, 1)),
+            &[&album_id as &dyn ToSqlValue],
+        )?
+        .and_then(|l| l.first().and_then(|v| v.as_string())))
+}
+
+/// Recopie le genre (déjà écrit) de l'album sur ses pistes, comme
+/// l'édition manuelle (#5314), et rend de quoi la défaire.
+fn propager_genre(db: &Arc<dyn DbBackend>, album_id: i64) -> Result<PropagationGenre, String> {
+    let avant: HashMap<i64, GenresDePiste> = genres_des_pistes(db, album_id)?.into_iter().collect();
+    let album_genres_avant = genres_de_l_album(db, album_id)?;
+    let marqueur_avant = AlbumMetadataRepo::with_backend(db.clone())
+        .get_all(album_id)?
+        .get(CLE_GENRE_PISTES)
+        .cloned();
+    let recopie = genre_album_pistes::recopier(db, album_id, false)?;
+    let pistes = genres_des_pistes(db, album_id)?
+        .into_iter()
+        .filter_map(|(id, apres)| {
+            let av = avant.get(&id).cloned().unwrap_or_default();
+            (av != apres).then_some(GenrePiste {
+                id,
+                genre_avant: av.0,
+                genres_avant: av.1,
+                genre_apres: apres.0,
+                genres_apres: apres.1,
+            })
+        })
+        .collect();
+    Ok(PropagationGenre {
+        album_genres_avant,
+        album_genres_apres: genres_de_l_album(db, album_id)?,
+        marqueur_avant,
+        pistes,
+        compilation_epargnee: recopie == Recopie::CompilationEpargnee,
+    })
+}
+
+/// Défait une recopie : chaque piste dont le genre est ENCORE celui que la
+/// recopie a posé retrouve le sien ; les autres sont comptées. Rend
+/// `(rendues, modifiées depuis)`.
+fn defaire_propagation(
+    db: &Arc<dyn DbBackend>,
+    album_id: i64,
+    p: &PropagationGenre,
+) -> Result<(usize, usize), String> {
+    let present: HashMap<i64, GenresDePiste> =
+        genres_des_pistes(db, album_id)?.into_iter().collect();
+    let (mut rendues, mut modifiees) = (0, 0);
+    let sql = format!(
+        "UPDATE tracks SET genre = {}, genres = {} WHERE id = {}",
+        marque(db, 1),
+        marque(db, 2),
+        marque(db, 3)
+    );
+    for gp in &p.pistes {
+        let apres = (gp.genre_apres.clone(), gp.genres_apres.clone());
+        if present.get(&gp.id) != Some(&apres) {
+            modifiees += 1;
+            continue;
+        }
+        db.execute(
+            &sql,
+            &[
+                &gp.genre_avant as &dyn ToSqlValue,
+                &gp.genres_avant as &dyn ToSqlValue,
+                &gp.id as &dyn ToSqlValue,
+            ],
+        )?;
+        rendues += 1;
+    }
+    if genres_de_l_album(db, album_id)? == p.album_genres_apres {
+        db.execute(
+            &format!(
+                "UPDATE albums SET genres = {} WHERE id = {}",
+                marque(db, 1),
+                marque(db, 2)
+            ),
+            &[
+                &p.album_genres_avant as &dyn ToSqlValue,
+                &album_id as &dyn ToSqlValue,
+            ],
+        )?;
+    }
+    let meta = AlbumMetadataRepo::with_backend(db.clone());
+    match &p.marqueur_avant {
+        Some(v) => meta.set(album_id, CLE_GENRE_PISTES, v)?,
+        None => meta.delete(album_id, CLE_GENRE_PISTES)?,
+    }
+    Ok((rendues, modifiees))
+}
+
+pub(crate) fn identifiant_d_operation() -> String {
     let mut o = [0u8; 8];
     let _ = getrandom::getrandom(&mut o);
     o.iter().map(|b| format!("{b:02x}")).collect()
@@ -470,6 +663,7 @@ pub fn appliquer(
                 champ: champ.to_string(),
                 valeur: Some(valeur.to_string()),
                 raison,
+                piste_id: None,
             })
         };
         if lieu(champ).is_none() {
@@ -502,8 +696,18 @@ pub fn appliquer(
             champ: champ.to_string(),
             avant,
             apres: valeur.to_string(),
+            piste_id: None,
         });
     }
+    // Étape 2 : le genre accepté vaut pour les pistes (#5314).
+    let genre_pistes = if rapport.appliquees.iter().any(|l| l.champ == "genre") {
+        let p = propager_genre(db, album_id)?;
+        rapport.pistes_genre = p.pistes.len();
+        rapport.compilation_epargnee = p.compilation_epargnee;
+        Some(p)
+    } else {
+        None
+    };
     if !rapport.appliquees.is_empty() {
         let id = identifiant_d_operation();
         let mut ops = journal(db, album_id)?;
@@ -512,6 +716,7 @@ pub fn appliquer(
             horodatage: chrono::Utc::now().to_rfc3339(),
             lignes: rapport.appliquees.clone(),
             annulee: false,
+            genre_pistes,
         });
         ranger_journal(db, album_id, &ops)?;
         let mut source = champs_source_ia(db, album_id)?;
@@ -546,12 +751,31 @@ pub fn annuler(
     };
     let mut source = champs_source_ia(db, album_id)?;
     for l in ops[indice].lignes.clone() {
+        if let Some(piste_id) = l.piste_id {
+            // Une ligne de PISTE (étape 2) : même règle, sur la piste.
+            match crate::pistes::defaire_ligne(db, piste_id, &l)? {
+                Ok(()) => rapport.appliquees.push(LigneJournal {
+                    champ: l.champ.clone(),
+                    avant: Some(l.apres.clone()),
+                    apres: l.avant.clone().unwrap_or_default(),
+                    piste_id: Some(piste_id),
+                }),
+                Err(present) => rapport.refusees.push(Ecartee {
+                    champ: l.champ.clone(),
+                    valeur: present,
+                    raison: "modifie_depuis",
+                    piste_id: None,
+                }),
+            }
+            continue;
+        }
         // Modifié depuis : la valeur n'est plus celle que l'assistant a posée.
         if etat.valeur(&l.champ).as_deref() != Some(l.apres.as_str()) {
             rapport.refusees.push(Ecartee {
                 champ: l.champ.clone(),
                 valeur: etat.valeur(&l.champ),
                 raison: "modifie_depuis",
+                piste_id: None,
             });
             continue;
         }
@@ -561,7 +785,20 @@ pub fn annuler(
             champ: l.champ.clone(),
             avant: Some(l.apres.clone()),
             apres: l.avant.clone().unwrap_or_default(),
+            piste_id: None,
         });
+    }
+    // Le genre des pistes ne se rend que si celui de l'album l'a été : un
+    // genre d'album retouché depuis tient ses pistes avec lui.
+    if let Some(p) = ops[indice].genre_pistes.clone()
+        && rapport
+            .appliquees
+            .iter()
+            .any(|l| l.champ == "genre" && l.piste_id.is_none())
+    {
+        let (rendues, modifiees) = defaire_propagation(db, album_id, &p)?;
+        rapport.pistes_genre = rendues;
+        rapport.pistes_modifiees_depuis = modifiees;
     }
     ops[indice].annulee = true;
     ranger_journal(db, album_id, &ops)?;
@@ -717,6 +954,65 @@ pub(crate) mod tests {
         assert_eq!(etat.valeur("conductor"), None);
         assert!(champs_source_ia(&db, 1).unwrap().is_empty());
         assert!(journal(&db, 1).unwrap()[0].annulee);
+    }
+
+    fn genre_de_piste(db: &Arc<dyn DbBackend>, id: i64) -> (Option<String>, Option<String>) {
+        let l = db
+            .query_one(
+                "SELECT genre, genres FROM tracks WHERE id = ?",
+                &[&id as &dyn ToSqlValue],
+            )
+            .unwrap()
+            .unwrap();
+        (
+            l.first().and_then(|v| v.as_string()),
+            l.get(1).and_then(|v| v.as_string()),
+        )
+    }
+
+    #[test]
+    fn le_genre_accepte_vaut_pour_les_pistes_et_son_annulation_les_rend() {
+        let db = base();
+        db.execute_batch(
+            "UPDATE tracks SET genre = 'Classique', genres = '[\"Classique\"]' WHERE id = 1;
+             INSERT INTO tracks (id, title, album_id, artist_id, file_path, genre)
+                    VALUES (2, 'Scherzo', 1, 1, '/m/2.flac', NULL);",
+        )
+        .unwrap();
+        let r = appliquer(
+            &db,
+            1,
+            &[LigneAAppliquer {
+                champ: "genre".into(),
+                valeur: "Symphonic".into(),
+            }],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(r.pistes_genre, 2, "{r:?}");
+        assert_eq!(genre_de_piste(&db, 1).0.as_deref(), Some("Symphonic"));
+        assert_eq!(genre_de_piste(&db, 2).0.as_deref(), Some("Symphonic"));
+        let op = &journal(&db, 1).unwrap()[0];
+        assert_eq!(op.genre_pistes.as_ref().unwrap().pistes.len(), 2);
+
+        // L'utilisateur retouche une piste entre-temps : elle reste à lui.
+        db.execute("UPDATE tracks SET genre = 'Opéra' WHERE id = 2", &[])
+            .unwrap();
+        let a = annuler(&db, 1, None).unwrap().unwrap();
+        assert_eq!(a.pistes_genre, 1);
+        assert_eq!(a.pistes_modifiees_depuis, 1);
+        assert_eq!(
+            genre_de_piste(&db, 1),
+            (Some("Classique".into()), Some("[\"Classique\"]".into()))
+        );
+        assert_eq!(genre_de_piste(&db, 2).0.as_deref(), Some("Opéra"));
+        // Le marqueur que le scan relit est retiré : il n'existait pas avant.
+        assert!(
+            !AlbumMetadataRepo::with_backend(db.clone())
+                .get_all(1)
+                .unwrap()
+                .contains_key(CLE_GENRE_PISTES)
+        );
     }
 
     #[test]

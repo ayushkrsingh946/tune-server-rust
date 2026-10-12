@@ -1,4 +1,4 @@
-//! L'Assistant IA, étape 1 — greffon natif (chantier « assistant-ia », GO de
+//! L'Assistant IA, étapes 1 et 2 — greffon natif (chantier « assistant-ia », GO de
 //! Bertrand du 12/10/2026). Conception : `docs/chantier-assistant-ia.md`.
 //!
 //! Deux usages, avec la clé de l'UTILISATEUR, depuis SON serveur, vers SON
@@ -24,14 +24,24 @@
 //! | `POST /albums/{id}/appliquer` | `{lignes: [{champ, valeur}]}` |
 //! | `POST /albums/{id}/annuler` | `{operation_id?}` |
 //! | `GET /albums/{id}/historique` | les opérations de l'album |
+//! | `POST /albums/{id}/pistes/suggestions` | œuvre / mouvement par piste (étape 2) |
+//! | `POST /albums/{id}/pistes/appliquer` | `{lignes: [{piste_id, champ, valeur}]}` |
+//! | `POST /lot/suggestions` | `{album_ids, budget_eur?}` → aperçu d'un lot, arrêt net au plafond |
+//! | `POST /lot/appliquer` | `{albums: [{album_id, lignes}]}` |
+//! | `POST /lot/annuler` | `{operations: [{album_id, operation_id}]}` |
 //!
-//! Gratuit, pour tout le monde : aucune garde Premium.
+//! Gratuit, pour tout le monde : aucune garde Premium. Les RÉGLAGES (`PUT
+//! /reglages`, `POST /tester`) sont réservés aux administrateurs dès que
+//! l'authentification est active (étape 2).
 
 pub mod appel;
 pub mod cache;
 pub mod coffre;
 pub mod couts;
 pub mod fournisseur;
+pub mod migration;
+pub mod passerelle;
+pub mod pistes;
 pub mod reglages;
 pub mod regles;
 mod routes;
@@ -44,6 +54,7 @@ use async_trait::async_trait;
 use tune_core::db::backend::DbBackend;
 use tune_core::plugin_sdk::{PluginContext, TunePlugin};
 
+pub use passerelle::Passerelle;
 pub use regles::CritereMoteur;
 pub use routes::router_vers;
 
@@ -87,7 +98,7 @@ impl Etat {
             cache: Arc::new(cache::Cache::new(dossier_cache)),
             criteres: Arc::new(criteres),
             fabrique,
-            verrou_conso: Arc::new(tokio::sync::Mutex::new(())),
+            verrou_conso: appel::verrou_de_consommation(),
             verrou_albums: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -123,6 +134,10 @@ impl TunePlugin for AssistantIaPlugin {
 
     async fn setup(&mut self, ctx: &PluginContext) -> Result<(), String> {
         let services = self.services.clone();
+        // Étape 2 : les anciennes clés en clair passent au coffre dès le
+        // démarrage. L'hôte la rejoue avant chaque usage hérité (une clé
+        // reposée en clair par un ancien client y est rattrapée).
+        Passerelle::new(services.backend.clone(), &services.dossier_secret).migrer();
         let etat = Etat::new(
             services.backend,
             &services.dossier_secret,

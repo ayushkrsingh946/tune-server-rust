@@ -5,7 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
-use tune_core::ai::client::{AnthropicClient, ContentBlock, Message, MessageContent};
+#[cfg(not(feature = "assistant-ia"))]
+use tune_core::ai::client::AnthropicClient;
+use tune_core::ai::client::{ContentBlock, Message, MessageContent};
 use tune_core::ai::executor::ToolExecutor;
 use tune_core::ai::recommendations;
 use tune_core::ai::tools::all_tools;
@@ -74,6 +76,121 @@ pub fn router() -> Router<AppState> {
         .route("/smart-radio", post(ai_smart_radio))
 }
 
+/// Celui à qui l'ancien assistant parle.
+///
+/// Étape 2 du chantier « Assistant IA » : un serveur qui porte le greffon
+/// (`assistant-ia`, dans le `default`) ne lit plus la clé EN CLAIR
+/// `anthropic_api_key` — elle est migrée dans le coffre du greffon — et chaque
+/// tour est compté au tarif de l'assistant et refusé plafond atteint. Le
+/// pilotage par outils est écrit pour l'API Messages : il faut que le
+/// fournisseur de l'assistant soit Anthropic ; sinon, repli local, comme sans
+/// clé. Le chemin historique ne reste que pour un binaire compilé sans le
+/// greffon.
+enum Interlocuteur {
+    #[cfg(not(feature = "assistant-ia"))]
+    Historique(AnthropicClient),
+    #[cfg(feature = "assistant-ia")]
+    Assistant(tune_assistant_ia::Passerelle),
+}
+
+/// Pourquoi un tour n'a pas eu lieu.
+enum Refus {
+    /// Une erreur du client historique : 500, comme avant.
+    #[cfg(not(feature = "assistant-ia"))]
+    Erreur(String),
+    /// Un refus de l'assistant (plafond atteint, clé refusée…) : rendu en
+    /// réponse lisible, jamais en 401.
+    #[cfg(feature = "assistant-ia")]
+    Assistant { code: &'static str, message: String },
+}
+
+/// Jetons de sortie d'un tour par l'assistant (le défaut du client historique).
+#[cfg(feature = "assistant-ia")]
+const MAX_JETONS_PAR_TOUR: u32 = 1024;
+
+impl Interlocuteur {
+    fn choisir(state: &AppState, settings: &SettingsRepo) -> Option<Self> {
+        #[cfg(feature = "assistant-ia")]
+        {
+            let _ = settings;
+            let p = crate::plugins::passerelle_assistant(&state.backend);
+            p.migrer();
+            p.anthropic_pret().then_some(Self::Assistant(p))
+        }
+        #[cfg(not(feature = "assistant-ia"))]
+        {
+            let _ = state;
+            let api_key = settings
+                .get("anthropic_api_key")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if api_key.is_empty() {
+                return None;
+            }
+            let model = settings
+                .get("anthropic_model")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            Some(Self::Historique(AnthropicClient::new(api_key, model)))
+        }
+    }
+
+    async fn chat(
+        &self,
+        system: &str,
+        messages: Vec<Message>,
+        tools: &[tune_core::ai::client::Tool],
+    ) -> Result<tune_core::ai::client::ApiResponse, Refus> {
+        match self {
+            #[cfg(not(feature = "assistant-ia"))]
+            Self::Historique(client) => client
+                .chat(system, messages, tools)
+                .await
+                .map_err(Refus::Erreur),
+            #[cfg(feature = "assistant-ia")]
+            Self::Assistant(p) => {
+                let illisible = || Refus::Assistant {
+                    code: "erreur_fournisseur",
+                    message: "Réponse illisible du fournisseur.".into(),
+                };
+                let messages = serde_json::to_value(&messages).map_err(|_| illisible())?;
+                let outils = serde_json::to_value(tools).map_err(|_| illisible())?;
+                let v = p
+                    .discuter_anthropic(system, &messages, &outils, MAX_JETONS_PAR_TOUR)
+                    .await
+                    .map_err(|e| Refus::Assistant {
+                        code: e.code(),
+                        message: e.message(),
+                    })?;
+                serde_json::from_value(v).map_err(|_| illisible())
+            }
+        }
+    }
+}
+
+/// La réponse d'un refus, ou l'erreur HTTP du chemin historique.
+fn sortie_de_refus(r: Refus, actions: &[Value], zone_id: i64) -> Result<Json<Value>, AppError> {
+    match r {
+        #[cfg(not(feature = "assistant-ia"))]
+        Refus::Erreur(e) => {
+            let _ = (actions, zone_id);
+            Err(AppError::internal(format!("Claude API error: {e}")))
+        }
+        #[cfg(feature = "assistant-ia")]
+        Refus::Assistant { code, message } => {
+            info!(code, "ai_query_refusee_par_l_assistant");
+            Ok(Json(json!({
+                "reply": message,
+                "error": code,
+                "actions": actions,
+                "zone_id": zone_id,
+            })))
+        }
+    }
+}
+
 async fn ai_query(
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
@@ -85,23 +202,10 @@ async fn ai_query(
 
     info!(zone_id, message = %body.message, "ai_query");
 
-    let api_key = settings
-        .get("anthropic_api_key")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-
-    if api_key.is_empty() {
+    let Some(client) = Interlocuteur::choisir(&state, &settings) else {
         return local_ai_query(state, &body.message, zone_id, &lang).await;
-    }
+    };
 
-    let model = settings
-        .get("anthropic_model")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-
-    let client = AnthropicClient::new(api_key, model);
     // Answer in the UI language, not always French (#1143).
     let system = format!("{SYSTEM_PROMPT} {}", language_directive(&lang));
     let tools = all_tools();
@@ -120,10 +224,10 @@ async fn ai_query(
     let mut actions: Vec<Value> = Vec::new();
 
     for round in 0..MAX_TOOL_ROUNDS {
-        let response = client
-            .chat(&system, messages.clone(), &tools)
-            .await
-            .map_err(|e| AppError::internal(format!("Claude API error: {e}")))?;
+        let response = match client.chat(&system, messages.clone(), &tools).await {
+            Ok(r) => r,
+            Err(r) => return sortie_de_refus(r, &actions, executor.zone_id()),
+        };
 
         let tool_uses: Vec<_> = response
             .content
@@ -174,10 +278,10 @@ async fn ai_query(
         }
     }
 
-    let final_response = client
-        .chat(&system, messages, &[])
-        .await
-        .map_err(|e| AppError::internal(format!("Claude API error: {e}")))?;
+    let final_response = match client.chat(&system, messages, &[]).await {
+        Ok(r) => r,
+        Err(r) => return sortie_de_refus(r, &actions, executor.zone_id()),
+    };
 
     let reply = extract_text(&final_response.content);
     Ok(Json(json!({
