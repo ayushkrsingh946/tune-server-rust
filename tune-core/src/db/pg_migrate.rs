@@ -268,6 +268,22 @@ const TABLES_NON_COPIEES: &[(&str, &str)] = &[
         "reponses MusicBrainz gardees (#4805) : un cache de 90 jours, que la passe \
          des credits reconstitue",
     ),
+    (
+        "album_completude",
+        "constat de completude (#4805, lot MetaRust) : recalcule depuis la release gardee",
+    ),
+    (
+        "artiste_instruments",
+        "instruments Wikidata des artistes (#4805) : un cache que la passe des credits reconstitue",
+    ),
+    (
+        "propositions_discogs",
+        "propositions Discogs a valider (#4805) : se redemandent ; aucune n'a ete appliquee sans decision",
+    ),
+    (
+        "bpm_estimes",
+        "BPM estimes (Wikidata ou signal, #4805) : se remesurent ; les balises BPM restent dans `tracks`",
+    ),
 ];
 
 /// The complete PG schema DDL. Creates all tables that exist in SQLite.
@@ -1086,6 +1102,40 @@ CREATE TABLE IF NOT EXISTS musicbrainz_release_cache (
     inc TEXT NOT NULL,
     corps BYTEA NOT NULL,
     fetched_at TEXT NOT NULL
+);
+-- Enrichissement MetaRust, lot 1 (#4805). Mêmes types qu'`ENSURE_TABLES` ;
+-- non copiées à la bascule (voir TABLES_NON_COPIEES).
+CREATE TABLE IF NOT EXISTS album_completude (
+    album_id BIGINT PRIMARY KEY,
+    release_mbid TEXT NOT NULL,
+    attendues INTEGER NOT NULL,
+    presentes INTEGER NOT NULL,
+    manquantes INTEGER NOT NULL,
+    doublons INTEGER NOT NULL,
+    detail TEXT NOT NULL,
+    calcule_le TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS artiste_instruments (
+    artist_mbid TEXT PRIMARY KEY,
+    qid TEXT,
+    instruments TEXT NOT NULL,
+    lu_le TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS propositions_discogs (
+    album_id BIGINT NOT NULL,
+    discogs_release_id BIGINT NOT NULL,
+    methode TEXT NOT NULL,
+    proposition TEXT NOT NULL,
+    statut TEXT NOT NULL,
+    cree_le TEXT NOT NULL,
+    decide_le TEXT,
+    PRIMARY KEY (album_id, discogs_release_id)
+);
+CREATE TABLE IF NOT EXISTS bpm_estimes (
+    file_path TEXT PRIMARY KEY,
+    bpm DOUBLE PRECISION NOT NULL,
+    source TEXT NOT NULL,
+    mesure_le TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS upnp_library_sources (
     source_key TEXT PRIMARY KEY,

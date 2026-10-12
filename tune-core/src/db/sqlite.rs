@@ -997,6 +997,44 @@ CREATE TABLE IF NOT EXISTS musicbrainz_release_cache (
     fetched_at TEXT NOT NULL
 );
 
+-- Enrichissement MetaRust, lot 1 (#4805) — d'après MetaRust, de Xavier Joly.
+-- Complétude d'album, instruments Wikidata des artistes, propositions
+-- Discogs, BPM estimés. Sans migration numérotée, comme
+-- `musicbrainz_release_cache` : présentes AUSSI dans le rattrapage de
+-- `run_migrations` (bases existantes).
+CREATE TABLE IF NOT EXISTS album_completude (
+    album_id INTEGER PRIMARY KEY,
+    release_mbid TEXT NOT NULL,
+    attendues INTEGER NOT NULL,
+    presentes INTEGER NOT NULL,
+    manquantes INTEGER NOT NULL,
+    doublons INTEGER NOT NULL,
+    detail TEXT NOT NULL,
+    calcule_le TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS artiste_instruments (
+    artist_mbid TEXT PRIMARY KEY,
+    qid TEXT,
+    instruments TEXT NOT NULL,
+    lu_le TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS propositions_discogs (
+    album_id INTEGER NOT NULL,
+    discogs_release_id INTEGER NOT NULL,
+    methode TEXT NOT NULL,
+    proposition TEXT NOT NULL,
+    statut TEXT NOT NULL,
+    cree_le TEXT NOT NULL,
+    decide_le TEXT,
+    PRIMARY KEY (album_id, discogs_release_id)
+);
+CREATE TABLE IF NOT EXISTS bpm_estimes (
+    file_path TEXT PRIMARY KEY,
+    bpm REAL NOT NULL,
+    source TEXT NOT NULL,
+    mesure_le TEXT NOT NULL
+);
+
 -- « Ces deux albums ne sont pas des doublons » (#1276) — miroir de la
 -- migration SQLite 91, présent AUSSI ici pour que le rapprochement d'albums
 -- (grouped / merge-duplicates) tourne sur une base née de `init_schema` seul,

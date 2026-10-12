@@ -10,8 +10,10 @@ pub mod batch;
 pub mod bio_batch;
 pub mod choix_de_pressage;
 pub mod coffrets;
+pub mod completude;
 pub mod credits_mb;
 pub mod credits_release;
+pub mod discogs_propositions;
 pub mod disques_abimes;
 pub mod ecriture_fichiers;
 pub mod empreinte_audio;
@@ -37,6 +39,7 @@ pub mod suggestions;
 // Le MBID des artistes par une recherche MusicBrainz confirmée (#4805, étape C).
 pub mod artistes_par_le_reseau;
 pub mod tag_writer;
+pub mod wikidata;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

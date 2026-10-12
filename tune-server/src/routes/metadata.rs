@@ -2224,8 +2224,10 @@ async fn fix_genres(State(state): State<AppState>) -> impl IntoResponse {
         .get_credential("lastfm", "api_key")
         .or_else(|| settings.get("lastfm_api_key").ok().flatten())
         .filter(|s| !s.is_empty());
-    let discogs_token = svc_mgr
-        .get_credential("discogs", "token")
+    // #4805 lot 1 : le jeton PERSONNEL d'abord ; le gestionnaire de services
+    // et la configuration ensuite.
+    let discogs_token = crate::routes::discogs::discogs_token(&state)
+        .or_else(|| svc_mgr.get_credential("discogs", "token"))
         .or_else(|| state.config.discogs_token.clone())
         .filter(|s| !s.is_empty());
 
@@ -2540,13 +2542,9 @@ async fn fetch_album_cover(
     }
 
     // Step 3: Try Discogs fallback
-    let discogs_token = state
-        .config
-        .discogs_token
-        .clone()
-        .or_else(|| std::env::var("TUNE_DISCOGS_TOKEN").ok())
-        .or_else(|| std::env::var("DISCOGS_TOKEN").ok())
-        .unwrap_or_default();
+    // #4805 lot 1 : le jeton PERSONNEL d'abord, puis le réglage, la
+    // configuration et l'environnement (`routes::discogs::discogs_token`).
+    let discogs_token = crate::routes::discogs::discogs_token(&state).unwrap_or_default();
 
     if !discogs_token.is_empty() && !album.title.is_empty() {
         let cache_dir = super::library::artwork_cache_dir();
@@ -2618,13 +2616,9 @@ async fn search_covers(
     State(state): State<AppState>,
     Query(params): Query<CoverSearchParams>,
 ) -> impl IntoResponse {
-    let discogs_token = state
-        .config
-        .discogs_token
-        .clone()
-        .or_else(|| std::env::var("TUNE_DISCOGS_TOKEN").ok())
-        .or_else(|| std::env::var("DISCOGS_TOKEN").ok())
-        .unwrap_or_default();
+    // #4805 lot 1 : le jeton PERSONNEL d'abord, puis le réglage, la
+    // configuration et l'environnement (`routes::discogs::discogs_token`).
+    let discogs_token = crate::routes::discogs::discogs_token(&state).unwrap_or_default();
 
     let cache_dir = super::library::artwork_cache_dir();
     let cache_str = cache_dir.to_string_lossy().to_string();
