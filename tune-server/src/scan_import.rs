@@ -565,7 +565,7 @@ impl TrackImporter {
         Self {
             db: db.clone(),
             artist_repo: ArtistRepo::with_backend(db.clone()),
-            album_repo: AlbumRepo::with_backend(db),
+            album_repo: AlbumRepo::with_backend(db.clone()),
             quality_split,
             cache_dir,
             artist_cache: HashMap::new(),
