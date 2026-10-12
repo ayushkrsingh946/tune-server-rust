@@ -120,13 +120,15 @@ pub mod sql {
     /// des interprètes) ou un compositeur crédité : la clé étrangère refusait
     /// alors le DELETE ENTIER, et plus aucun orphelin n'était purgé.
     /// Une seule clause pour le comptage et la suppression : ils ne peuvent
-    /// plus diverger.
+    /// plus diverger. Quatrième table depuis le chantier artistes multiples :
+    /// `track_artists` (un artiste secondaire d'un crédit découpé).
     macro_rules! artistes_orphelins {
         () => {
             "FROM artists WHERE \
              id NOT IN (SELECT artist_id FROM tracks WHERE artist_id IS NOT NULL) \
              AND id NOT IN (SELECT artist_id FROM albums WHERE artist_id IS NOT NULL) \
-             AND id NOT IN (SELECT artist_id FROM track_credits WHERE artist_id IS NOT NULL)"
+             AND id NOT IN (SELECT artist_id FROM track_credits WHERE artist_id IS NOT NULL) \
+             AND id NOT IN (SELECT artist_id FROM track_artists)"
         };
     }
 
@@ -626,6 +628,19 @@ impl ArtistRepo {
         let pistes = absorption::repointer(db, "tracks", "artist_id", None, cible, doublon)?;
         let credits =
             absorption::repointer(db, "track_credits", "artist_id", None, cible, doublon)?;
+        // Chantier artistes multiples — la liaison piste ↔ artistes suit la
+        // fusion. Clé `(track_id, artist_id)` : une piste déjà reliée à la
+        // cible garde sa ligne, celle du doublon part (sinon l'ON DELETE
+        // CASCADE de l'artiste absorbé l'emporterait sans la reporter).
+        absorption::repointer_a_cle_unique(
+            db,
+            "track_artists",
+            "artist_id",
+            "track_id",
+            None,
+            cible,
+            doublon,
+        )?;
         let mut textes_recales = 0usize;
         textes_recales += absorption::recaler_le_texte(
             db,

@@ -224,6 +224,10 @@ const MIGRATION_TABLES: &[&str] = &[
 /// donc pas encore au moment de la premiere passe (#5389). Les colonnes sont
 /// alors deja typees (BIGINT, BYTEA…) : `column_casts` lit ces types.
 const MIGRATION_TABLES_APRES_SCRIPTS: &[&str] = &[
+    // Liaison piste <-> artistes (chantier artistes multiples, script PG
+    // 089) : recalculable par un scan complet, mais copiee pour ne pas
+    // perdre les artistes secondaires a la bascule.
+    "track_artists",
     // Exemplaires d'une meme piste et repertoire prefere par album (#5034,
     // script PG 073) : le choix de l'utilisateur etait perdu a la bascule.
     "track_copies",

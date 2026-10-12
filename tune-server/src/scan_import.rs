@@ -353,6 +353,14 @@ pub struct TrackImporter {
     cache_dir: std::path::PathBuf,
     /// Caches persist across batches for the lifetime of a scan.
     artist_cache: HashMap<String, Arc<Artist>>,
+    /// Chantier artistes multiples — la liste d'exceptions du découpage
+    /// (réglage `artist_split_allowlist`), lue une fois par scan.
+    exceptions_d_artistes: Vec<String>,
+    /// Chantier artistes multiples — par chemin de fichier, les artistes du
+    /// crédit ARTIST découpé (`(artist_id, rang)`), à écrire dans
+    /// `track_artists` APRÈS l'écriture du lot (la piste n'a pas encore
+    /// d'identifiant ici). Une liste vide retire d'anciennes lignes.
+    artistes_de_piste_en_attente: Vec<(String, Vec<(i64, u32)>)>,
     // Keyed by (title, album_artist_id, year, mb_release_id) — the MB release id
     // is part of the identity so two distinct editions sharing title+artist+year
     // don't collapse into one via the cache before the DB is even consulted
@@ -561,6 +569,15 @@ impl TrackImporter {
             quality_split,
             cache_dir,
             artist_cache: HashMap::new(),
+            exceptions_d_artistes: tune_core::db::settings_repo::SettingsRepo::with_backend(
+                db.clone(),
+            )
+            .get("artist_split_allowlist")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default(),
+            artistes_de_piste_en_attente: Vec::new(),
             album_cache: HashMap::new(),
             albums_with_cover: HashSet::new(),
             albums_vus: HashSet::new(),
@@ -1882,10 +1899,90 @@ impl TrackImporter {
         // 25/09/2026) : un scan qui relit ce fichier n'écrase ni sa place
         // dans le coffret, ni son titre, ni son artiste.
         if self.tenues.appliquer(&mut track) {
+            // Une piste éditée à la main garde l'artiste qu'on lui a donné :
+            // le découpage des balises ne la relie à personne d'autre.
+            self.artistes_de_piste_en_attente
+                .push((sf.path.clone(), Vec::new()));
             let tenu = track.album_id;
             return Some((track, tenu));
         }
+        self.noter_les_artistes_de_piste(
+            &sf.path,
+            &track_artist_name,
+            meta.musicbrainz_artist_id.as_deref(),
+            track_artist.as_deref(),
+        );
         Some((track, album_id))
+    }
+
+    /// Chantier artistes multiples — découpe le crédit ARTIST de la piste
+    /// (`artist_split::artistes_de_la_piste` : séparateurs sûrs, liste
+    /// d'exceptions, MBID) et résout chaque artiste. L'écriture attend
+    /// [`Self::ecrire_les_artistes_de_piste`], après celle du lot.
+    fn noter_les_artistes_de_piste(
+        &mut self,
+        chemin: &str,
+        credit: &str,
+        mbid_brut: Option<&str>,
+        principal: Option<&Artist>,
+    ) {
+        use tune_core::metadata::artist_split::{artistes_de_la_piste, mbids_de_la_balise};
+        let mbids = mbids_de_la_balise(mbid_brut);
+        let nom_du_mbid = match mbids.as_slice() {
+            [seul] => self
+                .artist_repo
+                .get_by_musicbrainz_id(seul)
+                .ok()
+                .flatten()
+                .map(|a| a.name),
+            _ => None,
+        };
+        let artistes = artistes_de_la_piste(
+            credit,
+            &mbids,
+            nom_du_mbid.as_deref(),
+            &self.exceptions_d_artistes,
+        );
+        let mut liens: Vec<(i64, u32)> = Vec::new();
+        if artistes.len() > 1 {
+            for a in &artistes {
+                let id = match principal {
+                    Some(p) if p.name.eq_ignore_ascii_case(&a.nom) => p.id,
+                    _ => self.artiste_du_credit(&a.nom, a.mbid.as_deref()),
+                };
+                if let Some(id) = id
+                    && !liens.iter().any(|(deja, _)| *deja == id)
+                {
+                    liens.push((id, a.rang));
+                }
+            }
+        }
+        self.artistes_de_piste_en_attente
+            .push((chemin.to_string(), liens));
+    }
+
+    /// Un artiste d'un crédit découpé : par le cache du scan, sinon
+    /// `get_or_create` (MBID d'abord, puis nom).
+    fn artiste_du_credit(&mut self, nom: &str, mbid: Option<&str>) -> Option<i64> {
+        if let Some(a) = self.artist_cache.get(nom) {
+            return a.id;
+        }
+        let a = self.artist_repo.get_or_create(nom, mbid, None).ok()?;
+        let id = a.id;
+        self.artist_cache.insert(nom.to_string(), Arc::new(a));
+        id
+    }
+
+    /// Chantier artistes multiples — écrit dans `track_artists` les
+    /// artistes notés pendant le lot. À appeler APRÈS `create_batch` /
+    /// `update_batch`, dans la même transaction de lot.
+    pub fn ecrire_les_artistes_de_piste(&mut self, db: &dyn DbBackend) -> usize {
+        std::mem::take(&mut self.artistes_de_piste_en_attente)
+            .into_iter()
+            .map(|(chemin, liens)| {
+                tune_core::db::track_artist_repo::remplacer_par_chemin(db, &chemin, &liens)
+            })
+            .sum()
     }
 }
 
