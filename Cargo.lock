@@ -5242,6 +5242,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tune-core",
+ "tune-http-types",
  "tune-smart-http",
 ]
 

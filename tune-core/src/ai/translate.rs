@@ -21,13 +21,39 @@ use tracing::{debug, warn};
 
 const CACHE_KEY: &str = "ambiance_query_translations";
 const CACHE_MAX: usize = 200;
-const PROMPT: &str = "Translate this music-mood search query to English. Reply with ONLY the \
+/// La consigne de traduction, publique pour qu'un autre fournisseur (le
+/// greffon Assistant IA, étape 2) pose exactement la même question.
+pub const PROMPT: &str = "Translate this music-mood search query to English. Reply with ONLY the \
 translation, nothing else. If it is already in English, reply with it unchanged.";
 
 /// Traduit `query` en anglais via la clé API configurée par l'utilisateur.
 /// `None` = pas de clé, échec réseau, ou réponse inutilisable — l'appelant
 /// doit alors employer la requête brute.
+///
+/// Le chemin HISTORIQUE, qui lit une clé en clair dans `settings`. Un serveur
+/// qui porte l'Assistant IA passe par [`translate_query_avec`] et le
+/// fournisseur de l'assistant (coffre, plafond) : ce chemin-ci ne sert plus
+/// qu'aux binaires compilés sans lui.
 pub async fn translate_query(settings: &SettingsRepo, query: &str) -> Option<String> {
+    translate_query_avec(settings, query, |q| async move {
+        call_provider(settings, &q).await
+    })
+    .await
+}
+
+/// [`translate_query`], avec le fournisseur de l'APPELANT : `appeler` reçoit
+/// la requête nettoyée (à poser avec [`PROMPT`]) et rend la traduction brute,
+/// ou `None`. Le glossaire des genres, le cache et le contrôle de la réponse
+/// restent ceux d'ici : seul l'appel change de main.
+pub async fn translate_query_avec<F, Fut>(
+    settings: &SettingsRepo,
+    query: &str,
+    appeler: F,
+) -> Option<String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
     let q = query.trim();
     if q.is_empty() {
         return None;
@@ -44,7 +70,7 @@ pub async fn translate_query(settings: &SettingsRepo, query: &str) -> Option<Str
         return Some(hit);
     }
 
-    let translated = call_provider(settings, q).await?;
+    let translated = appeler(q.to_string()).await?;
     let t = translated.trim().trim_matches('"').trim().to_string();
     if t.is_empty() || t.len() > 300 {
         // Une « traduction » vide ou bavarde (le modèle a répondu autre chose

@@ -1,4 +1,4 @@
-# Chantier « Assistant IA » — étape 1
+# Chantier « Assistant IA » — étapes 1 et 2
 
 GO de Bertrand du 12/10/2026. Fonction **gratuite**, pour tout le monde :
 l'utilisateur fournit **sa** clé, les appels partent de **son** serveur vers
@@ -227,16 +227,7 @@ modifié depuis n'est pas écrasé (`modifie_depuis`). `GET /albums/{id}/histori
 
 ## 9. Étapes suivantes
 
-**Étape 2**
-- étendre les suggestions à une sélection d'albums (lot, aperçu, plafond par
-  lot) et aux pistes (œuvre / mouvement par piste) ;
-- propager le genre accepté aux pistes comme l'édition manuelle (#5314), avec
-  son annulation ;
-- offrir les critères par référence (étiquettes, collections) en donnant au
-  modèle la liste des noms existants ;
-- migrer l'ancien assistant `POST /ai/query` (clé `anthropic_api_key` en clair,
-  modèle figé) et la traduction des ambiances vers ce coffre et ce plafond ;
-- réserver les réglages de l'assistant aux profils administrateurs.
+**Étape 2** — livrée, voir § 10.
 
 **Étape 3**
 - recherche conversationnelle dans la bibliothèque, radio « dans l'esprit
@@ -244,3 +235,127 @@ modifié depuis n'est pas écrasé (`modifie_depuis`). `GET /albums/{id}/histori
 - suivi de consommation détaillé par usage, alerte à 80 % du plafond ;
 - relevé des tarifs automatisé ou daté à l'écran, avant le changement de prix
   Gemini du 01/01/2027.
+
+## 10. Étape 2 (GO de Bertrand du 12/10/2026)
+
+### 10.1 Suggestions sur un lot d'albums
+
+`POST /lot/suggestions {album_ids: [1…50], langue?, budget_eur?}` — un
+**aperçu** : chaque album passe, UN PAR UN, par le chemin de l'album seul
+(cache, plafond, garde MusicBrainz / édition manuelle, écart avant/après,
+confiance). Rien n'est écrit.
+
+```json
+{"ok": true,
+ "resultats": [{"ok": true, "album_id", "titre", "suggestions", "ecartees", "depuis_cache", "cout_eur"}
+             | {"ok": false, "album_id", "error", "message"}],
+ "arret": null | {"error": "plafond_atteint" | "budget_du_lot_atteint" | …, "message"},
+ "non_traites": [ids], "cout_eur": 0.0}
+```
+
+- **Arrêt net** : à la première erreur d'APPEL (plafond mensuel atteint, clé
+  refusée, quota, non configuré…) — elle frapperait l'album suivant de même —
+  ou quand le coût du lot atteint `budget_eur`. Les albums restants sont
+  rendus dans `non_traites`, aucun appel de plus ne part.
+- Un album introuvable ou une réponse hors schéma n'arrête pas le lot.
+
+`POST /lot/appliquer {albums: [{album_id, lignes}]}` applique album par album
+(mêmes garde-fous qu'à l'unité, rejoués), et rend un rapport par album avec son
+`operation_id`. `POST /lot/annuler {operations: [{album_id, operation_id?}]}`.
+
+### 10.2 Suggestions sur les pistes
+
+`POST /albums/{id}/pistes/suggestions` → `{suggestions: [{piste_id, titre,
+champ, avant, apres, confiance, raison}], ecartees}` pour l'**œuvre** (`work`)
+et le **mouvement** (`movement`), rangés dans `track_metadata`.
+
+Aucun écran ne saisit encore à la main l'œuvre d'une piste : il n'existe pas
+de marqueur d'édition manuelle à lire. La garde est donc plus stricte que sur
+l'album : **l'assistant ne remplit que des vides**, ou remplace une valeur
+qu'il a lui-même posée (`track_metadata.source_ia`). Toute autre valeur est
+tenue (`deja_rempli`) ; sur un album identifié par MusicBrainz ou une piste
+qui porte un `musicbrainz_recording_id`, un champ rempli est tenu même posé par
+l'assistant (`musicbrainz`). Une piste qui n'est pas de l'album :
+`piste_inconnue`.
+
+`POST /albums/{id}/pistes/appliquer {lignes: [{piste_id, champ, valeur}]}` ;
+l'opération entre au journal de l'album (lignes avec `piste_id`) et s'annule
+par `POST /albums/{id}/annuler`.
+
+### 10.3 Le genre accepté vaut pour les pistes
+
+Comme l'édition manuelle (#5314, `tune_core::db::genre_album_pistes`) : un
+genre accepté est recopié sur les pistes (`tracks.genre`, `tracks.genres`,
+`albums.genres`, marqueur `genre_pistes`), sauf compilation aux genres de
+pistes différents (`compilation_epargnee`). L'opération garde, piste par
+piste, la valeur d'avant et celle d'après (`genre_pistes` dans le journal).
+L'annulation rend chaque piste dont le genre est encore celui de la recopie
+(`pistes_genre`), laisse celles retouchées depuis (`pistes_modifiees_depuis`),
+et restaure `albums.genres` et le marqueur. Le genre des pistes n'est rendu
+que si celui de l'album l'a été.
+
+### 10.4 Étiquettes et collections dans la playlist par phrase
+
+Le moteur expose `tag` (`tag_ref`) et `in_collection` (`collection_ref`). La
+consigne donne au modèle la liste des **noms** existants (200 au plus par
+famille) : étiquettes (`tags`), collections classiques (réglage
+`collections`, la source même du résolveur du moteur) et intelligentes
+(`smart_collections`). Le modèle répond par un nom ; la validation le traduit
+en identifiant moteur (`7`, `classic:3`, `smart:5`), sans tenir compte de la
+casse. Nom inconnu : `reference_inconnue` ; porté par deux objets :
+`reference_ambigue`. Sans étiquette (ou collection) dans la base, le critère
+n'est pas offert. `in_playlist` (`playlist_ref`) et `credit` restent hors de
+l'assistant.
+
+### 10.5 Migration de l'ancien `/ai/query` et de la traduction des ambiances
+
+`tune_assistant_ia::migration` : les clés EN CLAIR `anthropic_api_key`,
+`gemini_api_key`, `openai_api_key` (dans cet ordre, celui de l'ancienne
+traduction) passent au coffre :
+
+- **adoptée** si l'assistant n'a pas de clé et que son fournisseur est vide
+  ou le même — le fournisseur est alors posé ;
+- **déjà présente** si l'assistant a la même ;
+- sinon **conservée à part**, scellée sous
+  `assistant_ia_api_key_heritee_<famille>` (rien n'est perdu).
+
+La valeur en clair n'est effacée qu'après relecture de la valeur scellée et
+vérification qu'elle s'ouvre sur la même clé. Idempotente ; sans clé héritée,
+rien n'est écrit, pas même la clé maîtresse. Jouée au démarrage du greffon, et
+avant chaque usage hérité (une clé reposée en clair par un ancien client est
+rattrapée). `anthropic_model` n'est pas repris (pas de tarif documenté).
+
+`tune_assistant_ia::Passerelle`, construite par l'hôte
+(`plugins::passerelle_assistant`) sur la même base, le même dossier de clé et
+**le même verrou de consommation** (`appel::verrou_de_consommation`, unique
+pour le processus) :
+
+- `POST /ai/query` : chaque tour du dialogue à outils passe par
+  `discuter_anthropic` — clé du coffre, modèle et adresse de l'assistant,
+  comptage au tarif de la table, refus plafond atteint (réponse
+  `{reply, error: "plafond_atteint"}`, jamais 401). Il faut que le
+  fournisseur de l'assistant soit Anthropic (le pilotage par outils est écrit
+  pour l'API Messages) ; sinon, repli local, comme sans clé ;
+- la traduction des ambiances (`translate_query_avec`) part chez le
+  fournisseur de l'assistant, quel qu'il soit, sans mode JSON, comptée et
+  bornée par le plafond ; `translation_available` vaut « assistant prêt, ou
+  clé héritée en attente de migration ».
+
+Un binaire compilé sans `assistant-ia` garde le chemin historique.
+
+### 10.6 Réglages réservés aux administrateurs
+
+`PUT /reglages` et `POST /tester` (qui dépense) suivent la règle de
+`RequireAdmin` : sans authentification, ouverts ; avec, un jeton
+d'administrateur (`AuthUser.role == "admin"`), sinon `403 admin_requis` —
+jamais 401. `GET /reglages` reste lisible et dit `modifiable`. Les usages
+(playlist, suggestions) restent ouverts à tous les profils. Le client web
+n'affiche le formulaire qu'à un administrateur.
+
+### 10.7 Essais (faux fournisseur, aucun appel réseau réel)
+
+`plugins/tune-assistant-ia/tests/etape2.rs`, les essais de module
+(`migration`, `pistes`, `suggestions`, `regles`) et
+`tune-server/tests/assistant_ia_ancien_assistant_etape2.rs` (la route montée
+`/ai/query`, plafond à zéro).
+

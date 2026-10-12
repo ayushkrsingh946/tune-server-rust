@@ -197,14 +197,14 @@ pub fn fabrique_reelle() -> Fabrique {
     })
 }
 
-const DELAI: Duration = Duration::from_secs(90);
+pub(crate) const DELAI: Duration = Duration::from_secs(90);
 
-fn client() -> &'static reqwest::Client {
+pub(crate) fn client() -> &'static reqwest::Client {
     tune_core::http::client::shared()
 }
 
 /// Une erreur de transport, réduite à sa nature : son texte peut porter l'URL.
-fn erreur_reseau(famille: Famille, e: &reqwest::Error) -> ErreurFournisseur {
+pub(crate) fn erreur_reseau(famille: Famille, e: &reqwest::Error) -> ErreurFournisseur {
     let nature = if e.is_timeout() {
         "delai"
     } else if e.is_connect() {
@@ -221,7 +221,7 @@ fn erreur_reseau(famille: Famille, e: &reqwest::Error) -> ErreurFournisseur {
 
 /// Un statut d'échec, traduit. `corps` ne sert qu'à reconnaître un crédit
 /// épuisé ou un modèle inconnu ; il n'est jamais journalisé.
-fn erreur_de_statut(famille: Famille, statut: u16, corps: &str) -> ErreurFournisseur {
+pub(crate) fn erreur_de_statut(famille: Famille, statut: u16, corps: &str) -> ErreurFournisseur {
     warn!(
         fournisseur = famille.nom(),
         statut, "assistant_ia_fournisseur_erreur"
@@ -244,7 +244,7 @@ fn erreur_de_statut(famille: Famille, statut: u16, corps: &str) -> ErreurFournis
     }
 }
 
-fn base(acces: &Acces) -> String {
+pub(crate) fn base(acces: &Acces) -> String {
     let b = acces.url_base.trim();
     let b = if b.is_empty() {
         acces.famille.url_par_defaut()
@@ -254,7 +254,7 @@ fn base(acces: &Acces) -> String {
     b.trim_end_matches('/').to_string()
 }
 
-fn jetons(v: &Value, cle: &str) -> u64 {
+pub(crate) fn jetons(v: &Value, cle: &str) -> u64 {
     v.get(cle).and_then(Value::as_u64).unwrap_or(0)
 }
 

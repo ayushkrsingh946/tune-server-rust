@@ -593,6 +593,13 @@ path = "tests/compilation_le_tag_fait_foi.rs"
 name = "ambiance_traduction_annoncee_3839"
 path = "tests/ambiance_traduction_annoncee_3839.rs"
 
+# Chantier « Assistant IA », étape 2 : l'ancien `/ai/query` passe par le coffre
+# et le plafond du greffon (sans appel réseau : plafond à zéro).
+[[test]]
+name = "assistant_ia_ancien_assistant_etape2"
+path = "tests/assistant_ia_ancien_assistant_etape2.rs"
+required-features = ["assistant-ia"]
+
 # #3101 : la portée de répertoire de l'audit de bibliothèque. Le motif LIKE de
 # `GET /export/library-audit.csv?dir=…` était écrit à la main, sans séparateur :
 # auditer `…/Rock` ramenait `…/Rockabilly` et le déclarait fantôme. Le témoin

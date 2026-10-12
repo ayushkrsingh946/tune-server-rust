@@ -321,10 +321,24 @@ pub(super) async fn acoustic_search(
     // (anthropic/openai/gemini), on traduit sa requête (cache local, une
     // seule traduction par requête) ; sans clé ou en cas d'échec, requête
     // brute — comportement historique, les presets anglais ne changent pas.
+    //
+    // Étape 2 du chantier « Assistant IA » : avec le greffon, la traduction
+    // passe par le fournisseur de l'assistant — sa clé scellée (l'ancienne
+    // clé en clair y est migrée), son plafond, son comptage.
     let settings = tune_core::db::settings_repo::SettingsRepo::with_backend(state.backend.clone());
-    let effective_query = tune_core::ai::translate::translate_query(&settings, query)
+    #[cfg(feature = "assistant-ia")]
+    let effective_query = {
+        let passerelle = crate::plugins::passerelle_assistant(&state.backend);
+        tune_core::ai::translate::translate_query_avec(&settings, query, |q| async move {
+            passerelle
+                .traduire(tune_core::ai::translate::PROMPT, &q)
+                .await
+        })
         .await
-        .unwrap_or_else(|| query.to_string());
+    };
+    #[cfg(not(feature = "assistant-ia"))]
+    let effective_query = tune_core::ai::translate::translate_query(&settings, query).await;
+    let effective_query = effective_query.unwrap_or_else(|| query.to_string());
     if effective_query != query {
         tracing::info!(query = %query, translated = %effective_query, "acoustic_query_translated");
     }
@@ -612,6 +626,10 @@ pub(super) async fn acoustic_status(State(state): State<AppState>) -> Json<Value
     // route. Sans cette ligne, l'ecran Ambiance ne peut ni conseiller l'anglais
     // ni renvoyer aux reglages — c'est le silence que JeromeQ a rencontre
     // (fil 1751). Le serveur SAIT ; il le dit ici.
+    #[cfg(feature = "assistant-ia")]
+    let translation_available =
+        crate::plugins::passerelle_assistant(&state.backend).traduction_disponible();
+    #[cfg(not(feature = "assistant-ia"))]
     let translation_available = tune_core::ai::translate::cle_disponible(
         &tune_core::db::settings_repo::SettingsRepo::with_backend(state.backend.clone()),
     );
