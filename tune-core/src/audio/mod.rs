@@ -123,6 +123,7 @@ pub mod soft_mute;
 pub mod staged_growth;
 pub mod support;
 pub mod tap;
+pub mod tempo;
 /// CLAP text tower for natural-language acoustic search (Phase 3).
 #[cfg(feature = "audio-embedding")]
 pub mod text_embedding;

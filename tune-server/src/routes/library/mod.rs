@@ -24,6 +24,8 @@ mod duplicates;
 mod edition;
 mod edition_balises;
 mod enrich;
+// Lot 1 de l'enrichissement d'après MetaRust, de Xavier Joly (#4805).
+mod enrichissement_metarust;
 // #5469 — les passes que `crate::reprise_des_passes` sait relancer.
 pub(crate) use artwork::{demarrer_images_artistes, demarrer_pochettes_albums};
 pub(crate) use enrich::demarrer_enrich_all;
@@ -479,6 +481,41 @@ pub fn router() -> Router<AppState> {
             get(genres::genre_tree).put(genres::update_genre_tree),
         )
         .route("/albums/top-rated", get(albums::top_rated_albums))
+        // Lot 1 de l'enrichissement d'après MetaRust (#4805) : complétude,
+        // instruments Wikidata, propositions Discogs, BPM.
+        .route(
+            "/albums/incomplete",
+            get(enrichissement_metarust::albums_incomplete),
+        )
+        .route(
+            "/albums/{id}/completeness/musicbrainz",
+            get(enrichissement_metarust::album_completeness),
+        )
+        .route(
+            "/albums/{id}/instruments",
+            post(enrichissement_metarust::album_instruments),
+        )
+        .route(
+            "/albums/{id}/discogs",
+            get(enrichissement_metarust::album_discogs),
+        )
+        .route(
+            "/albums/{id}/discogs/search",
+            post(enrichissement_metarust::album_discogs_search),
+        )
+        .route(
+            "/albums/{id}/discogs/{discogs_id}/accept",
+            post(enrichissement_metarust::album_discogs_accept),
+        )
+        .route(
+            "/albums/{id}/discogs/{discogs_id}/reject",
+            post(enrichissement_metarust::album_discogs_reject),
+        )
+        .route("/albums/{id}/bpm", get(enrichissement_metarust::album_bpm))
+        .route(
+            "/albums/{id}/bpm/estimate",
+            post(enrichissement_metarust::album_bpm_estimate),
+        )
         .route("/albums/{id}/rate", post(albums::rate_album))
         .route("/albums/{id}/rating", get(albums::get_album_rating))
         .route("/tracks/{id}/credits", get(credits::track_credits))
