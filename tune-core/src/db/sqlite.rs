@@ -753,6 +753,18 @@ CREATE TABLE IF NOT EXISTS track_credits (
     artist_mbid TEXT
 );
 
+-- Chantier artistes multiples : la liaison piste <-> artistes d'un crédit
+-- ARTIST découpé, à côté de tracks.artist_id (migration 125 pour les bases
+-- existantes). Ici aussi parce que la purge des artistes orphelins la nomme,
+-- y compris sur une base montée par CORE_SCHEMA seul.
+CREATE TABLE IF NOT EXISTS track_artists (
+    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    rang INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (track_id, artist_id)
+);
+CREATE INDEX IF NOT EXISTS idx_track_artists_artist ON track_artists(artist_id);
+
 -- Persistent per-file first-seen-in-library timestamp, keyed by path.
 -- Deliberately NOT a column on tracks/albums: a full rescan does
 -- DELETE FROM tracks/albums (ids reassigned in walk order), which would reset
