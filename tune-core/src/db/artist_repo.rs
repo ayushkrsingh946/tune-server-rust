@@ -2051,6 +2051,13 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        // La purge nomme aussi `track_artists` (chantier artistes multiples).
+        sqlx::raw_sql(include_str!(
+            "../../migrations/postgres/089_track_artists.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::raw_sql(
             "INSERT INTO artists (id, name) VALUES \
                (1, 'Interprète'), (2, 'Various Artists'), (3, 'Compositeur'), (4, 'Orphelin');\
