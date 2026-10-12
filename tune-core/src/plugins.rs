@@ -27,6 +27,61 @@ pub struct PluginManifest {
     /// existing manifests parse unchanged.
     #[serde(default)]
     pub event_subscriptions: Vec<String>,
+    /// #6197 — les domaines que la permission `http` laisse joindre : un nom
+    /// exact (tous ports) ou `*.domaine` (les sous-domaines). Lus par l'HÔTE
+    /// et rangés dans le bac à sable ; le greffon ne peut pas les étendre.
+    /// Vide (défaut) : aucune requête ne part, même avec `http`.
+    #[serde(default)]
+    pub http_allowed_domains: Vec<String>,
+    /// #6197 — le greffon FOURNIT une source de streaming, inscrite dans le
+    /// registre des services sous `name`. Exige la permission
+    /// `streaming_source`. Absent (défaut) : le greffon n'en fournit pas.
+    #[serde(default)]
+    pub streaming_source: Option<SourceDeStreaming>,
+}
+
+/// #6197 — ce qu'un greffon source de streaming déclare dans son manifeste.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceDeStreaming {
+    /// La clé du service dans le registre et dans les routes
+    /// `/streaming/{name}/…` : `[a-z0-9_-]`, et pas celle d'un service
+    /// existant.
+    pub name: String,
+    /// Le nom affiché.
+    #[serde(default)]
+    pub display_name: String,
+    /// Les champs que l'écran de connexion demande, dans l'ordre.
+    #[serde(default)]
+    pub login_fields: Vec<ChampDeConnexion>,
+}
+
+/// #6197 — un champ de connexion déclaré par un greffon source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChampDeConnexion {
+    pub key: String,
+    #[serde(default)]
+    pub label: String,
+    /// `text`, `email` ou `password` — l'écran masque `password`.
+    #[serde(rename = "type", default = "type_de_champ_par_defaut")]
+    pub kind: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+fn type_de_champ_par_defaut() -> String {
+    "text".to_string()
+}
+
+impl SourceDeStreaming {
+    /// Le nom est-il une clé de service acceptable ?
+    pub fn nom_valide(&self) -> bool {
+        !self.name.is_empty()
+            && self.name.len() <= 40
+            && self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    }
 }
 
 impl PluginManifest {
@@ -265,6 +320,8 @@ mod tests {
             min_server_version: min.map(str::to_string),
             premium: false,
             event_subscriptions: vec![],
+            http_allowed_domains: vec![],
+            streaming_source: None,
         }
     }
 
@@ -414,6 +471,8 @@ mod tests {
                     min_server_version: None,
                     premium: false,
                     event_subscriptions: vec![],
+                    http_allowed_domains: vec![],
+                    streaming_source: None,
                 },
                 state: PluginState::Active,
                 path: String::new(),
@@ -434,6 +493,8 @@ mod tests {
                     min_server_version: None,
                     premium: false,
                     event_subscriptions: vec![],
+                    http_allowed_domains: vec![],
+                    streaming_source: None,
                 },
                 state: PluginState::Disabled,
                 path: String::new(),

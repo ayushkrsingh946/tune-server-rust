@@ -81,9 +81,12 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use wasmtime::{
-    Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder,
-    TypedFunc,
+    Caller, Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits,
+    StoreLimitsBuilder, TypedFunc,
 };
+
+/// #6197 — la liste de domaines de la permission `http`.
+pub mod reseau;
 
 /// ABI version the host implements. A plugin whose `abi_version()` export does
 /// not return this exact value is rejected at load time (RFC §4).
@@ -222,6 +225,26 @@ pub trait HostContext: Send + Sync {
     /// `kv` — lister les clés du greffon commençant par `prefix` (sans le
     /// préfixe de cloisonnement, qu'un greffon n'a jamais à connaître).
     fn kv_list(&self, plugin_id: &str, prefix: &str) -> Result<serde_json::Value, String>;
+
+    /// `http` (#6197) — une requête HTTP sortante, faite PAR L'HÔTE pour
+    /// `plugin_id`. Le runtime a déjà vérifié la permission et la liste de
+    /// domaines du manifeste avant d'appeler : l'implémentation n'a pas à le
+    /// refaire, mais elle tient la boîte à cookies du greffon et ne suit
+    /// aucune redirection (la suivante repasserait sinon hors liste).
+    ///
+    /// Entrée : `{method, url, headers?: {nom: valeur}, body?: "texte"}`.
+    /// Sortie : `{status, headers: {nom: valeur}, body: "texte"}`.
+    ///
+    /// Méthode par défaut — refus — pour que les hôtes existants (bancs
+    /// d'essai compris) n'aient rien à changer.
+    fn http_request(
+        &self,
+        plugin_id: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (plugin_id, request);
+        Err("http: aucun hôte réseau câblé".to_string())
+    }
 
     /// L'heure de l'hôte, en millisecondes depuis l'époque Unix (#4718).
     ///
@@ -402,6 +425,10 @@ struct StoreData {
     /// n'est câblé ([`WasmPlugin::load`]) — les capacités `kv` refusent alors,
     /// faute de savoir à qui appartiendrait la clé.
     plugin_id: String,
+    /// #6197 — les domaines que la permission `http` laisse joindre, NORMALISÉS
+    /// ([`reseau::normaliser_domaines`]). Ils viennent du manifeste lu par
+    /// l'hôte, jamais du greffon. Vide : tout est refusé.
+    http_domains: Vec<String>,
     /// The plugin's linear memory, set after instantiation. `None` only during
     /// instantiation, before any host-function can possibly run.
     memory: Option<Memory>,
@@ -1039,6 +1066,34 @@ fn register_host_imports(linker: &mut Linker<StoreData>) -> Result<(), String> {
         )
         .map_err(|e| format!("register host_kv_list: {e}"))?;
 
+    // -----------------------------------------------------------------------
+    // #6197 — `http` : requête sortante, faite par l'hôte, bornée par la liste
+    // de domaines du manifeste. Le refus est rendu AVANT tout appel à l'hôte :
+    // un domaine hors liste n'ouvre aucune connexion.
+    // -----------------------------------------------------------------------
+    linker
+        .func_wrap(
+            "tune",
+            "host_http",
+            |mut caller: Caller<'_, StoreData>,
+             ptr: i32,
+             len: i32|
+             -> Result<i64, wasmtime::Error> {
+                let domaines = caller.data().http_domains.clone();
+                host_json_call_du_greffon(&mut caller, ptr, len, "http", move |ctx, greffon, v| {
+                    let url = texte(&v, "url");
+                    match reseau::verifier_l_adresse(&url, &domaines) {
+                        Ok(_) => ctx.http_request(greffon, v),
+                        Err(refus) => Ok(serde_json::json!({
+                            "error": refus.code,
+                            "detail": refus.detail,
+                        })),
+                    }
+                })
+            },
+        )
+        .map_err(|e| format!("register host_http: {e}"))?;
+
     Ok(())
 }
 
@@ -1049,6 +1104,9 @@ fn register_host_imports(linker: &mut Linker<StoreData>) -> Result<(), String> {
 /// fuel- and memory-bounded and can never hang the host.
 pub struct WasmPlugin {
     store: Store<StoreData>,
+    /// #6197 — gardée pour résoudre les fonctions exportées par leur nom
+    /// ([`WasmPlugin::call_export`]).
+    instance: Instance,
     memory: Memory,
     alloc: TypedFunc<u32, u32>,
     dealloc: TypedFunc<(u32, u32), ()>,
@@ -1089,10 +1147,33 @@ impl WasmPlugin {
         permissions: HashSet<String>,
         plugin_id: &str,
     ) -> Result<WasmPlugin, String> {
+        Self::load_with_host_http(path, limits, ctx, permissions, plugin_id, &[])
+    }
+
+    /// Comme [`load_with_host`](WasmPlugin::load_with_host), avec la liste de
+    /// domaines de la permission `http` (#6197), lue par l'hôte dans le
+    /// manifeste (`http_allowed_domains`). Elle est normalisée ici ; une
+    /// entrée qui ouvrirait plus qu'elle n'en a l'air est écartée.
+    pub fn load_with_host_http(
+        path: &Path,
+        limits: Limits,
+        ctx: Arc<dyn HostContext>,
+        permissions: HashSet<String>,
+        plugin_id: &str,
+        http_domains: &[String],
+    ) -> Result<WasmPlugin, String> {
         let engine = engine();
         let module =
             Module::from_file(engine, path).map_err(|e| format!("load wasm module: {e}"))?;
-        Self::from_module(engine, &module, limits, ctx, permissions, plugin_id)
+        Self::from_module(
+            engine,
+            &module,
+            limits,
+            ctx,
+            permissions,
+            plugin_id,
+            reseau::normaliser_domaines(http_domains),
+        )
     }
 
     /// Instantiate from already-compiled wat/wasm text or bytes, no host wired.
@@ -1113,9 +1194,31 @@ impl WasmPlugin {
         permissions: HashSet<String>,
         plugin_id: &str,
     ) -> Result<WasmPlugin, String> {
+        Self::from_bytes_with_host_http(bytes, limits, ctx, permissions, plugin_id, &[])
+    }
+
+    /// [`from_bytes_with_host`](WasmPlugin::from_bytes_with_host) avec la
+    /// liste de domaines `http` (#6197).
+    #[cfg(test)]
+    pub fn from_bytes_with_host_http(
+        bytes: impl AsRef<[u8]>,
+        limits: Limits,
+        ctx: Arc<dyn HostContext>,
+        permissions: HashSet<String>,
+        plugin_id: &str,
+        http_domains: &[String],
+    ) -> Result<WasmPlugin, String> {
         let engine = engine();
         let module = Module::new(engine, bytes).map_err(|e| format!("compile wasm module: {e}"))?;
-        Self::from_module(engine, &module, limits, ctx, permissions, plugin_id)
+        Self::from_module(
+            engine,
+            &module,
+            limits,
+            ctx,
+            permissions,
+            plugin_id,
+            reseau::normaliser_domaines(http_domains),
+        )
     }
 
     fn from_module(
@@ -1125,6 +1228,7 @@ impl WasmPlugin {
         ctx: Arc<dyn HostContext>,
         permissions: HashSet<String>,
         plugin_id: &str,
+        http_domains: Vec<String>,
     ) -> Result<WasmPlugin, String> {
         let state = StoreData {
             limits: StoreLimitsBuilder::new()
@@ -1133,6 +1237,7 @@ impl WasmPlugin {
             ctx,
             permissions,
             plugin_id: plugin_id.to_string(),
+            http_domains,
             memory: None,
             alloc: None,
         };
@@ -1198,6 +1303,7 @@ impl WasmPlugin {
 
         Ok(WasmPlugin {
             store,
+            instance,
             memory,
             alloc,
             dealloc,
@@ -1283,10 +1389,41 @@ impl WasmPlugin {
         Ok(())
     }
 
+    /// #6197 — le greffon exporte-t-il une fonction `name` de la forme
+    /// `(ptr, len) -> (ptr << 32) | len` ?
+    pub fn has_export(&mut self, name: &str) -> bool {
+        self.instance
+            .get_typed_func::<(u32, u32), u64>(&mut self.store, name)
+            .is_ok()
+    }
+
+    /// #6197 — appeler une fonction EXPORTÉE par son nom (`search`,
+    /// `get_album`, `get_track_url`…), avec la convention de
+    /// [`dispatch`](WasmPlugin::dispatch) : JSON en entrée, JSON en sortie,
+    /// carburant et mémoire bornés. Une fonction absente est une erreur
+    /// nommée, jamais un piège.
+    pub fn call_export(&mut self, name: &str, json_in: &str) -> Result<String, String> {
+        let func = self
+            .instance
+            .get_typed_func::<(u32, u32), u64>(&mut self.store, name)
+            .map_err(|_| format!("export_missing: le greffon n'exporte pas `{name}`"))?;
+        self.call_raw_with(&func, json_in.as_bytes())
+    }
+
     /// Core marshalling: alloc guest buffer, write input, call dispatch, read
     /// the packed result, free both buffers. Replenishes the fuel budget so
     /// this call is independently bounded.
     fn call_raw(&mut self, input: &[u8]) -> Result<String, String> {
+        let dispatch = self.dispatch.clone();
+        self.call_raw_with(&dispatch, input)
+    }
+
+    /// [`call_raw`](WasmPlugin::call_raw) sur une fonction donnée (#6197).
+    fn call_raw_with(
+        &mut self,
+        func: &TypedFunc<(u32, u32), u64>,
+        input: &[u8],
+    ) -> Result<String, String> {
         // Fresh per-call fuel budget: a previous runaway call cannot starve
         // this one, and this call cannot run forever.
         self.store
@@ -1302,8 +1439,7 @@ impl WasmPlugin {
             .write(&mut self.store, in_ptr as usize, input)
             .map_err(|e| format!("write input to plugin memory: {e}"))?;
 
-        let packed = self
-            .dispatch
+        let packed = func
             .call(&mut self.store, (in_ptr, in_len))
             .map_err(|e| format!("plugin dispatch trapped (fuel/limit or error): {e}"))?;
 
@@ -1676,6 +1812,16 @@ mod tests {
             self.noter(
                 "kv_list",
                 serde_json::json!({ "plugin_id": plugin_id, "prefix": prefix }),
+            )
+        }
+        fn http_request(
+            &self,
+            plugin_id: &str,
+            request: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            self.noter(
+                "http_request",
+                serde_json::json!({ "plugin_id": plugin_id, "request": request }),
             )
         }
     }
@@ -2366,6 +2512,7 @@ mod tests {
                 ctx: Arc::new(NoHost),
                 permissions: HashSet::new(),
                 plugin_id: String::new(),
+                http_domains: Vec::new(),
                 memory: None,
                 alloc: None,
             },
@@ -2410,6 +2557,7 @@ mod tests {
             "host_kv_get",
             "host_kv_set",
             "host_kv_list",
+            "host_http",
         ]
         .iter()
         .map(|n| format!("tune::{n}"))
@@ -2558,5 +2706,117 @@ mod tests {
             serde_json::json!({ "now_ms": 1_758_700_000_000u64 }),
             "host_now doit rendre l'heure de l'hôte, sans aucune permission"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #6197 — permission `http`, liste de domaines, fonctions exportées
+    // -----------------------------------------------------------------------
+
+    /// Jouer `host_http` avec `payload`, les permissions `accordees` et la
+    /// liste `domaines` du manifeste.
+    fn jouer_http(
+        payload: &str,
+        accordees: &[&str],
+        domaines: &[&str],
+    ) -> (serde_json::Value, Arc<MockHostContext>) {
+        let mock = Arc::new(MockHostContext::default());
+        let domaines: Vec<String> = domaines.iter().map(|d| d.to_string()).collect();
+        let mut plugin = WasmPlugin::from_bytes_with_host_http(
+            appel_hote_wat("host_http", payload),
+            Limits::default(),
+            mock.clone() as Arc<dyn HostContext>,
+            perms(accordees),
+            "source-exemple",
+            &domaines,
+        )
+        .expect("charger le greffon d'essai");
+        let sortie = plugin.dispatch("{}").expect("dispatch");
+        let rendu: serde_json::Value =
+            serde_json::from_str(&sortie).expect("la sortie du greffon est du JSON");
+        (rendu, mock)
+    }
+
+    /// Un domaine hors liste est refusé AVANT l'hôte : aucune requête ne part.
+    #[test]
+    fn un_domaine_non_autorise_est_refuse_sans_toucher_au_reseau_6197() {
+        let (rendu, mock) = jouer_http(
+            r#"{"method":"GET","url":"https://evil.com/vol"}"#,
+            &["http"],
+            &["api.exemple.com"],
+        );
+        assert_eq!(rendu["error"], "domain_not_allowed", "{rendu}");
+        assert_eq!(rendu["detail"], "evil.com");
+        assert!(
+            mock.appels_4716.lock().unwrap().is_empty(),
+            "l'hôte ne doit pas avoir été appelé"
+        );
+
+        // Le greffon ne peut pas élargir la liste par son JSON d'entrée.
+        let (rendu, mock) = jouer_http(
+            r#"{"method":"GET","url":"https://evil.com/","http_allowed_domains":["evil.com"]}"#,
+            &["http"],
+            &["api.exemple.com"],
+        );
+        assert_eq!(rendu["error"], "domain_not_allowed", "{rendu}");
+        assert!(mock.appels_4716.lock().unwrap().is_empty());
+
+        // Des identifiants dans l'URL, qui font lire « api.exemple.com » à l'œil.
+        let (rendu, _) = jouer_http(
+            r#"{"method":"GET","url":"https://api.exemple.com@evil.com/"}"#,
+            &["http"],
+            &["api.exemple.com"],
+        );
+        assert_eq!(rendu["error"], "credentials_in_url", "{rendu}");
+    }
+
+    /// Sans la permission `http`, même un domaine listé est refusé.
+    #[test]
+    fn sans_la_permission_http_rien_ne_part_6197() {
+        let (rendu, mock) = jouer_http(
+            r#"{"method":"GET","url":"https://api.exemple.com/"}"#,
+            &[],
+            &["api.exemple.com"],
+        );
+        assert_eq!(rendu["error"], "permission_denied", "{rendu}");
+        assert_eq!(rendu["permission"], "http");
+        assert!(mock.appels_4716.lock().unwrap().is_empty());
+    }
+
+    /// Un domaine listé part à l'hôte, avec l'identifiant de greffon que
+    /// l'HÔTE a rangé au chargement (la boîte à cookies en dépend).
+    #[test]
+    fn un_domaine_autorise_part_a_l_hote_avec_l_identifiant_du_greffon_6197() {
+        let (rendu, mock) = jouer_http(
+            r#"{"method":"GET","url":"https://api.exemple.com/v1/search?q=a","plugin_id":"autre"}"#,
+            &["http"],
+            &["api.exemple.com"],
+        );
+        assert_eq!(rendu["appel"], "http_request", "{rendu}");
+        let (nom, args) = mock.seul_appel();
+        assert_eq!(nom, "http_request");
+        assert_eq!(args["plugin_id"], "source-exemple", "{args}");
+        assert_eq!(
+            args["request"]["url"],
+            "https://api.exemple.com/v1/search?q=a"
+        );
+    }
+
+    /// Une fonction exportée s'appelle par son nom ; une fonction absente est
+    /// une erreur nommée, pas un piège.
+    #[test]
+    fn une_fonction_exportee_s_appelle_par_son_nom_6197() {
+        let wat = echo_wat(HOST_ABI_VERSION).replace(
+            "(func (export \"plugin_dispatch\")",
+            "(func (export \"search\") (param $p i32) (param $l i32) (result i64)\n    (call $echo (local.get $p) (local.get $l)))\n  (func $echo (export \"plugin_dispatch\")",
+        );
+        let mut plugin = WasmPlugin::from_bytes(wat, Limits::default()).expect("charger");
+        assert!(plugin.has_export("search"));
+        assert!(!plugin.has_export("get_album"));
+        assert_eq!(
+            plugin.call_export("search", r#"{"query":"a"}"#).unwrap(),
+            r#"{"query":"a"}"#
+        );
+        let erreur = plugin.call_export("get_album", "{}").unwrap_err();
+        assert!(erreur.starts_with("export_missing"), "{erreur}");
     }
 }

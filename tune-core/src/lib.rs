@@ -12,6 +12,8 @@ pub mod bug_report;
 pub mod cadence;
 pub mod chemins_de_travail;
 pub mod cloud;
+/// #6197 — le coffre des identifiants des greffons sources de streaming.
+pub mod coffre_greffons;
 pub mod collaborative;
 pub mod confidentialite;
 pub mod config;

@@ -6,6 +6,10 @@ license.workspace = true
 
 [dependencies]
 serde_json = { workspace = true }
+# #6197 — la liste de domaines de la permission `http` : analyser l'URL comme
+# le client HTTP l'analysera (identifiants, IDN, IPv6), pas à la main. Déjà
+# dans l'arbre (tiré par reqwest).
+url = "2"
 # Compiler + runtime + WAT parsing only: no async, component model, GC,
 # threads, profiling, pooling, coredump or debug support.
 wasmtime = { version = "48.0.3", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
