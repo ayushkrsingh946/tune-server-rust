@@ -6,7 +6,7 @@ license.workspace = true
 autotests = false
 
 [features]
-default = ["local-audio", "oaat", "cloud-relay", "bandcamp", "pont-roon", "cd", "circle", "entree-audio"]
+default = ["local-audio", "oaat", "cloud-relay", "bandcamp", "pont-roon", "cd", "circle", "entree-audio", "assistant-ia"]
 # La capture de `entree-audio` (cpal en entrée) suit la pile audio locale :
 # sans elle, le greffon compile et dit que la capture n'est pas compilée.
 local-audio = ["tune-core/local-audio", "tune-entree-audio?/capture"]
@@ -75,6 +75,12 @@ circle = ["dep:tune-circle"]
 # l'exécution (`default_enabled = false`), au catalogue depuis #5296 (la
 # rubrique Sources du client web le consomme, #5065).
 entree-audio = ["dep:tune-entree-audio"]
+# Assistant IA, étape 1 (chantier assistant-ia) : playlists par phrase et
+# suggestions d'album, avec la clé de l'UTILISATEUR. Gratuit, dans `default`
+# et chargé par défaut (`default_enabled`) : rien ne part tant qu'aucun
+# fournisseur n'est réglé. Inscrit à `sdk/plugins.json`, d'où les lignes de
+# build et de test des workflows sont générées.
+assistant-ia = ["dep:tune-assistant-ia"]
 
 [dependencies]
 tune-plugin-native = { path = "../sdk/tune-plugin-native" }
@@ -101,6 +107,7 @@ tune-circle = { path = "../plugins/tune-circle", optional = true }
 tune-entree-audio = { path = "../plugins/tune-entree-audio", optional = true }
 tune-concerts = { path = "../plugins/tune-concerts", optional = true }
 tune-pont-roon = { path = "../plugins/tune-pont-roon", optional = true }
+tune-assistant-ia = { path = "../plugins/tune-assistant-ia", optional = true }
 tokio = { workspace = true }
 rayon = { workspace = true }
 axum = { workspace = true }
