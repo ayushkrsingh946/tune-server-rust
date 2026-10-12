@@ -2753,6 +2753,69 @@ mod tests {
             .collect()
     }
 
+    /// Chantier artistes multiples — le scan relie « The Beatles & Genesis »
+    /// aux deux artistes, garde « Simon & Garfunkel » entier, et retire la
+    /// liaison quand le crédit ne se découpe plus.
+    ///
+    /// Contre-épreuve : retirer l'appel à `noter_les_artistes_de_piste` dans
+    /// `import` fait tomber ce test (aucune ligne).
+    #[test]
+    fn le_scan_relie_la_piste_a_tous_les_artistes_du_credit() {
+        use tune_core::db::track_artist_repo::artistes_de_la_piste;
+        let tmp = tempfile::tempdir().unwrap();
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        tune_core::db::migrations::run_migrations(&db).unwrap();
+        let backend: Arc<dyn tune_core::db::backend::DbBackend> = Arc::new(db);
+        let track_repo = tune_core::db::track_repo::TrackRepo::with_backend(backend.clone());
+        let dossier = tmp.path().join("Mix");
+        std::fs::create_dir_all(&dossier).unwrap();
+        let chemin = |f: &str| dossier.join(f).to_string_lossy().into_owned();
+        let duo = fichier_etiquete(&chemin("01.flac"), "The Beatles & Genesis", "Mix", 1);
+        let groupe = fichier_etiquete(&chemin("02.flac"), "Simon & Garfunkel", "Mix", 2);
+
+        let scanner = |fichiers: &[&ScannedFile]| {
+            let mut imp = TrackImporter::new(
+                backend.clone(),
+                true,
+                tmp.path().join("cache"),
+                PorteeDuScan::TOUT,
+            );
+            let mut neuves = Vec::new();
+            let mut relues = Vec::new();
+            for f in fichiers {
+                let (mut piste, _) = imp.import(f).expect("import");
+                match track_repo.get_by_path(&f.path).unwrap() {
+                    Some(t) => {
+                        piste.id = t.id;
+                        relues.push(piste);
+                    }
+                    None => neuves.push(piste),
+                }
+            }
+            track_repo.create_batch(&neuves).unwrap();
+            track_repo.update_batch(&relues).unwrap();
+            imp.ecrire_les_artistes_de_piste(&*backend)
+        };
+        let id_de = |c: &str| track_repo.get_by_path(c).unwrap().unwrap().id.unwrap();
+
+        assert_eq!(scanner(&[&duo, &groupe]), 2);
+        let noms: Vec<String> = artistes_de_la_piste(&*backend, id_de(&duo.path))
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(noms, ["The Beatles", "Genesis"]);
+        assert!(
+            artistes_de_la_piste(&*backend, id_de(&groupe.path)).is_empty(),
+            "une exception n'est pas découpée"
+        );
+
+        // Le fichier est re-étiqueté : un seul artiste, la liaison part.
+        let seul = fichier_etiquete(&duo.path, "The Beatles", "Mix", 1);
+        scanner(&[&seul]);
+        assert!(artistes_de_la_piste(&*backend, id_de(&duo.path)).is_empty());
+    }
+
     /// Fichier étiqueté : les balises ont été lues.
     fn fichier_etiquete(chemin: &str, artiste: &str, album: &str, piste: u32) -> ScannedFile {
         let mut f = sf(chemin);
