@@ -1720,6 +1720,9 @@ fn conflict_clause(table: &str) -> &'static str {
         "album_ratings" => "ON CONFLICT (album_id, profile_id) DO NOTHING",
         "offline_cache" => "ON CONFLICT (source, source_id) DO NOTHING",
         "track_source_links" => "ON CONFLICT (track_id, service) DO NOTHING",
+        // Pas de colonne `id` : la clef primaire est la paire (chantier
+        // artistes multiples, script PG 089).
+        "track_artists" => "ON CONFLICT (track_id, artist_id) DO NOTHING",
         // Pas de colonne `id` non plus : la clef primaire, lue dans les
         // migrations SQLite et PostgreSQL. Sans ces lignes, la clause par
         // defaut ci-dessous faisait echouer leur copie (« column "id" does not
