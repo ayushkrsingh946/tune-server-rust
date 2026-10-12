@@ -2453,7 +2453,49 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "tracks_rating",
         up: "",
     },
+    // renesenses/tune-web-client#916 (FabienM, fil forum 1527) — « Pas pour
+    // moi » sur une suggestion de l'accueil : `suggestions_ecartees`, PAR
+    // PROFIL, écrite ET lue. Un album (local ou de service), une playlist de
+    // service, ou un artiste désigné par son nom normalisé. Les rangées de
+    // recommandation de `/home/*` ne proposent plus ce que le profil a
+    // écarté ; un autre profil le voit toujours. Go de Bertrand du 12/10.
+    //
+    // Table à part, pas un `item_type` de plus dans `hidden_items` : écarter
+    // une suggestion ne retire RIEN de la bibliothèque (voir
+    // `suggestions_ecartees.rs`).
+    //
+    // Patron `hidden_items` (89) : PAS de colonne `id`, la clé naturelle est
+    // la clé primaire — pas de divergence AUTOINCREMENT / BIGSERIAL à la
+    // bascule (#1706). `item_id` en TEXT : un identifiant de service n'est pas
+    // un entier, un nom d'artiste non plus.
+    //
+    // Numérotée 125 / PG 089 : la 124 / PG 088 (#6123) est la dernière sur
+    // `origin/main` et `chantier/accueil-suggestions` le 12/10, et aucune PR
+    // ouverte ne touche aux migrations PG. Idempotent : IF NOT EXISTS. Aussi
+    // dans le CORE_SCHEMA (base neuve), `PG_FULL_SCHEMA` (bascule) et
+    // `ENSURE_TABLES` (bases PG converties).
+    Migration {
+        version: 125,
+        name: "suggestions_ecartees",
+        up: SQL_SUGGESTIONS_ECARTEES,
+    },
 ];
+
+/// SQL de la migration 125 (web#916) — voir son entrée dans `MIGRATIONS`.
+/// Jumelle PG : `089_suggestions_ecartees.sql`.
+pub(crate) const SQL_SUGGESTIONS_ECARTEES: &str = "
+CREATE TABLE IF NOT EXISTS suggestions_ecartees (
+    profile_id INTEGER NOT NULL DEFAULT 1,
+    item_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    title TEXT,
+    subtitle TEXT,
+    cover_url TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (profile_id, item_type, source, item_id)
+);
+";
 
 /// SQL de la migration 121 (#2713) — voir son entrée dans `MIGRATIONS`. Le
 /// même texte que la jumelle PG 085, à la transaction près.
@@ -5052,6 +5094,13 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         "tracks_rating",
         include_str!("../../migrations/postgres/088_tracks_rating.sql"),
     ),
+    // Jumelle de la SQLite 125 (web#916) : `suggestions_ecartees`, le « Pas
+    // pour moi » de l'accueil, par profil.
+    (
+        89,
+        "suggestions_ecartees",
+        include_str!("../../migrations/postgres/089_suggestions_ecartees.sql"),
+    ),
 ];
 
 /// Run all pending PostgreSQL migrations against the pool.
@@ -7061,6 +7110,105 @@ mod tests {
         );
     }
 
+    /// web#916 — la migration 125 pose `suggestions_ecartees` (le « Pas pour
+    /// moi » de l'accueil, par profil), sur une base NEUVE comme sur une base
+    /// MONTÉE en 124 ; la clé primaire est le quadruplet (profil, type,
+    /// source, identifiant) ; la jumelle PG 089 existe, est enregistrée, marque
+    /// le bon numéro, et le schéma de bascule (avec sa table de copie et sa
+    /// clause de conflit) comme `ENSURE_TABLES` la portent.
+    #[test]
+    fn la_migration_125_pose_les_suggestions_ecartees_916() {
+        let colonnes = |db: &SqliteDb| -> Vec<(String, i64)> {
+            let conn = db.connection().lock().unwrap();
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(suggestions_ecartees)")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        let cle_attendue = vec![
+            ("profile_id".to_string(), 1),
+            ("item_type".to_string(), 2),
+            ("source".to_string(), 3),
+            ("item_id".to_string(), 4),
+        ];
+        let cle = |c: Vec<(String, i64)>| -> Vec<(String, i64)> {
+            let mut k: Vec<_> = c.into_iter().filter(|(_, pk)| *pk > 0).collect();
+            k.sort_by_key(|(_, pk)| *pk);
+            k
+        };
+
+        let neuve = SqliteDb::open_in_memory().unwrap();
+        neuve.init_schema().unwrap();
+        run_migrations(&neuve).unwrap();
+        assert_eq!(cle(colonnes(&neuve)), cle_attendue, "base neuve");
+
+        let montee = SqliteDb::open_in_memory().unwrap();
+        montee.init_schema().unwrap();
+        run_migrations(&montee).unwrap();
+        montee
+            .execute_batch(
+                "DROP TABLE suggestions_ecartees;
+                 DELETE FROM _migrations WHERE version >= 125;",
+            )
+            .unwrap();
+        assert!(colonnes(&montee).is_empty(), "préparation : table retirée");
+        assert_eq!(current_version(&montee).unwrap(), 124);
+        run_migrations(&montee).unwrap();
+        assert_eq!(current_version(&montee).unwrap(), latest_version());
+        assert!(latest_version() >= 125);
+        assert_eq!(cle(colonnes(&montee)), cle_attendue, "base montée en 124");
+        montee
+            .execute_batch(
+                "INSERT INTO suggestions_ecartees (profile_id, item_type, source, item_id) \
+                 VALUES (1, 'album', 'local', '7'), (2, 'album', 'local', '7');",
+            )
+            .expect("deux profils, même album : deux lignes distinctes");
+        assert!(
+            montee
+                .execute_batch(
+                    "INSERT INTO suggestions_ecartees (profile_id, item_type, source, item_id) \
+                     VALUES (1, 'album', 'local', '7');",
+                )
+                .is_err(),
+            "le même écart deux fois pour un profil doit heurter la clé primaire"
+        );
+
+        let racine = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fichier = "089_suggestions_ecartees.sql";
+        let sql_pg =
+            std::fs::read_to_string(racine.join("migrations/postgres").join(fichier)).unwrap();
+        assert!(
+            sql_pg.contains("VALUES (89, 'suggestions_ecartees')"),
+            "le script PG marque un autre numéro dans schema_version"
+        );
+        assert!(
+            sql_pg.contains("CREATE TABLE IF NOT EXISTS suggestions_ecartees")
+                && sql_pg.contains("profile_id BIGINT NOT NULL")
+                && sql_pg.contains("PRIMARY KEY (profile_id, item_type, source, item_id)"),
+            "la jumelle PG ne pose pas la table, ou pas avec la même clé"
+        );
+        assert!(
+            include_str!("migrations.rs").contains(fichier),
+            "{fichier} n'est pas enregistrée"
+        );
+        let bascule = include_str!("pg_migrate.rs");
+        assert!(
+            bascule.contains("CREATE TABLE IF NOT EXISTS suggestions_ecartees")
+                && bascule.contains("\"suggestions_ecartees\",")
+                && bascule
+                    .contains("ON CONFLICT (profile_id, item_type, source, item_id) DO NOTHING"),
+            "pg_migrate.rs : table, copie ou clause de conflit manquante — les écarts \
+             seraient perdus à la bascule SQLite -> PostgreSQL"
+        );
+        assert!(
+            include_str!("postgres.rs").contains("CREATE TABLE IF NOT EXISTS suggestions_ecartees"),
+            "ENSURE_TABLES ne pose pas `suggestions_ecartees`"
+        );
+    }
+
     /// #6123 — la migration 124 pose `tracks.rating` (la note de la piste lue
     /// dans ses balises), sur une base NEUVE comme sur une base MONTÉE en 123
     /// avec une piste ; la colonne est NULLABLE et l'existant reste NULL ; la
@@ -8243,7 +8391,9 @@ mod tests {
         // Pose `queue_items.artist_ref`, que l'écriture de la file NOMME.
         // 88 : `tracks_rating` (#6123), jumelle de la SQLite 124. Pose
         // `tracks.rating`, que l'INSERT et l'UPDATE des pistes NOMMENT.
-        assert_eq!(pg_latest_version(), 88, "latest PG migration must be 88");
+        // 89 : `suggestions_ecartees` (web#916), jumelle de la SQLite 125. Le
+        // « Pas pour moi » de l'accueil, par profil.
+        assert_eq!(pg_latest_version(), 89, "latest PG migration must be 89");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),

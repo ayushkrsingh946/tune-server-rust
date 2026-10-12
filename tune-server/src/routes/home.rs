@@ -1,5 +1,5 @@
 use axum::extract::{Query, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -130,6 +130,15 @@ pub fn router() -> Router<AppState> {
         )
         .route("/radio-picks", get(radio_picks))
         .route("/streaming-highlights", get(streaming_highlights))
+        // web#916 — « Pas pour moi », par profil (`X-Profile-Id`).
+        .route(
+            "/dismissed-suggestions",
+            get(super::accueil_justifie::lister).post(super::accueil_justifie::ecarter),
+        )
+        .route(
+            "/dismissed-suggestions/restore",
+            post(super::accueil_justifie::retablir),
+        )
 }
 
 /// Returns a placeholder string appropriate for the engine.
@@ -1903,6 +1912,11 @@ fn fetch_recently_added_par(
                 // temps que les clients migrent — il porte la meme valeur.
                 "added_at": cols.get(10).and_then(|v| v.as_f64()),
                 "added_mtime": cols.get(10).and_then(|v| v.as_f64()),
+                // web#916 — même raison que « Nouveautés dans votre
+                // bibliothèque » : la fenêtre est celle des AJOUTS.
+                "raison": super::accueil_justifie::raison_ajout_recent(
+                    cols.get(10).and_then(|v| v.as_f64())
+                ),
             })
         })
         .collect())
@@ -1910,12 +1924,25 @@ fn fetch_recently_added_par(
 
 /// Recommendations based on listening history: find most-played genres/artists,
 /// suggest albums from the same genres that haven't been listened to yet.
+///
+/// web#916 — chaque album porte sa `raison` quand la logique la connaît
+/// (`genre_frequent` : un des genres les plus écoutés), aucune quand il vient
+/// du repli au hasard. Ce que le profil qui regarde a écarté (« Pas pour
+/// moi ») n'est plus proposé : la requête demande d'autant plus d'albums,
+/// puis on filtre et on coupe.
 async fn home_recommendations(
     State(state): State<AppState>,
+    profile: crate::routes::active_profile::ActiveProfile,
     Query(p): Query<HomeParams>,
 ) -> Result<Json<Value>, AppError> {
-    let limit = p.limit.unwrap_or(20);
-    let items = fetch_recommendations(&state, limit)?;
+    let limit = p.limit.unwrap_or(20).clamp(1, 200);
+    let ecartees = super::accueil_justifie::ecartees_du_profil(&state, &profile);
+    let marge = i64::try_from(ecartees.len()).unwrap_or(0).min(500);
+    let mut items = fetch_recommendations(&state, limit + marge)?;
+    if !ecartees.est_vide() {
+        items.retain(|a| !super::accueil_justifie::album_local_ecarte(&ecartees, a));
+    }
+    items.truncate(usize::try_from(limit).unwrap_or(0));
     Ok(Json(json!(items)))
 }
 
@@ -1987,16 +2014,30 @@ fn albums_du_genre_non_ecoutes(state: &AppState, genres: &[String], limit: i64) 
 
 /// Une ligne `a.id, a.title, ar.name, a.year, a.cover_path, a.genre` dans la
 /// forme que l'ecran lit, avec la raison pour laquelle on la propose.
+///
+/// `reason` (chaîne) reste pour les clients déployés ; `raison` (objet,
+/// web#916) n'est posée que pour `genre_match`, et seulement si l'album a
+/// bien un genre : le hasard n'est pas une raison.
 fn album_recommande(cols: &[tune_core::db::backend::SqlValue], raison: &str) -> Value {
-    json!({
+    let genre = cols.get(5).and_then(|v| v.as_string());
+    let mut album = json!({
         "id": cols.first().and_then(|v| v.as_i64()).unwrap_or(0),
         "title": cols.get(1).and_then(|v| v.as_string()).unwrap_or_default(),
         "artist_name": cols.get(2).and_then(|v| v.as_string()),
         "year": cols.get(3).and_then(|v| v.as_i64()),
         "cover_path": cols.get(4).and_then(|v| v.as_string()),
-        "genre": cols.get(5).and_then(|v| v.as_string()),
+        "genre": genre,
         "reason": raison,
-    })
+    });
+    if raison == "genre_match" {
+        if let Some(r) = genre
+            .as_deref()
+            .and_then(super::accueil_justifie::raison_genre_frequent)
+        {
+            album["raison"] = r;
+        }
+    }
+    album
 }
 
 /// Auto-generated "mixes" by genre from top genres in history.
@@ -2118,6 +2159,11 @@ async fn new_in_library(
                 // Nom garde pour les clients deployes ; la valeur est la date
                 // d'ajout (#4546).
                 "file_mtime": cols.get(6).and_then(|v| v.as_f64()),
+                // web#916 — la rangée est triée par date d'AJOUT : c'est sa
+                // raison, et la date est celle qu'elle vient de lire.
+                "raison": super::accueil_justifie::raison_ajout_recent(
+                    cols.get(6).and_then(|v| v.as_f64())
+                ),
             })
         })
         .collect();
@@ -2322,6 +2368,7 @@ const ECOUTES_STREAMING: usize = 6;
 /// rendu. Le couper ne filtrerait pas la reponse, il la viderait.
 async fn other_versions(
     State(state): State<AppState>,
+    profile: crate::routes::active_profile::ActiveProfile,
     Query(p): Query<OtherVersionsParams>,
 ) -> Result<Json<Value>, AppError> {
     let filtre = FiltreSources::depuis(p.sources.as_deref());
@@ -2450,6 +2497,10 @@ async fn other_versions(
         }
     }
 
+    // web#916 — la raison de chaque groupe (`autre_version`), et ce que le
+    // profil qui regarde a écarté retiré.
+    let ecartees = super::accueil_justifie::ecartees_du_profil(&state, &profile);
+    let groupes = super::accueil_justifie::epurer_autres_versions(groupes, &ecartees);
     Ok(Json(json!(groupes)))
 }
 
@@ -2499,6 +2550,7 @@ mod tests_other_versions {
 
         let resultat = other_versions(
             State(state),
+            crate::routes::active_profile::ActiveProfile(1),
             // `sources: None` = « Tous » : ces essais portent sur le
             // rapprochement, pas sur la provenance. Ils disent desormais
             // explicitement qu'ils ne filtrent rien.
@@ -2569,6 +2621,7 @@ mod tests_other_versions {
 
         let resultat = other_versions(
             State(state),
+            crate::routes::active_profile::ActiveProfile(1),
             // `sources: None` = « Tous » : ces essais portent sur le
             // rapprochement, pas sur la provenance. Ils disent desormais
             // explicitement qu'ils ne filtrent rien.
