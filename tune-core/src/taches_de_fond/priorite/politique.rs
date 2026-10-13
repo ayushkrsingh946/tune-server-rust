@@ -12,13 +12,17 @@
 //! | … et marque une pause entre deux paquets  | `pause_between_files_ms`   | 20     |
 //! | une connexion de lecture SQLite réservée  | `sqlite_reserved_readers`  | 1      |
 //! | l'écrivain de fond laisse passer d'abord  | `writer_yield_max_ms`      | 100    |
-//! | priorité d'E/S basse (Linux, macOS)       | `low_io_priority`          | vrai   |
+//! | priorité d'E/S basse (Linux, macOS, Windows) | `low_io_priority`    | vrai   |
 //! | tout ce qui précède                       | `enabled`                  | vrai   |
 //!
 //! Et un réglage qui n'est PAS un frein, donc hors de `enabled` :
 //! `playback_watch_off_executor` (vrai) — la veille de lecture des analyses
 //! pose sa question à la base hors des fils de l'exécuteur
 //! (`audio::replaygain::zone_qui_joue`, chantier « priorité lecture »).
+//! `background_compute_low_priority` (vrai) — le calcul de fond (décodage,
+//! mesure, inférence) tourne sur des fils à lui, baissés pour toujours
+//! (`priorite::calcul_de_fond`, étape 3). Pas un frein non plus : il vaut
+//! que la lecture joue ou non.
 //!
 //! Le scan lisait jusqu'à 32 fichiers à la fois PENDANT la lecture, entre ses
 //! pauses de lot ; le pool de lecture SQLite n'a que trois connexions, et une
@@ -86,6 +90,12 @@ pub struct Politique {
     /// [`Self::enabled`] : ce n'est pas un frein, et désarmer les freins ne
     /// doit pas ramener un gel de l'exécuteur.
     pub playback_watch_off_executor: bool,
+    /// Le calcul de fond (segments de décodage du ReplayGain, de la plage
+    /// dynamique, des empreintes ; décodage et inférence de l'analyse
+    /// acoustique) part sur les fils du calcul de fond, en basse priorité
+    /// processeur et disque, au lieu du pool bloquant partagé de tokio.
+    /// `false` rend l'ancien comportement. Indépendant de [`Self::enabled`].
+    pub background_compute_low_priority: bool,
 }
 
 /// Les valeurs par défaut.
@@ -98,6 +108,7 @@ pub const DEFAUT: Politique = Politique {
     writer_yield_max_ms: 100,
     low_io_priority: true,
     playback_watch_off_executor: true,
+    background_compute_low_priority: true,
 };
 
 impl Default for Politique {
@@ -194,6 +205,7 @@ pub fn regler(p: Politique) {
             writer_yield_max_ms = p.writer_yield_max_ms,
             low_io_priority = p.low_io_priority,
             playback_watch_off_executor = p.playback_watch_off_executor,
+            background_compute_low_priority = p.background_compute_low_priority,
             "politique_de_lecture_reglee"
         );
     }
@@ -351,14 +363,19 @@ pub fn noter_ecriture_differee(attente: Duration) {
 ///   Les fils du scan sont déjà à `nice 10` + best-effort 7 en permanence.
 /// * **macOS** : l'état « arrière-plan » du fil (`PRIO_DARWIN_BG`), qui
 ///   abaisse le processeur ET bride les E/S, puis l'état normal.
+/// * **Windows** : `THREAD_MODE_BACKGROUND_BEGIN`, puis `…_END` (processeur,
+///   E/S et mémoire, sans privilège ; chantier « priorité lecture », étape 3).
 /// * Ailleurs : rien.
+///
+/// Sur un fil du calcul de fond ([`super::calcul_de_fond`]), rien : il est
+/// déjà baissé pour toujours, et le relever au `drop` le remonterait.
 ///
 /// Jamais sur un fil qui écrit en base : voir le module parent (inversion de
 /// priorité sur le verrou d'écriture unique).
 pub struct PrioriteBasse {
     #[cfg(target_os = "linux")]
     precedente: Option<libc::c_long>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     active: bool,
     _pas_send: PhantomData<*const ()>,
 }
@@ -369,7 +386,7 @@ impl PrioriteBasse {
         PrioriteBasse {
             #[cfg(target_os = "linux")]
             precedente: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             active: false,
             _pas_send: PhantomData,
         }
@@ -381,11 +398,11 @@ impl PrioriteBasse {
         {
             self.precedente.is_some()
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             self.active
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             false
         }
@@ -422,7 +439,10 @@ pub fn baisser_pendant_la_lecture() -> PrioriteBasse {
     }
 }
 
-fn baisser() -> PrioriteBasse {
+pub(super) fn baisser() -> PrioriteBasse {
+    if super::calcul_de_fond::fil_du_calcul_de_fond() {
+        return PrioriteBasse::neutre();
+    }
     #[cfg(target_os = "linux")]
     {
         let avant = ioprio::lire();
@@ -457,7 +477,24 @@ fn baisser() -> PrioriteBasse {
             _pas_send: PhantomData,
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+        };
+        // SAFETY: pseudo-handle du fil courant, rien à fermer ; le mode ne
+        // touche que ce fil, et `Drop` le referme sur le même fil (`!Send`).
+        let ok =
+            unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN).is_ok() };
+        if ok {
+            COMPTEURS.priorite_basse.fetch_add(1, Ordering::Relaxed);
+        }
+        PrioriteBasse {
+            active: ok,
+            _pas_send: PhantomData,
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         PrioriteBasse::neutre()
     }
@@ -474,6 +511,16 @@ impl Drop for PrioriteBasse {
             // SAFETY: rend au fil courant son état normal.
             unsafe {
                 libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, 0);
+            }
+        }
+        #[cfg(windows)]
+        if self.active {
+            use windows::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END,
+            };
+            // SAFETY: rend au fil courant son mode normal.
+            unsafe {
+                let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
             }
         }
     }
@@ -544,6 +591,15 @@ pub fn releve_des_freins() -> ReleveDesFreins {
 }
 
 /// Remettre la politique par défaut et les compteurs à zéro (essais).
+/// Sérialiser les témoins qui CHANGENT la politique : elle est globale au
+/// processus, et deux témoins qui la règlent en même temps (chacun par
+/// `..politique()`) se la recopieraient l'un sur l'autre. `pub` pour la même
+/// raison que [`oublier_pour_les_essais`].
+pub fn verrou_des_essais() -> std::sync::MutexGuard<'static, ()> {
+    static VERROU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    VERROU.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn oublier_pour_les_essais() {
     *POLITIQUE.write().unwrap_or_else(|e| e.into_inner()) = DEFAUT;
     for a in [
@@ -589,6 +645,18 @@ mod tests {
             Politique::depuis_json(&ancienne)
                 .unwrap()
                 .playback_watch_off_executor
+        );
+        // Étape 3 : le calcul de fond en basse priorité, même contrat.
+        assert!(DEFAUT.background_compute_low_priority);
+        let p =
+            Politique::depuis_json(&serde_json::json!({"background_compute_low_priority": false}))
+                .unwrap();
+        assert!(!p.background_compute_low_priority);
+        assert!(p.enabled && p.playback_watch_off_executor);
+        assert!(
+            Politique::depuis_json(&ancienne)
+                .unwrap()
+                .background_compute_low_priority
         );
         for mauvais in [
             serde_json::json!({"scan_width": 0}),

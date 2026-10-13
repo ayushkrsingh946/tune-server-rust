@@ -20,6 +20,12 @@ pub async fn spawn_background_tasks(state: &AppState, config: &TuneConfig) {
     // 120 s avant leur premier lot, mais l'ordre ne doit rien à cette marge :
     // un traitement suspendu ne repart pas de lui-même, point.
     tune_core::taches_de_fond::hydrater(&state.backend);
+    // #4681 (chantier « priorité lecture », étape 3) — AVANT toute passe : les
+    // fils du calcul de fond (décodage, mesure, inférence) naissent baissés
+    // (nice 10 et E/S IDLE sous Linux, QoS BACKGROUND sous macOS,
+    // THREAD_MODE_BACKGROUND sous Windows). Sans cet appel, ils naîtraient à
+    // la priorité normale : c'est le cas voulu des binaires de test.
+    tune_core::taches_de_fond::priorite::calcul_de_fond::armer();
     // #5469 — APRÈS `hydrater` : une passe d'enrichissement coupée par
     // l'arrêt précédent repart, et si elle était en pause elle se gare à sa
     // première frontière au lieu de travailler. Un test de câblage garde la
@@ -3472,6 +3478,27 @@ mod tests_licence_proprietaire_battement {
             source[debut..fin].contains("routes::system::sauvegarde_cloud::spawn(state);"),
             "la passe de sauvegarde cloud n'est plus lancee au demarrage"
         );
+    }
+
+    /// #4681 (chantier « priorité lecture », étape 3) — sans cet appel, les
+    /// fils du calcul de fond naîtraient à la priorité normale : le réglage
+    /// dirait « basse priorité » et rien ne serait baissé. Il doit précéder la
+    /// première passe lancée (la reprise des passes).
+    #[test]
+    fn la_basse_priorite_du_calcul_de_fond_est_armee_avant_les_passes() {
+        let source = include_str!("background.rs");
+        let debut = source
+            .find("pub async fn spawn_background_tasks")
+            .expect("spawn_background_tasks a disparu");
+        let fin = debut + source[debut..].find("\n}\n").expect("fin du corps");
+        let corps = &source[debut..fin];
+        let armer = corps
+            .find("tune_core::taches_de_fond::priorite::calcul_de_fond::armer();")
+            .expect("le calcul de fond n'est plus armé au démarrage");
+        let reprise = corps
+            .find("crate::reprise_des_passes::spawn(state);")
+            .expect("la reprise des passes a disparu");
+        assert!(armer < reprise, "l'armement doit précéder les passes");
     }
 
     /// Meme garde d'ordre que dans `cloud.rs` : l'adoption doit lire le compte

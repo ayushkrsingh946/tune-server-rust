@@ -99,7 +99,7 @@ passes ont cédé, la politique en vigueur et les compteurs des freins.
 
 ## 3. Le mécanisme proposé, par étapes
 
-### Étape 1 (livrée ici) : la veille de lecture hors de l'exécuteur
+### Étape 1 (livrée, #6301) : la veille de lecture hors de l'exécuteur
 
 C'est le meilleur rapport gain/risque. Le défaut est mesuré sur le terrain. Le
 correctif est déjà éprouvé dans la passe acoustique (#5138). Aucune décision
@@ -126,33 +126,128 @@ de cession ne change, seulement le fil qui pose la question.
   requête sur le fil de l'exécuteur). Il est indépendant de `enabled` : ce
   n'est pas un frein, et `enabled = false` ne doit pas ramener un gel.
 
-### Étape 2 : les gardes d'avant chaque fichier
+### Étape 2 (livrée, go du 13/10) : les gardes d'avant chaque fichier
 
-`en_parallele_borne` prend une garde synchrone (`FnMut() -> bool`). Pour la
-sortir de l'exécuteur, il faut une garde asynchrone, ou une valeur rafraîchie
-par une tâche à part. Cela touche trois passes et leurs témoins. C'est plus de
-risque, pour un gain du même ordre que l'étape 1.
+`en_parallele_borne` relit ses gardes (réglage, pause, lecture) avant CHAQUE
+fichier lancé. Elles posaient sur un fil de l'exécuteur la même requête que
+la veille, et, pour le ReplayGain, la lecture du réglage.
 
-### Étape 3 : une priorité processeur basse qu'on peut tenir
+- La garde est maintenant un FUTUR (`peut_lancer: FnMut() -> impl Future<Output = bool>`).
+- `replaygain::garde_hors_executeur` pose la garde ENTIÈRE sur le pool
+  bloquant, d'un seul tenant : mêmes lectures, même ordre, même réponse.
+- Les quatre sites : la passe nominale ReplayGain, les empreintes, le
+  rattrapage de la plage dynamique, le rattrapage des crêtes vraies.
+- Une garde qui panique répond « ne lance pas » : la passe s'arrête à la
+  frontière de fichier et le tour suivant reprend.
+- Même réglage que la veille (`playback_watch_off_executor`).
+- Témoin `les_gardes_d_avant_chaque_fichier_ne_gelent_pas_l_executeur` : la
+  vraie passe nominale sur trois fichiers, un moteur à un fil, une requête de
+  600 ms ; trou < 200 ms avec le réglage, ≥ 500 ms sans (contre-épreuve dans
+  le test).
 
-- **Linux** : un pool bloquant **dédié** au calcul de fond (segments de
-  décodage ReplayGain/DR/empreintes, ONNX). Ses fils sont à lui, donc
-  `nice 10` (ou `SCHED_IDLE`) en permanence, sans avoir à le défaire, comme
-  `scan-io`. Il ne prend jamais une écriture en base : l'inversion de priorité
-  sur l'écrivain unique est expliquée dans `priorite.rs`. Les fils internes
-  d'onnxruntime se baissent par le crochet de création de fils de la session.
-- **Windows** : `SetThreadPriority(THREAD_MODE_BACKGROUND_BEGIN/END)` dans
-  `PrioriteBasse`. C'est réversible et sans privilège, et cela baisse le
-  processeur, les E/S et la mémoire. Il faut une porte Windows (compilation et
-  essai sur une machine Windows), que Shrek n'a pas.
-- **macOS** : `PRIO_DARWIN_BG` baisse déjà le processeur et les E/S. Il reste
-  la porte macOS à jouer sur le Mac (non jouée en #5942).
+Hors de ce chantier, d'autres passes posent encore la même requête sur place :
+les paroles (`library/lyrics_pass.rs`), la page du scan
+(`routes/system/scan.rs`). Elles ne décodent pas ; à traiter si une mesure les
+désigne.
 
-### Étape 4 : l'écran « ce qui tourne »
+### Étape 3 (livrée, go du 13/10) : une basse priorité processeur et disque qu'on peut tenir
 
-Côté web, État du serveur, à partir de `GET /system/background-tasks` : les
-passes, leur état (au travail, cédée à la lecture, en pause), la politique et
-les compteurs des freins. Le serveur n'a presque rien à ajouter.
+`taches_de_fond::priorite::calcul_de_fond` : des fils À LUI pour le calcul de
+fond, baissés une fois pour toutes à leur naissance, comme `scan-io` pour le
+scan.
+
+| Système | Processeur | Disque |
+|---|---|---|
+| Linux | `nice 10` | `ioprio` classe IDLE, à défaut best-effort 7 |
+| macOS | QoS `BACKGROUND` | idem (la QoS bride aussi les E/S) |
+| Windows | `THREAD_MODE_BACKGROUND_BEGIN` | idem (E/S et mémoire aussi) |
+
+- **Ce qui y va** : les segments de décodage et de mesure du ReplayGain et de
+  la plage dynamique (`analyzer::parcourir_les_segments`, la tête partagée
+  avec l'empreinte, `MesureEnCours::finir`), l'empreinte seule
+  (`replaygain::calculer_l_empreinte`), le décodage de l'analyse acoustique
+  et son inférence ONNX.
+- **Ce qui n'y va jamais** : une écriture en base. L'inférence acoustique a
+  été séparée de ses écritures : le calcul part sur les fils baissés, le
+  vecteur et le témoin s'écrivent ensuite sur le pool bloquant ordinaire. Un
+  fil de lecture non plus : rien ne baisse le fil appelant
+  (`seuls_les_fils_du_pool_sont_baisses`), et aucun fichier de `outputs/`,
+  `streaming/`, `orchestrator` ni `audio/` hors des trois passes n'appelle
+  le pool (`aucun_chemin_de_lecture_n_y_passe`). `audio::ordonnancement_rt`
+  n'est pas touché.
+- **IDLE et non best-effort 7** : ces passes cèdent TOUT à la lecture ; hors
+  lecture, un disque occupé par le scan les fait attendre, c'est voulu. Le
+  scan, lui, reste en best-effort 7 (il doit avancer pendant la lecture).
+- **Élastique** : un fil naît quand aucun n'est libre (64 au plus), meurt
+  après 60 s sans travail. Un pool fixe se boucherait sur un décodeur qui
+  tourne en rond (la passe abandonne l'attente, pas le fil).
+- **Armé par le serveur** : `spawn_background_tasks` appelle
+  `calcul_de_fond::armer()` avant toute passe. Les binaires de test ne
+  l'appellent pas : des milliers de tests en parallèle ne doivent pas
+  affamer les analyses qu'ils chronomètrent. Le témoin de la baisse prend
+  son propre pool armé.
+- **`PrioriteBasse`** (la baisse réversible des fils PARTAGÉS pendant la
+  lecture) gagne Windows (`THREAD_MODE_BACKGROUND_BEGIN/END`), et devient
+  neutre sur un fil du calcul de fond (son `drop` le relèverait).
+- **Réglage** : `background_playback_policy.background_compute_low_priority`
+  (vrai par défaut, publié par `GET /system/config`). `false` renvoie le
+  calcul sur le pool bloquant de tokio. Indépendant de `enabled` : ce n'est
+  pas un frein de lecture, il vaut tout le temps.
+- **Portes** : Linux sur Shrek (témoins réels). Windows : compilation croisée
+  sur Shrek (`cargo check --target x86_64-pc-windows-msvc`), **l'essai sur
+  une machine Windows reste à faire**. macOS : la porte se joue sur le Mac.
+- **Reste** : les fils internes d'onnxruntime au-delà du premier (2 fils
+  d'inférence sur plus de 8 cœurs) naissent à la priorité normale ; le crochet
+  de création de fils de la session ne l'est pas dans ce lot.
+
+### Étape 4 : l'écran « Ce qui tourne »
+
+Côté web, État du serveur, à partir de `GET /system/background-tasks` (et du
+même corps rendu par les routes de pause). Le serveur ajoute, sans rien
+retirer :
+
+```jsonc
+{
+  "pausable": [
+    {
+      "id": "replaygain",            // replaygain, fingerprints, dynamic_range, acoustic,
+                                     // enrichment, artist_images, identification
+      "state": "en_cours",           // existant : en_cours | en_pause | au_repos
+      "paused": false,               // existant
+      "throttled_for_playback": true,// existant
+      "activity": "yielded",         // NOUVEAU : working | throttled | yielded | paused | idle
+      "reason": "playback"           // NOUVEAU : playback | user_pause | null
+    }
+  ],
+  "scan": {
+    "running": true, "throttled_for_playback": true,   // existant
+    "activity": "throttled", "reason": "playback"      // NOUVEAU (working | throttled | idle)
+  },
+  "playback_priority": {
+    "playback_active": true, "playing_zone_ids": [3], "since_epoch_s": 1760360000,
+    "throttled": ["replaygain", "scan"], "pause_between_items_ms": 5000,
+    "policy": { "...": "...", "playback_watch_off_executor": true,
+                "background_compute_low_priority": true },          // NOUVEAU champ
+    "brakes": { "...": "..." },
+    "background_compute": {                                         // NOUVEAU bloc
+      "low_priority_pool": true,  // la politique envoie le calcul aux fils baissés
+      "armed": true,              // le serveur a armé la baisse
+      "cpu": "nice_10",           // nice_10 | qos_background | thread_mode_background | none | null
+      "io": "idle",               // idle | best_effort_7 | qos_background | thread_mode_background | none | null
+      "threads": 2, "idle_threads": 1, "jobs_done": 18342
+    }
+  }
+}
+```
+
+- `yielded` : une passe qui DÉCODE (ReplayGain, empreintes, plage dynamique,
+  acoustique) a tout cédé à une zone qui joue ; elle reprend seule à l'arrêt.
+- `throttled` : une passe qui ne décode pas (enrichissement, images,
+  identification, scan) avance au ralenti pendant la lecture.
+- `paused` : l'utilisateur l'a suspendue (`reason: user_pause`).
+- Une cession notée ne vaut que tant qu'une zone joue
+  (`playback_active`).
+- `cpu`/`io` valent `null` tant qu'aucun fil du calcul de fond n'est né.
 
 ## 4. Pause, ralentissement, reprise
 

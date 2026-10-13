@@ -861,6 +861,39 @@ pub(crate) async fn une_zone_joue(backend: &Arc<dyn DbBackend>) -> bool {
     zone_qui_joue(backend).await.is_some()
 }
 
+/// Les gardes d'AVANT chaque fichier d'une passe (réglage, pause, lecture),
+/// posées hors des fils de l'exécuteur (chantier « priorité lecture »,
+/// étape 2, #4681).
+///
+/// [`en_parallele_borne`] les relit avant CHAQUE fichier lancé. Elles
+/// contiennent la même requête « une zone joue ? » que la veille
+/// ([`zone_qui_joue`]), et pour le ReplayGain la lecture du réglage : faites
+/// sur place, ce sont des lectures SQLite synchrones sur un fil de
+/// l'exécuteur, qui attend sa connexion quand le pool de lecture est saturé.
+///
+/// La garde entière part sur le pool bloquant, d'un seul tenant : mêmes
+/// lectures, même ordre, même réponse. Une garde qui panique répond
+/// « ne lance pas » : la passe s'arrête à la frontière de fichier et le tour
+/// suivant reprend, ce qui ne perd rien. Même réglage que la veille
+/// (`playback_watch_off_executor`, `false` = la garde sur place).
+pub(crate) fn garde_hors_executeur<F>(
+    backend: &Arc<dyn DbBackend>,
+    garde: F,
+) -> impl std::future::Future<Output = bool> + Send + 'static
+where
+    F: FnOnce(&Arc<dyn DbBackend>) -> bool + Send + 'static,
+{
+    let b = backend.clone();
+    async move {
+        if !crate::taches_de_fond::priorite::politique::politique().playback_watch_off_executor {
+            return garde(&b);
+        }
+        tokio::task::spawn_blocking(move || garde(&b))
+            .await
+            .unwrap_or(false)
+    }
+}
+
 /// Ce qu'un tour de la cascade de fond a donné.
 ///
 /// Un `usize` ne suffisait plus : « 0 » disait à la fois « plus rien à faire »
@@ -1565,31 +1598,35 @@ pub async fn analyze_track_batch(backend: &Arc<dyn DbBackend>) -> usize {
         largeur,
         rows.iter(),
         || {
-            // Le réglage peut basculer EN PLEIN LOT. 25 fichiers à jusqu'à
-            // 180 s chacun, c'est plus d'une heure de décodage après un
-            // « Désactivé » si on ne regarde qu'entre deux lots : un réglage
-            // qui n'agit qu'au prochain démarrage n'est pas un réglage
-            // (#2496). On relit donc avant CHAQUE fichier. Le décodage déjà
-            // lancé n'est pas annulable — même contrat que le garde-fou
-            // lecture ci-dessous : on s'arrête au fichier suivant, pas au
-            // milieu d'un decode.
-            if !analysis_enabled(backend) {
-                info!("replaygain_analysis_disabled_mid_batch — réglage coupé, arrêt du balayage");
-                return false;
-            }
-            // Pause demandée par l'utilisateur, relue au MÊME endroit et pour
-            // la même raison.
-            if crate::taches_de_fond::est_en_pause(crate::taches_de_fond::Tache::ReplayGain) {
-                info!("replaygain_pause_utilisateur_mid_batch — arrêt à la frontière de piste");
-                return false;
-            }
-            // Playback can start mid-batch; yield at once so a decode never
-            // competes with the audio pipeline (#1310).
-            if any_zone_playing(backend) {
-                debug!("replaygain_yield_to_playback — zone playing, pausing sweep mid-batch");
-                return false;
-            }
-            true
+            garde_hors_executeur(backend, |backend| {
+                // Le réglage peut basculer EN PLEIN LOT. 25 fichiers à jusqu'à
+                // 180 s chacun, c'est plus d'une heure de décodage après un
+                // « Désactivé » si on ne regarde qu'entre deux lots : un réglage
+                // qui n'agit qu'au prochain démarrage n'est pas un réglage
+                // (#2496). On relit donc avant CHAQUE fichier. Le décodage déjà
+                // lancé n'est pas annulable — même contrat que le garde-fou
+                // lecture ci-dessous : on s'arrête au fichier suivant, pas au
+                // milieu d'un decode.
+                if !analysis_enabled(backend) {
+                    info!(
+                        "replaygain_analysis_disabled_mid_batch — réglage coupé, arrêt du balayage"
+                    );
+                    return false;
+                }
+                // Pause demandée par l'utilisateur, relue au MÊME endroit et pour
+                // la même raison.
+                if crate::taches_de_fond::est_en_pause(crate::taches_de_fond::Tache::ReplayGain) {
+                    info!("replaygain_pause_utilisateur_mid_batch — arrêt à la frontière de piste");
+                    return false;
+                }
+                // Playback can start mid-batch; yield at once so a decode never
+                // competes with the audio pipeline (#1310).
+                if any_zone_playing(backend) {
+                    debug!("replaygain_yield_to_playback — zone playing, pausing sweep mid-batch");
+                    return false;
+                }
+                true
+            })
         },
         |r| {
             let id = r.first().and_then(|v| v.as_i64());
@@ -1683,7 +1720,10 @@ enum SuitePiste {
 /// Lancer au plus `largeur` travaux à la fois (#5519).
 ///
 /// `peut_lancer` est relu avant CHAQUE lancement : c'est là que vivent les
-/// gardes de réglage, de pause et de lecture. `recu` reçoit chaque issue, dans
+/// gardes de réglage, de pause et de lecture. Elle rend un futur : les gardes
+/// de production passent par [`garde_hors_executeur`] (étape 2 du chantier
+/// « priorité lecture »), pour que leurs lectures en base ne tiennent pas un
+/// fil de l'exécuteur. `recu` reçoit chaque issue, dans
 /// l'ordre d'arrivée ; `false` arrête les lancements — ceux déjà en vol vont
 /// à leur terme (leur décodage n'est pas annulable, ils cèdent eux-mêmes à la
 /// lecture). À `largeur = 1`, c'est exactement la boucle séquentielle d'avant.
@@ -1691,14 +1731,15 @@ enum SuitePiste {
 /// Les futurs ne sont PAS lancés sur l'exécuteur : ils tournent dans la tâche
 /// de la passe, et le travail lourd de chacun part déjà sur le pool bloquant
 /// (`spawn_blocking` du décodage) — c'est ce qui fait le parallélisme.
-async fn en_parallele_borne<I, R, Fut>(
+async fn en_parallele_borne<I, R, Fut, G>(
     largeur: usize,
     items: impl IntoIterator<Item = I>,
-    mut peut_lancer: impl FnMut() -> bool,
+    mut peut_lancer: impl FnMut() -> G,
     mut lancer: impl FnMut(I) -> Fut,
     mut recu: impl FnMut(R) -> bool,
 ) where
     Fut: std::future::Future<Output = R>,
+    G: std::future::Future<Output = bool>,
 {
     use futures_util::stream::{FuturesUnordered, StreamExt};
     let largeur = largeur.max(1);
@@ -1710,7 +1751,7 @@ async fn en_parallele_borne<I, R, Fut>(
             // Les gardes ne sont relues que s'il reste de quoi lancer : chacune
             // coûte une requête, et la veille de lecture (#2495) compte les
             // siennes.
-            if items.peek().is_none() || !peut_lancer() {
+            if items.peek().is_none() || !peut_lancer().await {
                 ouvert = false;
                 break;
             }
@@ -1889,7 +1930,7 @@ async fn empreinter_la_piste(backend: &Arc<dyn DbBackend>, track_id: i64, chemin
 /// l'écrire. `None` si la tâche a été interrompue : rien à poser.
 async fn calculer_l_empreinte(track_id: i64, chemin: &str) -> Option<String> {
     let chemin_owned = chemin.to_string();
-    let calcul = tokio::task::spawn_blocking(move || {
+    let calcul = crate::taches_de_fond::priorite::calcul_de_fond::calcul_de_fond(move || {
         // #4681 — E/S basses si une zone joue.
         let _basse = crate::taches_de_fond::priorite::politique::baisser_pendant_la_lecture();
         crate::audio::empreinte::empreinte_du_fichier(&chemin_owned)
@@ -2049,7 +2090,7 @@ pub async fn empreinter_un_lot(backend: &Arc<dyn DbBackend>) -> usize {
     en_parallele_borne(
         largeur,
         rows.iter(),
-        || {
+        || garde_hors_executeur(backend, |backend| {
             // #5246 : plus de garde sur le réglage ReplayGain ici. Les
             // empreintes se calculent même ReplayGain coupé ; leur propre
             // pause (ci-dessous) est le geste qui les arrête.
@@ -2062,7 +2103,7 @@ pub async fn empreinter_un_lot(backend: &Arc<dyn DbBackend>) -> usize {
                 return false;
             }
             true
-        },
+        }),
         |r| {
             let repo = &repo;
             async move {
@@ -2363,21 +2404,26 @@ pub async fn rattraper_un_lot_de_dr(backend: &Arc<dyn DbBackend>) -> usize {
         largeur,
         rows.iter(),
         || {
-            // Gardes relues AVANT CHAQUE fichier et pas seulement entre deux
-            // lots : 25 fichiers à 180 s, c'est plus d'une heure de décodage
-            // après un appui sur « Pause » ou sur « Lecture » (#1310).
-            //
-            // #5246 : le réglage ReplayGain ne coupe PLUS ce rattrapage ; la
-            // pause de la plage dynamique est le geste qui l'arrête.
-            if crate::taches_de_fond::est_en_pause(crate::taches_de_fond::Tache::PlageDynamique) {
-                info!("dr_rattrapage_pause_utilisateur_mid_lot — arret a la frontiere de piste");
-                return false;
-            }
-            if any_zone_playing(backend) {
-                debug!("dr_rattrapage_cede_a_la_lecture — zone en lecture, pause");
-                return false;
-            }
-            true
+            garde_hors_executeur(backend, |backend| {
+                // Gardes relues AVANT CHAQUE fichier et pas seulement entre deux
+                // lots : 25 fichiers à 180 s, c'est plus d'une heure de décodage
+                // après un appui sur « Pause » ou sur « Lecture » (#1310).
+                //
+                // #5246 : le réglage ReplayGain ne coupe PLUS ce rattrapage ; la
+                // pause de la plage dynamique est le geste qui l'arrête.
+                if crate::taches_de_fond::est_en_pause(crate::taches_de_fond::Tache::PlageDynamique)
+                {
+                    info!(
+                        "dr_rattrapage_pause_utilisateur_mid_lot — arret a la frontiere de piste"
+                    );
+                    return false;
+                }
+                if any_zone_playing(backend) {
+                    debug!("dr_rattrapage_cede_a_la_lecture — zone en lecture, pause");
+                    return false;
+                }
+                true
+            })
         },
         |r| rattraper_une_piste(backend, &repo, r),
         |suite| match suite {
@@ -6311,7 +6357,7 @@ mod tests {
             en_parallele_borne(
                 largeur,
                 0..10,
-                || true,
+                || async { true },
                 |_| {
                     let (en_vol, max) = (&en_vol, &max);
                     async move {
@@ -6348,7 +6394,8 @@ mod tests {
             0..10,
             || {
                 autorises -= 1;
-                autorises >= 0
+                let ok = autorises >= 0;
+                async move { ok }
             },
             |_| {
                 lances += 1;
@@ -6362,7 +6409,7 @@ mod tests {
         en_parallele_borne(
             1,
             0..10,
-            || true,
+            || async { true },
             |_| {
                 lances += 1;
                 async {}
@@ -6559,6 +6606,7 @@ mod tests {
     /// question.
     #[tokio::test(flavor = "current_thread")]
     async fn la_veille_de_lecture_ne_gele_pas_l_executeur() {
+        let _verrou = crate::taches_de_fond::priorite::politique::verrou_des_essais();
         use crate::taches_de_fond::priorite::politique::{politique, regler};
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
@@ -6629,6 +6677,99 @@ mod tests {
         assert!(
             trou_hors < Duration::from_millis(200),
             "la veille hors de l'exécuteur a gelé le premier plan {trou_hors:?} \
+             (sur place : {trou_sur_place:?})"
+        );
+    }
+
+    /// Chantier « priorité lecture », étape 2 (#4681) : les gardes d'AVANT
+    /// chaque fichier ne gèlent plus l'exécuteur.
+    ///
+    /// Même banc que la veille : un moteur tokio à UN fil, un battement de
+    /// premier plan toutes les 10 ms, et une requête « une zone joue ? » qui
+    /// dure 600 ms (pool de lecture saturé). La passe nominale réelle
+    /// (`analyze_track_batch`) traite trois fichiers présents mais
+    /// indécodables : la garde court avant chacun, la veille pendant chacun.
+    /// La veille étant déjà hors de l'exécuteur (étape 1), un trou d'une
+    /// requête ne peut venir que de la garde.
+    ///
+    /// Contre-épreuve dans le test : le même lot, réglage coupé, doit faire un
+    /// trou d'au moins une requête.
+    #[tokio::test(flavor = "current_thread")]
+    async fn les_gardes_d_avant_chaque_fichier_ne_gelent_pas_l_executeur() {
+        let _verrou = crate::taches_de_fond::priorite::politique::verrou_des_essais();
+        use crate::taches_de_fond::priorite::politique::{politique, regler};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        const LENTEUR: Duration = Duration::from_millis(600);
+
+        struct Remettre(bool);
+        impl Drop for Remettre {
+            fn drop(&mut self) {
+                regler(crate::taches_de_fond::priorite::politique::Politique {
+                    playback_watch_off_executor: self.0,
+                    ..politique()
+                });
+            }
+        }
+        let _remettre = Remettre(politique().playback_watch_off_executor);
+
+        async fn course(hors: bool) -> (usize, usize, Duration) {
+            regler(crate::taches_de_fond::priorite::politique::Politique {
+                playback_watch_off_executor: hors,
+                ..politique()
+            });
+            let (_tmp, _db, interne) = sweep_db_fichiers_presents(3);
+            SettingsRepo::with_backend(interne.clone())
+                .set(MODE_KEY, "track")
+                .unwrap();
+            // Rien ne jouera jamais : seule la LENTEUR de la question compte.
+            let veilleur = Arc::new(ZoneQuiDemarre {
+                interne,
+                lectures: std::sync::atomic::AtomicUsize::new(0),
+                demarre_apres: usize::MAX,
+                lenteur: LENTEUR,
+            });
+            let backend: Arc<dyn DbBackend> = veilleur.clone();
+            let fini = Arc::new(AtomicBool::new(false));
+            let f = fini.clone();
+            let battement = tokio::spawn(async move {
+                let mut pire = Duration::ZERO;
+                let mut avant = Instant::now();
+                while !f.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    pire = pire.max(avant.elapsed());
+                    avant = Instant::now();
+                }
+                pire
+            });
+            tokio::task::yield_now().await;
+            let faits = analyze_track_batch(&backend).await;
+            fini.store(true, Ordering::SeqCst);
+            let pire = battement.await.expect("le battement a paniqué");
+            (faits, veilleur.lectures(), pire)
+        }
+
+        let (faits_hors, lectures_hors, trou_hors) = course(true).await;
+        let (faits_sur_place, _, trou_sur_place) = course(false).await;
+
+        assert_eq!(
+            (faits_hors, faits_sur_place),
+            (3, 3),
+            "les trois fichiers doivent passer dans les deux cas : la garde ne change aucune décision"
+        );
+        assert!(
+            lectures_hors >= 3,
+            "la garde doit avoir posé sa question avant chaque fichier ({lectures_hors} lectures) — sinon ce test ne mesure rien"
+        );
+        assert!(
+            trou_sur_place >= LENTEUR - Duration::from_millis(100),
+            "contre-épreuve : la garde sur place devait geler le fil unique \
+             (plus long trou {trou_sur_place:?}, requête {LENTEUR:?})"
+        );
+        assert!(
+            trou_hors < Duration::from_millis(200),
+            "la garde d'avant fichier a gelé le premier plan {trou_hors:?} \
              (sur place : {trou_sur_place:?})"
         );
     }
