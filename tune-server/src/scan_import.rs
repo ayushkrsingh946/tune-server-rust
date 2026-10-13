@@ -1898,21 +1898,26 @@ impl TrackImporter {
         // L'édition manuelle prime sur les balises (écran « Modifier », GO du
         // 25/09/2026) : un scan qui relit ce fichier n'écrase ni sa place
         // dans le coffret, ni son titre, ni son artiste.
-        if self.tenues.appliquer(&mut track) {
-            // Une piste éditée à la main garde l'artiste qu'on lui a donné :
-            // le découpage des balises ne la relie à personne d'autre.
+        // Chantier artistes multiples — lu AVANT `appliquer` (la tenue se
+        // retrouve par le chemin). Une piste dont l'ARTISTE est tenu à la
+        // main garde celui qu'on lui a donné : le découpage des balises ne la
+        // relie à personne d'autre. Une tenue qui ne touche pas l'artiste
+        // (disposition, titre, genre…) laisse la liaison suivre les balises.
+        let artiste_tenu = self.tenues.tient_l_artiste(&track);
+        let tenue = self.tenues.appliquer(&mut track);
+        if artiste_tenu {
             self.artistes_de_piste_en_attente
                 .push((sf.path.clone(), Vec::new()));
-            let tenu = track.album_id;
-            return Some((track, tenu));
+        } else {
+            self.noter_les_artistes_de_piste(
+                &sf.path,
+                &track_artist_name,
+                meta.musicbrainz_artist_id.as_deref(),
+                track_artist.as_deref(),
+            );
         }
-        self.noter_les_artistes_de_piste(
-            &sf.path,
-            &track_artist_name,
-            meta.musicbrainz_artist_id.as_deref(),
-            track_artist.as_deref(),
-        );
-        Some((track, album_id))
+        let album = if tenue { track.album_id } else { album_id };
+        Some((track, album))
     }
 
     /// Chantier artistes multiples — découpe le crédit ARTIST de la piste
@@ -2814,6 +2819,71 @@ mod tests {
         let seul = fichier_etiquete(&duo.path, "The Beatles", "Mix", 1);
         scanner(&[&seul]);
         assert!(artistes_de_la_piste(&*backend, id_de(&duo.path)).is_empty());
+    }
+
+    /// Chantier artistes multiples — une piste éditée à la main ne perd sa
+    /// liaison que si c'est son ARTISTE qui est tenu. Un titre tenu laisse le
+    /// crédit des balises la relier ; un artiste tenu la vide tout de suite
+    /// (`champs_tenus::tenir`), et le scan suivant ne la repose pas.
+    ///
+    /// Contre-épreuve : remettre l'ancien `if self.tenues.appliquer(..)` qui
+    /// vidait la liaison pour TOUTE tenue fait tomber la première assertion.
+    #[test]
+    fn seul_l_artiste_tenu_a_la_main_vide_la_liaison() {
+        use tune_core::db::champs_tenus::{Champ, tenir_par_id};
+        use tune_core::db::track_artist_repo::artistes_de_la_piste;
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tune_core::db::sqlite::SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        tune_core::db::migrations::run_migrations(&db).unwrap();
+        let backend: Arc<dyn tune_core::db::backend::DbBackend> = Arc::new(db);
+        let track_repo = tune_core::db::track_repo::TrackRepo::with_backend(backend.clone());
+        let dossier = tmp.path().join("Mix");
+        std::fs::create_dir_all(&dossier).unwrap();
+        let duo = fichier_etiquete(
+            &dossier.join("01.flac").to_string_lossy(),
+            "The Beatles & Genesis",
+            "Mix",
+            1,
+        );
+        let scanner = || {
+            let mut imp = TrackImporter::new(
+                backend.clone(),
+                true,
+                tmp.path().join("cache"),
+                PorteeDuScan::TOUT,
+            );
+            let (mut piste, _) = imp.import(&duo).expect("import");
+            match track_repo.get_by_path(&duo.path).unwrap() {
+                Some(t) => {
+                    piste.id = t.id;
+                    track_repo.update_batch(&[piste]).unwrap();
+                }
+                None => {
+                    track_repo.create_batch(&[piste]).unwrap();
+                }
+            }
+            imp.ecrire_les_artistes_de_piste(&*backend)
+        };
+        assert_eq!(scanner(), 2);
+        let id = track_repo
+            .get_by_path(&duo.path)
+            .unwrap()
+            .unwrap()
+            .id
+            .unwrap();
+
+        // Le titre est tenu à la main : la liaison suit toujours les balises.
+        tenir_par_id(&backend, id, &[Champ::Titre]);
+        assert_eq!(scanner(), 2, "un titre tenu ne vide pas la liaison");
+        assert_eq!(artistes_de_la_piste(&*backend, id).len(), 2);
+
+        // L'artiste est tenu à la main : la liaison part sur-le-champ…
+        tenir_par_id(&backend, id, &[Champ::Artiste]);
+        assert!(artistes_de_la_piste(&*backend, id).is_empty());
+        // … et le scan suivant ne la repose pas.
+        assert_eq!(scanner(), 0);
+        assert!(artistes_de_la_piste(&*backend, id).is_empty());
     }
 
     /// Fichier étiqueté : les balises ont été lues.

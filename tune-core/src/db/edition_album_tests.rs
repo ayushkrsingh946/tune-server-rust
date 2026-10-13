@@ -899,3 +899,48 @@ pub(crate) fn scenario_balises_effectives(db: &Arc<dyn DbBackend>) {
 fn balises_effectives_sur_sqlite() {
     scenario_balises_effectives(&sqlite());
 }
+
+/// Chantier artistes multiples — l'artiste d'une piste donné dans l'écran
+/// « Modifier » de l'album est le SEUL de la piste : la liaison
+/// `track_artists` posée par le crédit des balises part dans la même
+/// transaction, et la tenue la garde vide au scan suivant
+/// (`Tenues::tient_l_artiste`). Une piste dont on ne renomme que le titre
+/// garde la sienne.
+#[test]
+fn l_artiste_de_piste_modifie_vide_la_liaison_sur_sqlite() {
+    use crate::db::track_artist_repo::{artistes_de_la_piste, remplacer_par_chemin};
+    let db = sqlite();
+    let beatles = artiste(&db, "The Beatles");
+    let genesis = artiste(&db, "Genesis");
+    let al = album(&db, "Mix", beatles, "/m/mix");
+    let p1 = piste(&db, al, beatles, 1, 1, None, None, "/m/mix/01.flac");
+    let p2 = piste(&db, al, beatles, 2, 1, None, None, "/m/mix/02.flac");
+    for c in ["/m/mix/01.flac", "/m/mix/02.flac"] {
+        remplacer_par_chemin(db.as_ref(), c, &[(beatles, 0), (genesis, 1)]);
+    }
+    modifier(
+        &db,
+        al,
+        json!({ "tracks": [
+            { "id": p1, "artist_name": "Invité" },
+            { "id": p2, "title": "Coda" }
+        ] }),
+    )
+    .unwrap();
+    assert!(artistes_de_la_piste(db.as_ref(), p1).is_empty());
+    assert_eq!(artistes_de_la_piste(db.as_ref(), p2).len(), 2);
+
+    // Au scan suivant, la tenue dit lequel des deux garde ses balises.
+    let tenues = Tenues::charger(&db);
+    let relue = |id: i64| {
+        TrackRepo::with_backend(db.clone())
+            .get(id)
+            .unwrap()
+            .unwrap()
+    };
+    assert!(tenues.tient_l_artiste(&relue(p1)));
+    assert!(
+        !tenues.tient_l_artiste(&relue(p2)),
+        "un titre tenu n'est pas un artiste tenu"
+    );
+}

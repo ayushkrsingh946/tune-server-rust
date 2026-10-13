@@ -1013,57 +1013,74 @@ pub fn build_album_query(
         );
         let int_val = || value.parse::<i64>().unwrap_or(0);
 
-        let cond = match op {
-            "=" if is_text => format!("LOWER({col}) = LOWER('{esc}')"),
-            "!=" if is_text => format!("LOWER({col}) != LOWER('{esc}')"),
-            "contains" => format!("LOWER({col}) LIKE LOWER('%{esc_like}%'){esc_clause}"),
-            "starts_with" => format!("LOWER({col}) LIKE LOWER('{esc_like}%'){esc_clause}"),
-            "is_null" => format!("({col} IS NULL OR {col} = '')"),
-            "is_not_null" => format!("({col} IS NOT NULL AND {col} != '')"),
-            "=" => format!("{col} = {}", int_val()),
-            "!=" => format!("{col} != {}", int_val()),
-            ">=" => format!("{col} >= {}", int_val()),
-            ">" => format!("{col} > {}", int_val()),
-            "<=" => format!("{col} <= {}", int_val()),
-            "<" => format!("{col} < {}", int_val()),
-            "between" => {
-                if let Some(arr) = value_raw.and_then(|v| v.as_array()) {
-                    let lo = arr.first().and_then(|v| v.as_i64()).unwrap_or(0);
-                    let hi = arr.get(1).and_then(|v| v.as_i64()).unwrap_or(i64::MAX);
-                    format!("{col} BETWEEN {lo} AND {hi}")
-                } else {
-                    let parts: Vec<&str> = value.splitn(2, ',').collect();
-                    if parts.len() == 2 {
-                        let lo = parts[0].trim().parse::<i64>().unwrap_or(0);
-                        let hi = parts[1].trim().parse::<i64>().unwrap_or(i64::MAX);
+        // Chantier artistes multiples — la traduction prend la colonne en
+        // paramètre : la règle « Artiste » la rejoue sur les artistes reliés.
+        let traduire = |col: &str, op: &str| -> Option<String> {
+            Some(match op {
+                "=" if is_text => format!("LOWER({col}) = LOWER('{esc}')"),
+                "!=" if is_text => format!("LOWER({col}) != LOWER('{esc}')"),
+                "contains" => format!("LOWER({col}) LIKE LOWER('%{esc_like}%'){esc_clause}"),
+                "starts_with" => format!("LOWER({col}) LIKE LOWER('{esc_like}%'){esc_clause}"),
+                "is_null" => format!("({col} IS NULL OR {col} = '')"),
+                "is_not_null" => format!("({col} IS NOT NULL AND {col} != '')"),
+                "=" => format!("{col} = {}", int_val()),
+                "!=" => format!("{col} != {}", int_val()),
+                ">=" => format!("{col} >= {}", int_val()),
+                ">" => format!("{col} > {}", int_val()),
+                "<=" => format!("{col} <= {}", int_val()),
+                "<" => format!("{col} < {}", int_val()),
+                "between" => {
+                    if let Some(arr) = value_raw.and_then(|v| v.as_array()) {
+                        let lo = arr.first().and_then(|v| v.as_i64()).unwrap_or(0);
+                        let hi = arr.get(1).and_then(|v| v.as_i64()).unwrap_or(i64::MAX);
                         format!("{col} BETWEEN {lo} AND {hi}")
                     } else {
-                        format!("{col} = {}", int_val())
+                        let parts: Vec<&str> = value.splitn(2, ',').collect();
+                        if parts.len() == 2 {
+                            let lo = parts[0].trim().parse::<i64>().unwrap_or(0);
+                            let hi = parts[1].trim().parse::<i64>().unwrap_or(i64::MAX);
+                            format!("{col} BETWEEN {lo} AND {hi}")
+                        } else {
+                            format!("{col} = {}", int_val())
+                        }
                     }
                 }
-            }
-            "in" => {
-                if let Some(arr) = value_raw.and_then(|v| v.as_array()) {
-                    let items: Vec<String> = arr
-                        .iter()
-                        .map(|v| {
-                            if let Some(s) = v.as_str() {
-                                format!("'{}'", s.replace('\'', "''"))
-                            } else {
-                                v.to_string()
-                            }
-                        })
-                        .collect();
-                    format!("{col} IN ({})", items.join(","))
-                } else {
-                    let items: Vec<String> = value
-                        .split(',')
-                        .map(|s| format!("'{}'", s.trim().replace('\'', "''")))
-                        .collect();
-                    format!("LOWER({col}) IN ({})", items.join(","))
+                "in" => {
+                    if let Some(arr) = value_raw.and_then(|v| v.as_array()) {
+                        let items: Vec<String> = arr
+                            .iter()
+                            .map(|v| {
+                                if let Some(s) = v.as_str() {
+                                    format!("'{}'", s.replace('\'', "''"))
+                                } else {
+                                    v.to_string()
+                                }
+                            })
+                            .collect();
+                        format!("{col} IN ({})", items.join(","))
+                    } else {
+                        let items: Vec<String> = value
+                            .split(',')
+                            .map(|s| format!("'{}'", s.trim().replace('\'', "''")))
+                            .collect();
+                        format!("LOWER({col}) IN ({})", items.join(","))
+                    }
                 }
-            }
-            _ => continue,
+                _ => return None,
+            })
+        };
+        let Some(cond) = traduire(col, op) else {
+            continue;
+        };
+        let cond = if matches!(field, "artist" | "artist_name") {
+            crate::regles_sql::avec_les_artistes_relies(
+                crate::regles_sql::Niveau::Album,
+                op,
+                cond,
+                |o| traduire(crate::regles_sql::COLONNE_ARTISTE_RELIE.sql, o),
+            )
+        } else {
+            cond
         };
         conditions.push(cond);
     }

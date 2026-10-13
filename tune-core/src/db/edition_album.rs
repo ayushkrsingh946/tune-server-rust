@@ -562,6 +562,18 @@ impl Tenues {
             .get(dossier_comparable(dossier).as_ref())
     }
 
+    /// Chantier artistes multiples — l'artiste de cette ligne est-il tenu à
+    /// la main (écran « Modifier » de l'album, ou champ tenu de la piste) ?
+    /// Alors le crédit des balises ne la relie à personne d'autre : la
+    /// liaison `track_artists` est vidée. Une tenue qui ne touche pas
+    /// l'artiste (disposition, titre, genre…) laisse la liaison suivre les
+    /// balises.
+    pub fn tient_l_artiste(&self, track: &Track) -> bool {
+        self.de_la_piste(track)
+            .is_some_and(|t| t.artiste_id.is_some())
+            || self.champs.tient_l_artiste(track)
+    }
+
     /// Les albums dont la disposition des disques est tenue à la main.
     pub fn albums_disposes(&self) -> &HashSet<i64> {
         &self.albums_disposes
@@ -1227,6 +1239,12 @@ pub fn appliquer(
             tx.execute(
                 &format!("UPDATE tracks SET artist_id = {p1} WHERE id = {p2}"),
                 &[a as &dyn ToSqlValue, piste],
+            )?;
+            // Chantier artistes multiples — l'artiste donné à la main est le
+            // seul de la piste : les artistes reliés par le crédit partent.
+            tx.execute(
+                &format!("DELETE FROM track_artists WHERE track_id = {p1}"),
+                &[piste as &dyn ToSqlValue],
             )?;
         }
         // Le mode de compilation — APRÈS les pistes : en `auto`, la règle

@@ -325,6 +325,13 @@ impl Registre {
             })
     }
 
+    /// Chantier artistes multiples — l'artiste de cette piste est-il tenu à
+    /// la main ? Alors le crédit des balises ne la relie à personne d'autre.
+    pub fn tient_l_artiste(&self, track: &Track) -> bool {
+        self.de_la_piste(track)
+            .is_some_and(|t| t.artist_id.is_some() || t.artist_name.is_some())
+    }
+
     /// Pose sur une ligne construite depuis les balises les champs tenus à la
     /// main. Rend vrai si la ligne a changé.
     pub fn appliquer(&self, track: &mut Track) -> bool {
@@ -362,7 +369,14 @@ pub fn tenir(db: &Arc<dyn DbBackend>, track: &Track, champs: &[Champ]) -> Result
     t.cue_debut_ms = track.cue_start_ms;
     t.tenir_depuis(track, champs);
     let json = serde_json::to_string(&t).map_err(|e| e.to_string())?;
-    TrackMetadataRepo::with_backend(db.clone()).set(id, CLE, &json)
+    TrackMetadataRepo::with_backend(db.clone()).set(id, CLE, &json)?;
+    // Chantier artistes multiples — l'artiste donné à la main est le seul :
+    // les artistes reliés par le crédit des balises partent tout de suite,
+    // sans attendre la prochaine analyse.
+    if champs.contains(&Champ::Artiste) {
+        super::track_artist_repo::retirer_de_la_piste(db.as_ref(), id);
+    }
+    Ok(())
 }
 
 /// Tient les champs listés pour une piste désignée par son identifiant (la
