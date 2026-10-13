@@ -173,6 +173,11 @@ use crate::state::AppState;
 /// La passe par empreinte AcoustID (#4805, idée 4) : `?mode=acoustid`.
 pub(crate) mod acoustid;
 
+/// La mesure A de #4805 : la passe rejouée sur une COPIE de bibliothèque
+/// (essai ignoré, lancé à la main).
+#[cfg(test)]
+mod mesure_a;
+
 /// La clé de `settings` qui porte l'avancement, sur le modèle de
 /// `enrich_all_status`. En base et non en mémoire : une passe de 2 h 23
 /// survit à plus d'un rechargement de page, et l'écran doit retrouver où elle
