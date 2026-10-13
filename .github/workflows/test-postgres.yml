@@ -376,9 +376,8 @@ jobs:
 
       # web#1716 -- l onglet Titres pagine cote serveur : tri, recherche
       # (`strpos` + `unaccent`), NULL ranges en bout de tri et comptes sur une
-      # VRAIE base, et le tri par ecoutes (web#1470, jointure sur
-      # `listen_history`). L epreuve vide `tracks`, `albums`, `artists`,
-      # `hidden_items` et `listen_history` : seule, en serie.
+      # VRAIE base. L epreuve vide `tracks`, `albums`, `artists` et
+      # `hidden_items` : seule, en serie.
       - name: Onglet Titres pagine cote serveur sur PostgreSQL (web#1716)
         env:
           TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test

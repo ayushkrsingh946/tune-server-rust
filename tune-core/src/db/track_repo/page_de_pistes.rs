@@ -551,6 +551,7 @@ mod tests {
     fn base() -> (TrackRepo, ArtistRepo, AlbumRepo) {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
         (
             TrackRepo::new(db.clone()),
             ArtistRepo::new(db.clone()),
@@ -639,7 +640,12 @@ mod tests {
         historique(repo.db.as_ref());
 
         let mut d = demande();
-        d.tri = Some(ColonneDeTri::Ecoutes);
+        d.tri = ColonneDeTri::depuis_cle("plays");
+        assert_eq!(
+            d.tri,
+            Some(ColonneDeTri::Ecoutes),
+            "sort=plays doit être accepté"
+        );
         d.descendant = true;
         let page = repo.page_de_pistes(&d).unwrap();
         assert_eq!(page.total, 7, "la jointure ne multiplie pas les lignes");
@@ -661,7 +667,12 @@ mod tests {
         assert_eq!(asc.last().map(String::as_str), Some("Dancing Queen"));
         assert_eq!(asc[5], "Été indien");
 
-        d.tri = Some(ColonneDeTri::DerniereEcoute);
+        d.tri = ColonneDeTri::depuis_cle("lastPlayed");
+        assert_eq!(
+            d.tri,
+            Some(ColonneDeTri::DerniereEcoute),
+            "sort=lastPlayed doit être accepté"
+        );
         for descendant in [true, false] {
             d.descendant = descendant;
             let page = repo.page_de_pistes(&d).unwrap();
@@ -918,7 +929,12 @@ mod tests {
         // tune-web-client#1470 : les écoutes, même ordre que sur SQLite.
         historique(db.as_ref());
         let mut d = demande();
-        d.tri = Some(ColonneDeTri::Ecoutes);
+        d.tri = ColonneDeTri::depuis_cle("plays");
+        assert_eq!(
+            d.tri,
+            Some(ColonneDeTri::Ecoutes),
+            "sort=plays doit être accepté"
+        );
         d.descendant = true;
         let page = repo.page_de_pistes(&d).unwrap();
         assert_eq!(page.total, 7);
