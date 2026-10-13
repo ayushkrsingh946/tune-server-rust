@@ -51,6 +51,21 @@ impl Resultat {
     }
 }
 
+fn longueur_annoncee(track: &symphonia::core::formats::Track) -> Option<u64> {
+    use symphonia::core::codecs::audio::well_known::{CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3};
+    // Le démultiplexeur MPEG estime parfois cette valeur à partir des 17
+    // premières trames. Une estimation de durée n'est pas une preuve de
+    // troncature d'un VBR valide : contrôler ses paquets, pas cette estimation.
+    match &track.codec_params {
+        Some(CodecParameters::Audio(p))
+            if matches!(p.codec, CODEC_ID_MP1 | CODEC_ID_MP2 | CODEC_ID_MP3) =>
+        {
+            None
+        }
+        _ => track.num_frames,
+    }
+}
+
 /// `continuer` est appelé entre les paquets : pause et priorité à la lecture
 /// restent réactives même pour une image de disque de plusieurs heures.
 /// Une interruption ne produit AUCUN verdict et le fichier sera repris à zéro.
@@ -131,7 +146,7 @@ pub fn verifier(chemin: &Path, mut continuer: impl FnMut() -> bool) -> Option<Re
         .as_ref()
         .map(|f| f.total_samples)
         .filter(|n| *n > 0)
-        .or(track.num_frames);
+        .or_else(|| longueur_annoncee(track));
     let mut decoder = match symphonia::default::get_codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default().verify(true))
     {
@@ -170,7 +185,7 @@ pub fn verifier(chemin: &Path, mut continuer: impl FnMut() -> bool) -> Option<Re
                     return Some(Resultat::non_verifiable("codec_non_pris_en_charge", trames));
                 };
                 id = track.id;
-                attendues = track.num_frames;
+                attendues = longueur_annoncee(track);
                 decoder = match symphonia::default::get_codecs()
                     .make_audio_decoder(params, &AudioDecoderOptions::default().verify(true))
                 {
@@ -367,5 +382,29 @@ mod tests {
         let chemin = dossier.path().join("temoin.flac");
         std::fs::write(&chemin, flac()).unwrap();
         assert!(verifier(&chemin, || false).is_none());
+    }
+    #[test]
+    fn mp3_vbr_sans_xing_n_est_pas_corrompu_par_une_duree_estimee() {
+        // Trames MPEG-1 Layer III silencieuses (side information et données
+        // nulles), sans Xing : 17 à 128 kb/s puis 17 à 320 kb/s. La durée
+        // estimée sur les premières trames surestime donc la longueur réelle.
+        let mut fichier = Vec::new();
+        for (bitrate, taille) in [(0x90, 417), (0xe0, 1044)] {
+            for _ in 0..17 {
+                let debut = fichier.len();
+                fichier.extend_from_slice(&[0xff, 0xfb, bitrate, 0x00]);
+                fichier.resize(debut + taille, 0);
+            }
+        }
+        let dossier = tempfile::tempdir().unwrap();
+        let chemin = dossier.path().join("vbr.mp3");
+        std::fs::write(&chemin, fichier).unwrap();
+        let r = verifier(&chemin, || true).unwrap();
+        assert_eq!(
+            r.verdict,
+            Verdict::Sain,
+            "durée MPEG estimée prise pour une troncature : {r:?}"
+        );
+        assert_eq!(r.trames_decodees, 34 * 1152);
     }
 }

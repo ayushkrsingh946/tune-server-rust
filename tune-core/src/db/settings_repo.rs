@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(sql::delete_by_key(&d), "DELETE FROM settings WHERE key = ?");
         assert_eq!(
             sql::list_all(),
-            "SELECT key, value FROM settings ORDER BY key"
+            "SELECT key, value FROM settings WHERE key NOT LIKE 'audit_integrite_ligne:%' ORDER BY key"
         );
     }
 
