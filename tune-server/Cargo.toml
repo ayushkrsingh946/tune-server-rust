@@ -600,6 +600,13 @@ name = "assistant_ia_ancien_assistant_etape2"
 path = "tests/assistant_ia_ancien_assistant_etape2.rs"
 required-features = ["assistant-ia"]
 
+# Chantier « Assistant IA » : `/ai/query` rend le coût exact de la question
+# (`cout_eur`), par la route montée contre un faux fournisseur local.
+[[test]]
+name = "assistant_ia_cout_exact"
+path = "tests/assistant_ia_cout_exact.rs"
+required-features = ["assistant-ia"]
+
 # #3101 : la portée de répertoire de l'audit de bibliothèque. Le motif LIKE de
 # `GET /export/library-audit.csv?dir=…` était écrit à la main, sans séparateur :
 # auditer `…/Rock` ramenait `…/Rockabilly` et le déclarait fantôme. Le témoin

@@ -164,17 +164,33 @@ impl Passerelle {
         outils: &Value,
         max_jetons: u32,
     ) -> Result<Value, ErreurAppel> {
+        self.discuter_compte(systeme, messages, outils, max_jetons)
+            .await
+            .map(|(v, _)| v)
+    }
+
+    /// [`Self::discuter`], avec le coût EXACT du tour en micro-euros : celui
+    /// qui vient d'être compté pour l'usage [`USAGE_REQUETE`] (même tarif
+    /// daté, même taux). L'hôte en fait la somme pour le `cout_eur` d'une
+    /// question.
+    pub async fn discuter_compte(
+        &self,
+        systeme: &str,
+        messages: &Value,
+        outils: &Value,
+        max_jetons: u32,
+    ) -> Result<(Value, u64), ErreurAppel> {
         use crate::dialogue::{self, Dialecte};
         let famille = Reglages::charger(&self.backend)
             .famille
             .ok_or(ErreurAppel::NonConfigure)?;
         match famille {
             Famille::Anthropic => {
-                self.discuter_anthropic(systeme, messages, outils, max_jetons)
+                self.discuter_anthropic_compte(systeme, messages, outils, max_jetons)
                     .await
             }
             Famille::CompatibleOpenai | Famille::Gemini => {
-                let v = self
+                let (v, cout) = self
                     .tour(
                         |acces, modele| {
                             let mut corps = json!({
@@ -206,12 +222,15 @@ impl Passerelle {
                         },
                     )
                     .await?;
-                Ok(dialogue::reponse_depuis(
-                    v.pointer("/choices/0/message").unwrap_or(&Value::Null),
+                Ok((
+                    dialogue::reponse_depuis(
+                        v.pointer("/choices/0/message").unwrap_or(&Value::Null),
+                    ),
+                    cout,
                 ))
             }
             Famille::Ollama => {
-                let v = self
+                let (v, cout) = self
                     .tour(
                         |acces, modele| {
                             let mut corps = json!({
@@ -236,7 +255,7 @@ impl Passerelle {
                         },
                     )
                     .await?;
-                Ok(dialogue::reponse_depuis(&v["message"]))
+                Ok((dialogue::reponse_depuis(&v["message"]), cout))
             }
         }
     }
@@ -250,6 +269,19 @@ impl Passerelle {
         outils: &Value,
         max_jetons: u32,
     ) -> Result<Value, ErreurAppel> {
+        self.discuter_anthropic_compte(systeme, messages, outils, max_jetons)
+            .await
+            .map(|(v, _)| v)
+    }
+
+    /// [`Self::discuter_anthropic`], avec le coût exact du tour (micro-euros).
+    async fn discuter_anthropic_compte(
+        &self,
+        systeme: &str,
+        messages: &Value,
+        outils: &Value,
+        max_jetons: u32,
+    ) -> Result<(Value, u64), ErreurAppel> {
         if Reglages::charger(&self.backend).famille != Some(Famille::Anthropic) {
             return Err(ErreurAppel::NonConfigure);
         }
@@ -286,13 +318,14 @@ impl Passerelle {
 
     /// Le chemin commun d'un tour : clé et tarif, plafond sous LE verrou,
     /// la requête (`construire`), puis le comptage de SES jetons (`jetons`)
-    /// pour l'usage [`USAGE_REQUETE`]. Seuls la famille et le statut HTTP
-    /// sont journalisés, jamais la requête ni la clé.
+    /// pour l'usage [`USAGE_REQUETE`], dont le coût (micro-euros) est rendu
+    /// avec la réponse. Seuls la famille et le statut HTTP sont journalisés,
+    /// jamais la requête ni la clé.
     async fn tour(
         &self,
         construire: impl FnOnce(&fournisseur::Acces, &str) -> reqwest::RequestBuilder,
         jetons: impl FnOnce(&Value) -> (u64, u64),
-    ) -> Result<Value, ErreurAppel> {
+    ) -> Result<(Value, u64), ErreurAppel> {
         let r = Reglages::charger(&self.backend);
         let famille = r.famille.ok_or(ErreurAppel::NonConfigure)?;
         let modele = r.modele_effectif(false);
@@ -324,7 +357,7 @@ impl Passerelle {
         let v: Value = serde_json::from_str(&texte)
             .map_err(|_| ErreurAppel::Fournisseur(fournisseur::ErreurFournisseur::Autre(statut)))?;
         let (entree, sortie) = jetons(&v);
-        appel::compter(
+        let cout = appel::compter(
             &self.backend,
             &mut c,
             &r,
@@ -334,6 +367,6 @@ impl Passerelle {
             entree,
             sortie,
         );
-        Ok(v)
+        Ok((v, cout))
     }
 }
