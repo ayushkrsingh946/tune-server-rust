@@ -87,7 +87,7 @@ Unlisted permission ⇒ the import traps (deny by default).
 | `streaming` | `host_streaming_services()`, `host_streaming_playlists(service)`, `host_streaming_playlist_tracks(service,playlist_id)`, `host_streaming_playlist_create(service,name,description?)`, `host_streaming_playlist_add_tracks(service,playlist_id,track_ids[])`, `host_streaming_match_track(service,title,artist,isrc,duration_ms)` — **livré #4716** |
 | `kv` | `host_kv_get(key)`, `host_kv_set(key,value)`, `host_kv_list(prefix)` — per-plugin settings namespace, **livré #4716** |
 | `http` | `host_http({method,url,headers?,body?})` → `{status,headers,body}` — requête sortante faite par l'hôte, bornée par `http_allowed_domains` du manifeste, boîte à cookies cloisonnée par greffon, aucune redirection suivie — **livré #6197** (voir `docs/chantier-sources-wasm.md`) |
-| `streaming_source` | aucun import : le greffon EXPORTE `login`, `search`, `get_album`, `get_track_url`… et l'hôte l'inscrit comme service (`streaming_source` du manifeste) — **#6197, étape 1** |
+| `streaming_source` | aucun import : le greffon EXPORTE `login`, `search`, `get_album`, `get_track_url`… et l'hôte l'inscrit comme service (`streaming_source` du manifeste) — **#6197, étapes 1 et 2** (exports facultatifs, quotas, journal : [`wasm-streaming-source.md`](wasm-streaming-source.md)) |
 
 ### 3.4.1 Garde-fous des capacités `playlists` / `streaming` / `library` / `kv` (#4716)
 

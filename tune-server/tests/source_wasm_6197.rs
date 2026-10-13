@@ -14,10 +14,18 @@
 //! 4. un domaine hors liste est refusé, À TRAVERS le vrai hôte ;
 //! 5. redémarrage : un greffon neuf, sans session, se reconnecte seul depuis
 //!    les identifiants scellés.
+//!
+//! Étape 2 (`une_source_wasm_couvre_le_trait_et_se_lit_vraiment`) : la
+//! recherche paginée, les artistes, les playlists, les favoris (lecture et
+//! écriture), les nouveautés ; la LECTURE réelle — l'adresse de flux sur un
+//! CDN qui exige la session, que l'hôte y ajoute, une session expirée qui se
+//! renouvelle seule ; l'écran (`GET /plugins/sources`, journal réseau) et les
+//! cookies persistés scellés.
 #![cfg(feature = "plugins-wasm")]
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use axum::body::Body;
 use axum::extract::{Path as Chemin, Query};
@@ -55,52 +63,193 @@ fn catalogue(base: &str) -> Value {
     ])
 }
 
-fn connecte(entetes: &HeaderMap) -> bool {
-    entetes
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|c| c.contains("session=jeton-42"))
+/// La session valide est `jeton-<génération>` : faire avancer la génération
+/// EXPIRE la session en cours, comme un service qui renouvelle ses jetons.
+#[derive(Clone)]
+struct Faux {
+    base: String,
+    generation: Arc<AtomicU32>,
+    favoris: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Faux {
+    fn jeton(&self) -> String {
+        format!("session=jeton-{}", self.generation.load(Ordering::SeqCst))
+    }
+    fn connecte(&self, entetes: &HeaderMap) -> bool {
+        entetes
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|c| c.split("; ").any(|morceau| morceau == self.jeton()))
+    }
+}
+
+fn album_du_catalogue(base: &str, id: &str) -> Option<Value> {
+    catalogue(base)
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["ref"] == id)
+        .cloned()
 }
 
 /// Le faux service : son propre dialecte, une session par cookie.
-async fn faux_service() -> String {
+async fn faux_service() -> Faux {
     let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", ecoute.local_addr().unwrap());
+    let faux = Faux {
+        base: base.clone(),
+        generation: Arc::new(AtomicU32::new(42)),
+        favoris: Arc::new(std::sync::Mutex::new(Vec::new())),
+    };
 
     let b = base.clone();
+    let f = faux.clone();
     let app = Router::new()
-        .route(
-            "/login",
-            post(|Json(corps): Json<Value>| async move {
+        .route("/login", {
+            let f = f.clone();
+            post(move |Json(corps): Json<Value>| async move {
                 if corps["email"] == ADRESSE && corps["password"] == MOT_DE_PASSE {
                     (
                         StatusCode::OK,
-                        [(header::SET_COOKIE, "session=jeton-42; Path=/; HttpOnly")],
+                        [(
+                            header::SET_COOKIE,
+                            format!("{}; Path=/; HttpOnly", f.jeton()),
+                        )],
                         Json(json!({ "abonne": "Charly", "offre": "Premium" })),
                     )
                         .into_response()
                 } else {
                     StatusCode::UNAUTHORIZED.into_response()
                 }
-            }),
-        )
+            })
+        })
         .route("/catalogue", {
-            let b = b.clone();
+            let (b, f) = (b.clone(), f.clone());
             get(
                 move |entetes: HeaderMap,
-                      Query(_q): Query<std::collections::HashMap<String, String>>| async move {
-                    if !connecte(&entetes) {
+                      Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                    if !f.connecte(&entetes) {
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
-                    Json(json!({ "resultats": catalogue(&b) })).into_response()
+                    let tout = catalogue(&b).as_array().unwrap().clone();
+                    let debut: usize = q.get("debut").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let nombre: usize = q
+                        .get("nombre")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(tout.len());
+                    let page: Vec<Value> = tout.iter().skip(debut).take(nombre).cloned().collect();
+                    Json(json!({ "resultats": page, "total": tout.len() })).into_response()
+                },
+            )
+        })
+        .route("/artistes/{id}", {
+            let (b, f) = (b.clone(), f.clone());
+            get(
+                move |entetes: HeaderMap, Chemin(id): Chemin<String>| async move {
+                    if !f.connecte(&entetes) {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    if id != "art-miles" {
+                        return StatusCode::NOT_FOUND.into_response();
+                    }
+                    Json(json!({
+                        "ref": "art-miles", "nom": "Miles Davis", "photo": null,
+                        "albums": [album_du_catalogue(&b, "alb-1")],
+                    }))
+                    .into_response()
+                },
+            )
+        })
+        .route("/listes/{id}", {
+            let (b, f) = (b.clone(), f.clone());
+            get(
+                move |entetes: HeaderMap, Chemin(id): Chemin<String>| async move {
+                    if !f.connecte(&entetes) {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                    if id != "lst-1" {
+                        return StatusCode::NOT_FOUND.into_response();
+                    }
+                    let a1 = album_du_catalogue(&b, "alb-1").unwrap();
+                    let a2 = album_du_catalogue(&b, "alb-2").unwrap();
+                    let mut p1 = a1["pistes"][0].clone();
+                    p1["album"] = a1;
+                    let mut p2 = a2["pistes"][1].clone();
+                    p2["album"] = a2;
+                    Json(json!({
+                        "ref": "lst-1", "nom": "Nuit blanche", "texte": "Deux pour la route",
+                        "auteur": "Charly", "pistes": [p1, p2],
+                    }))
+                    .into_response()
+                },
+            )
+        })
+        .route("/favoris", {
+            let (b, f) = (b.clone(), f.clone());
+            get(move |entetes: HeaderMap| async move {
+                if !f.connecte(&entetes) {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+                let albums: Vec<Value> = f
+                    .favoris
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|id| album_du_catalogue(&b, id))
+                    .collect();
+                Json(json!({ "albums": albums, "artistes": [], "listes": [], "pistes": [] }))
+                    .into_response()
+            })
+        })
+        .route("/favoris/albums/{id}", {
+            let f = f.clone();
+            axum::routing::put({
+                let f = f.clone();
+                move |entetes: HeaderMap, Chemin(id): Chemin<String>| async move {
+                    if !f.connecte(&entetes) {
+                        return StatusCode::UNAUTHORIZED;
+                    }
+                    f.favoris.lock().unwrap().push(id);
+                    StatusCode::NO_CONTENT
+                }
+            })
+            .delete(
+                move |entetes: HeaderMap, Chemin(id): Chemin<String>| async move {
+                    if !f.connecte(&entetes) {
+                        return StatusCode::UNAUTHORIZED;
+                    }
+                    f.favoris.lock().unwrap().retain(|a| *a != id);
+                    StatusCode::NO_CONTENT
+                },
+            )
+        })
+        .route("/nouveautes", {
+            let (b, f) = (b.clone(), f.clone());
+            get(move |entetes: HeaderMap| async move {
+                if !f.connecte(&entetes) {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                }
+                Json(json!([album_du_catalogue(&b, "alb-2")])).into_response()
+            })
+        })
+        .route("/cdn/{fichier}", {
+            let f = f.clone();
+            get(
+                move |entetes: HeaderMap, Chemin(_fichier): Chemin<String>| async move {
+                    // Le CDN exige la session : sans le cookie, 403.
+                    if !f.connecte(&entetes) {
+                        return StatusCode::FORBIDDEN.into_response();
+                    }
+                    ([(header::CONTENT_TYPE, "audio/mpeg")], "ID3-faux-flux").into_response()
                 },
             )
         })
         .route("/albums/{id}", {
-            let b = b.clone();
+            let (b, f) = (b.clone(), f.clone());
             get(
                 move |entetes: HeaderMap, Chemin(id): Chemin<String>| async move {
-                    if !connecte(&entetes) {
+                    if !f.connecte(&entetes) {
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
                     match catalogue(&b)
@@ -116,21 +265,26 @@ async fn faux_service() -> String {
             )
         })
         .route("/flux/{id}", {
-            let b = b.clone();
+            let (b, f) = (b.clone(), f.clone());
             get(
                 move |entetes: HeaderMap, Chemin(id): Chemin<String>| async move {
-                    if !connecte(&entetes) {
+                    if !f.connecte(&entetes) {
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
-                    Json(json!({ "adresse": format!("{b}/audio/{id}.mp3"), "expire_a": null }))
-                        .into_response()
+                    // L'adresse « hors liste » sert au refus de l'étape 2.
+                    let adresse = if id == "trk-hors-liste" {
+                        "https://cdn.evil.example/vol.mp3".to_string()
+                    } else {
+                        format!("{b}/cdn/{id}.mp3")
+                    };
+                    Json(json!({ "adresse": adresse, "expire_a": null })).into_response()
                 },
             )
         });
     tokio::spawn(async move {
         let _ = axum::serve(ecoute, app).await;
     });
-    base
+    faux
 }
 
 async fn appeler(
@@ -168,7 +322,8 @@ fn copier_le_greffon(vers: &Path) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn un_greffon_wasm_fournit_une_source_de_streaming() {
-    let base = faux_service().await;
+    let faux = faux_service().await;
+    let base = faux.base.clone();
     let dir = tempfile::tempdir().unwrap();
     copier_le_greffon(dir.path());
     let cle = dir.path().join("cles").join("plugin-credentials.key");
@@ -267,7 +422,7 @@ async fn un_greffon_wasm_fournit_une_source_de_streaming() {
     )
     .await;
     assert_eq!(statut, StatusCode::OK, "{rep}");
-    assert_eq!(rep["url"], format!("{base}/audio/trk-1.mp3"));
+    assert_eq!(rep["url"], format!("{base}/cdn/trk-1.mp3"));
     assert_eq!(rep["mime_type"], "audio/mpeg");
 
     // 4. Un domaine hors liste est refusé, à travers le vrai hôte ; un domaine
@@ -327,7 +482,7 @@ async fn un_greffon_wasm_fournit_une_source_de_streaming() {
     assert!(statut.authenticated, "reconnecté au démarrage : {statut:?}");
     assert_eq!(statut.username.as_deref(), Some("Charly"));
     let url = svc.read().await.get_track_url("trk-4", None).await.unwrap();
-    assert_eq!(url.url, format!("{base}/audio/trk-4.mp3"));
+    assert_eq!(url.url, format!("{base}/cdn/trk-4.mp3"));
 
     // Un nom de service déjà pris est refusé.
     let refus = tune_server::sources_wasm::inscrire_la_source(
@@ -351,4 +506,153 @@ async fn un_greffon_wasm_fournit_une_source_de_streaming() {
         refus,
         tune_server::sources_wasm::RefusDInscription::NomPris(SERVICE.to_string())
     );
+
+    // Étape 2, sur le même serveur : les variables d'environnement du
+    // processus ne se partagent pas entre deux tests qui tournent ensemble.
+    etape_2(&app, &state, &faux).await;
+}
+
+/// Étape 2 de #6197 : la couverture du trait, la lecture réelle, l'écran et
+/// le durcissement — par les routes que sert tout service.
+async fn etape_2(app: &Router, state: &AppState, faux: &Faux) {
+    let base = &faux.base;
+    let route = |fin: &str| format!("/api/v1/streaming/{SERVICE}/{fin}");
+
+    // a. Recherche PAGINÉE : le greffon exporte `search_page`, le service
+    //    annonce son total.
+    let (statut, rep) = appeler(app, "GET", &route("search?q=jazz&limit=1&offset=0"), None).await;
+    assert_eq!(statut, StatusCode::OK, "{rep}");
+    assert_eq!(rep["albums"].as_array().map(Vec::len), Some(1), "{rep}");
+    assert_eq!(rep["albums"][0]["title"], "Kind of Blue");
+    assert_eq!(rep["has_more"], true, "{rep}");
+    assert_eq!(rep["totals"]["albums"], 2, "{rep}");
+    let (_, rep) = appeler(app, "GET", &route("search?q=jazz&limit=1&offset=1"), None).await;
+    assert_eq!(rep["albums"][0]["title"], "Mingus Ah Um", "{rep}");
+    assert_eq!(rep["offset"], 1);
+    assert_eq!(rep["has_more"], false, "{rep}");
+
+    // b. Artistes.
+    let (statut, rep) = appeler(app, "GET", &route("artists/art-miles"), None).await;
+    assert_eq!(statut, StatusCode::OK, "{rep}");
+    assert_eq!(rep["name"], "Miles Davis");
+    let (_, rep) = appeler(app, "GET", &route("artists/art-miles/albums"), None).await;
+    assert_eq!(rep[0]["title"], "Kind of Blue", "{rep}");
+    let (_, rep) = appeler(app, "GET", &route("artists/art-miles/top-tracks"), None).await;
+    assert_eq!(rep.as_array().map(Vec::len), Some(2), "{rep}");
+
+    // c. Playlists.
+    let (statut, rep) = appeler(app, "GET", &route("playlists/lst-1"), None).await;
+    assert_eq!(statut, StatusCode::OK, "{rep}");
+    assert_eq!(rep["name"], "Nuit blanche");
+    assert_eq!(rep["track_count"], 2);
+    let (_, rep) = appeler(app, "GET", &route("playlists/lst-1/tracks"), None).await;
+    assert_eq!(rep[1]["title"], "Goodbye Pork Pie Hat", "{rep}");
+    assert_eq!(rep[1]["album_title"], "Mingus Ah Um", "{rep}");
+
+    // d. Favoris, dans les deux sens.
+    let (statut, rep) = appeler(app, "POST", &route("favorites/albums/alb-2"), None).await;
+    assert!(statut.is_success(), "{statut} {rep}");
+    assert_eq!(*faux.favoris.lock().unwrap(), vec!["alb-2".to_string()]);
+    let (_, rep) = appeler(app, "GET", &route("favorites/albums"), None).await;
+    assert_eq!(rep["albums"][0]["title"], "Mingus Ah Um", "{rep}");
+    let (statut, _) = appeler(app, "DELETE", &route("favorites/albums/alb-2"), None).await;
+    assert!(statut.is_success());
+    assert!(faux.favoris.lock().unwrap().is_empty());
+
+    // e. Découverte.
+    let (_, rep) = appeler(app, "GET", &route("new-releases"), None).await;
+    assert_eq!(rep[0]["title"], "Mingus Ah Um", "{rep}");
+
+    // f. Lecture réelle : le CDN exige la session. L'adresse que voit le
+    //    téléchargeur de l'hôte porte le cookie ; le greffon ne l'a jamais vu,
+    //    et la route ne le rend pas au client.
+    let svc = state.services.lock().await.get(SERVICE).unwrap();
+    let flux = svc.read().await.get_track_url("trk-2", None).await.unwrap();
+    let client = reqwest::Client::new();
+    assert_eq!(
+        client.get(&flux.url).send().await.unwrap().status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "sans la session, le CDN refuse"
+    );
+    let mut requete = client.get(&flux.url);
+    for (nom, valeur) in &flux.headers {
+        requete = requete.header(nom, valeur);
+    }
+    let lu = requete.send().await.unwrap();
+    assert_eq!(lu.status(), reqwest::StatusCode::OK, "{:?}", flux.headers);
+    assert_eq!(lu.text().await.unwrap(), "ID3-faux-flux");
+    let (_, rep) = appeler(app, "GET", &route("tracks/trk-2/url"), None).await;
+    assert_eq!(rep["url"], flux.url);
+    assert!(
+        !rep.to_string().contains("jeton-"),
+        "le cookie de session ne sort pas du serveur : {rep}"
+    );
+
+    // g. Une adresse de lecture hors de la liste de domaines est refusée.
+    let refus = svc
+        .read()
+        .await
+        .get_track_url("trk-hors-liste", None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refus.contains("domain_not_allowed"), "{refus}");
+
+    // h. La session expire chez le service : la route se reconnecte seule
+    //    (identifiants scellés) et redemande, une fois.
+    faux.generation.fetch_add(1, Ordering::SeqCst);
+    let (statut, rep) = appeler(app, "GET", &route("tracks/trk-3/url"), None).await;
+    assert_eq!(statut, StatusCode::OK, "session renouvelée : {rep}");
+    assert_eq!(rep["url"], format!("{base}/cdn/trk-3.mp3"));
+
+    // i. L'écran : les champs de connexion et le journal réseau.
+    let (statut, rep) = appeler(app, "GET", "/api/v1/plugins/sources", None).await;
+    assert_eq!(statut, StatusCode::OK, "{rep}");
+    let source = &rep["sources"][0];
+    assert_eq!(source["plugin_id"], "source-exemple", "{rep}");
+    assert_eq!(source["service"], SERVICE);
+    assert_eq!(source["display_name"], "Exemple (greffon)");
+    assert_eq!(source["registered"], true);
+    assert_eq!(source["login_fields"][1]["type"], "password");
+    let journal = rep["network"]["source-exemple"]
+        .as_array()
+        .expect("journal réseau");
+    let ligne = |hote: &str| {
+        journal
+            .iter()
+            .find(|l| l["host"] == hote)
+            .cloned()
+            .unwrap_or_else(|| panic!("{hote} absent du journal : {journal:?}"))
+    };
+    assert!(ligne("127.0.0.1")["requests"].as_u64().unwrap() > 5);
+    assert!(ligne("evil.example")["refused"].as_u64().unwrap() >= 1);
+    assert_eq!(ligne("evil.example")["last_error"], "domain_not_allowed");
+    assert_eq!(ligne("cdn.evil.example")["refused"], 1);
+    for secret in [MOT_DE_PASSE, "jeton-"] {
+        assert!(!rep.to_string().contains(secret), "{secret} : {rep}");
+    }
+
+    // j. Les cookies sont persistés SCELLÉS ; un réseau neuf (redémarrage) les
+    //    relit et la session repart sans nouvelle connexion.
+    let brut = tune_core::db::settings_repo::SettingsRepo::with_backend(state.backend.clone())
+        .get(&tune_server::sources_wasm::cle_des_cookies(
+            "source-exemple",
+        ))
+        .unwrap()
+        .expect("cookies persistés");
+    assert!(!brut.contains("jeton-"), "cookie lisible en base : {brut}");
+    let neuf = tune_server::sources_wasm::ReseauDesGreffons::new();
+    neuf.brancher_la_persistance(
+        state.backend.clone(),
+        tune_server::sources_wasm::coffre_du_serveur(":memory:"),
+    );
+    neuf.restaurer_les_cookies("source-exemple");
+    let r = neuf
+        .executer(
+            "source-exemple",
+            json!({ "url": format!("{base}/favoris") }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r["status"], 200, "session relue après redémarrage : {r}");
 }

@@ -14,6 +14,9 @@ pub fn router() -> Router<AppState> {
     let router = Router::new()
         .route("/", get(list_plugins))
         .route("/docs", get(plugin_docs))
+        // #6197 étape 2 — les sources de streaming des greffons WASM : les
+        // champs de connexion que l'écran demande, et le journal réseau.
+        .route("/sources", get(sources_des_greffons))
         // Bandeau « Réinstaller » des greffons payants (#4861).
         .route(
             "/premium-audio/reinstall-suggestion",
@@ -42,6 +45,21 @@ pub fn router() -> Router<AppState> {
     let router = router.route("/{name}/{*path}", get(wasm_dispatch).post(wasm_dispatch));
 
     router
+}
+
+/// `GET /api/v1/plugins/sources` (#6197, étape 2) — voir
+/// [`crate::sources_wasm::fiches_des_sources`]. Sans `plugins-wasm`, aucune
+/// source : la forme reste la même, l'écran n'a rien à distinguer.
+async fn sources_des_greffons(State(state): State<AppState>) -> Json<Value> {
+    #[cfg(feature = "plugins-wasm")]
+    {
+        Json(crate::sources_wasm::fiches_des_sources(&state).await)
+    }
+    #[cfg(not(feature = "plugins-wasm"))]
+    {
+        let _ = state;
+        Json(json!({ "sources": [], "network": {} }))
+    }
 }
 
 /// Les routes d'un greffon premium qui restent GRATUITES, décidées par l'hôte
@@ -201,6 +219,9 @@ pub(crate) async fn appeler_greffon_wasm(
         let registry = wasm_plugins.get().expect("registry present");
         let loaded = registry.get(&plugin_id).expect("plugin present");
         let mut plugin = loaded.plugin.blocking_lock();
+        // #6197 étape 2 — une route a son budget réseau, comme une fonction
+        // d'une source : ouvert après la prise du verrou.
+        let _borne = registry.reseau().map(|r| r.borner(&plugin_id));
         crate::plugins_host::avec_profil_de_l_appel(profil, || plugin.handle_route(&req_str))
     })
     .await;

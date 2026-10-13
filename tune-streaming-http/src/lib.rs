@@ -1413,6 +1413,21 @@ async fn service_track_similar(
     svc_response(Ok(similaires.pistes))
 }
 
+/// L'adresse de lecture telle que la route la REND au client : sans les
+/// en-têtes de session (`Cookie`, `Authorization`).
+///
+/// #6197 étape 2 — une source WASM ajoute à son adresse le cookie de session
+/// que l'hôte garde pour le CDN : le téléchargeur de l'hôte le rejoue (voir
+/// `StreamUrl::headers`). Ce cookie n'a pas à sortir du serveur — le greffon
+/// lui-même ne le voit pas. Les autres en-têtes (User-Agent, Origin, Referer
+/// de YouTube, #4366) sortent comme avant.
+fn adresse_pour_le_client(mut url: tune_core::streaming::StreamUrl) -> Value {
+    url.headers.retain(|(nom, _)| {
+        !nom.eq_ignore_ascii_case("cookie") && !nom.eq_ignore_ascii_case("authorization")
+    });
+    json!(url)
+}
+
 async fn service_track_url(
     State(state): State<StreamingHttpState>,
     Path((service, track_id)): Path<(String, String)>,
@@ -1424,7 +1439,7 @@ async fn service_track_url(
     let mut svc = svc.write().await;
 
     match svc.get_track_url(&track_id, None).await {
-        Ok(url) => Json(json!(url)).into_response(),
+        Ok(url) => Json(adresse_pour_le_client(url)).into_response(),
         Err(ref e)
             if {
                 let msg = e.to_string();
@@ -1441,7 +1456,7 @@ async fn service_track_url(
                 };
                 let svc = svc.read().await;
                 match svc.get_track_url(&track_id, None).await {
-                    Ok(url) => Json(json!(url)).into_response(),
+                    Ok(url) => Json(adresse_pour_le_client(url)).into_response(),
                     Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
                 }
             } else {
@@ -3652,3 +3667,40 @@ mod service_desactive_jamais_appele_tests;
 
 #[cfg(test)]
 mod youtube_decouverte_tests;
+
+/// #6197 étape 2 — la route de l'adresse de lecture ne rend pas au client les
+/// en-têtes de session qu'une source WASM confie au téléchargeur de l'hôte.
+#[cfg(test)]
+mod adresse_pour_le_client_6197 {
+    use super::adresse_pour_le_client;
+    use tune_core::streaming::{StreamQuality, StreamUrl};
+
+    #[test]
+    fn les_en_tetes_de_session_ne_sortent_pas() {
+        let url = StreamUrl {
+            url: "http://127.0.0.1/cdn/trk-1.mp3".into(),
+            mime_type: "audio/mpeg".into(),
+            quality: StreamQuality {
+                codec: "mp3".into(),
+                sample_rate: 44100,
+                bit_depth: 16,
+                bitrate: Some(320),
+                channels: 2,
+            },
+            expires_at: None,
+            headers: vec![
+                ("Cookie".into(), "session=jeton-42".into()),
+                ("authorization".into(), "Bearer x".into()),
+                ("User-Agent".into(), "Tune".into()),
+            ],
+        };
+        let rendu = adresse_pour_le_client(url);
+        assert!(!rendu.to_string().contains("jeton-42"), "{rendu}");
+        assert!(!rendu.to_string().contains("Bearer"), "{rendu}");
+        assert_eq!(
+            rendu["headers"],
+            serde_json::json!([["User-Agent", "Tune"]])
+        );
+        assert_eq!(rendu["url"], "http://127.0.0.1/cdn/trk-1.mp3");
+    }
+}
