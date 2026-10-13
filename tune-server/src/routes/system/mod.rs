@@ -384,6 +384,11 @@ pub fn router() -> Router<AppState> {
             "/config-backup/cloud/restore",
             post(sauvegarde_cloud::restore),
         )
+        // Aperçu d'un instantané déchiffré, sans rien écrire (web#902).
+        .route(
+            "/config-backup/cloud/preview",
+            post(sauvegarde_cloud::preview),
+        )
         // Weekly digest — new releases from library artists
         .route("/new-releases", get(new_releases_handler))
         // AI Recommendations — discover new music based on library

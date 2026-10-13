@@ -899,6 +899,101 @@ pub fn restaurer(
     Ok(rapport)
 }
 
+// ── Aperçu ──────────────────────────────────────────────────────────
+
+/// Ce qu'un instantané DÉCHIFFRÉ contient, compté sans rien écrire : ce que
+/// l'assistant de première installation montre avant de demander « Restaurer »
+/// (tune-web-client#902).
+///
+/// Le site ne connaît que la taille et la date de dépôt : ce résumé n'existe
+/// qu'après l'ouverture de l'instantané sur CE serveur, et ne part nulle part.
+/// Il ne porte que des comptes et des noms de zones ; des jetons, seulement
+/// les NOMS, jamais la valeur.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct Resume {
+    /// Date écrite DANS l'instantané par [`horodater`] (le site ne peut pas
+    /// la falsifier, à la différence de sa date de dépôt).
+    pub created_at: Option<String>,
+    pub server_version: Option<String>,
+    pub settings: usize,
+    pub zones: usize,
+    /// Noms des zones, dans l'ordre de l'instantané.
+    pub zone_names: Vec<String>,
+    pub profiles: usize,
+    pub playlists: usize,
+    pub favorites: usize,
+    pub radios: usize,
+    /// Préréglages d'égaliseur (réglage `eq_presets`).
+    pub eq_presets: usize,
+    /// Jetons de service présents (noms seulement, liste fermée).
+    pub service_tokens: Vec<String>,
+}
+
+/// Longueur d'une liste ou d'un objet JSON, éventuellement rangé en texte
+/// (les réglages sont des chaînes).
+fn longueur_json(v: Option<&Value>) -> usize {
+    match v {
+        Some(Value::Array(a)) => a.len(),
+        Some(Value::Object(o)) => o.len(),
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Array(a)) => a.len(),
+            Ok(Value::Object(o)) => o.len(),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Résume un contenu déchiffré. N'écrit rien, ne lit aucune base.
+pub fn resumer(contenu: &Value) -> Resume {
+    let compte = |cle: &str| longueur_json(contenu.get(cle));
+    let settings = contenu.get("settings").and_then(Value::as_object);
+    let zone_names = contenu
+        .get("zones")
+        .and_then(Value::as_array)
+        .map(|zs| {
+            zs.iter()
+                .filter_map(|z| z.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let service_tokens = contenu
+        .get(SECTION_JETONS)
+        .and_then(Value::as_object)
+        .map(|j| {
+            JETONS_QUI_VOYAGENT
+                .iter()
+                .filter(|cle| {
+                    j.get(**cle)
+                        .and_then(Value::as_str)
+                        .is_some_and(|v| !v.trim().is_empty())
+                })
+                .map(|cle| (*cle).to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    Resume {
+        created_at: contenu
+            .get("created_at")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        server_version: contenu
+            .get("server_version")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        settings: settings.map_or(0, Map::len),
+        zones: compte("zones"),
+        zone_names,
+        profiles: compte("profiles"),
+        playlists: compte("playlists"),
+        favorites: compte("favorites"),
+        radios: compte("radio_stations"),
+        eq_presets: longueur_json(settings.and_then(|s| s.get("eq_presets"))),
+        service_tokens,
+    }
+}
+
 // ── Planification ───────────────────────────────────────────────────
 
 /// L'état de la passe automatique, tel que rangé dans les réglages.
