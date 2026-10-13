@@ -136,7 +136,7 @@ impl Default for ReseauDesGreffons {
 
 impl ReseauDesGreffons {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
+        let client = tune_core::http::client::builder()
             // Une redirection suivie ici sauterait la liste de domaines.
             .redirect(reqwest::redirect::Policy::none())
             .timeout(DELAI_HTTP)
