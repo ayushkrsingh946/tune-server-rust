@@ -655,10 +655,28 @@ pub(super) async fn get_track(
             // Dynamic Range par piste (#1388) : la fiche d'une piste rend le
             // même champ que les pistes d'un album. Sans tag, la clé reste
             // absente et la charge utile est celle d'avant, au bit près.
-            let v = joindre_dr_par_piste(&state, profile.id(), vec![track])
+            let mut v = joindre_dr_par_piste(&state, profile.id(), vec![track])
                 .into_iter()
                 .next()
                 .unwrap_or_default();
+            // Chantier artistes multiples — les artistes du crédit découpé,
+            // dans l'ordre du crédit : `artists: [{id, name}]`. Absent pour
+            // une piste à un seul artiste : la charge utile est celle d'avant.
+            let relies =
+                tune_core::db::track_artist_repo::artistes_de_la_piste(state.backend.as_ref(), id);
+            if !relies.is_empty()
+                && let Some(o) = v.as_object_mut()
+            {
+                o.insert(
+                    "artists".into(),
+                    json!(
+                        relies
+                            .into_iter()
+                            .map(|(id, name)| json!({"id": id, "name": name}))
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
             Json(v).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),

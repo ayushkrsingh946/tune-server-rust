@@ -89,6 +89,7 @@ pub(super) async fn import_roon(
     tokio::spawn(async move {
         let track_repo = TrackRepo::with_backend(backend.clone());
         let artist_repo = ArtistRepo::with_backend(backend.clone());
+        let exceptions = tune_core::db::track_artist_repo::exceptions_du_reglage(&backend);
         let album_repo = AlbumRepo::with_backend(backend.clone());
         let settings = SettingsRepo::with_backend(backend.clone());
 
@@ -179,7 +180,20 @@ pub(super) async fn import_roon(
                                     track.source = "roon_import".to_string();
 
                                     match track_repo.create(&track) {
-                                        Ok(_) => imported += 1,
+                                        Ok(id) => {
+                                            imported += 1;
+                                            relier_les_artistes_importes(
+                                                &backend,
+                                                &artist_repo,
+                                                &exceptions,
+                                                id,
+                                                track
+                                                    .artist_name
+                                                    .as_deref()
+                                                    .unwrap_or("Unknown Artist"),
+                                                artist_id,
+                                            );
+                                        }
                                         Err(e) => errors.push(e.to_string()),
                                     }
                                 }
@@ -269,6 +283,7 @@ pub(super) async fn import_plex(
         let settings = SettingsRepo::with_backend(backend.clone());
         let track_repo = TrackRepo::with_backend(backend.clone());
         let artist_repo = ArtistRepo::with_backend(backend.clone());
+        let exceptions = tune_core::db::track_artist_repo::exceptions_du_reglage(&backend);
         let album_repo = AlbumRepo::with_backend(backend.clone());
 
         let mut imported = 0i32;
@@ -385,7 +400,19 @@ pub(super) async fn import_plex(
                 new_track.source = "plex_import".to_string();
 
                 match track_repo.create(&new_track) {
-                    Ok(_) => imported += 1,
+                    Ok(id) => {
+                        imported += 1;
+                        if let Some(credit) = new_track.artist_name.as_deref() {
+                            relier_les_artistes_importes(
+                                &backend,
+                                &artist_repo,
+                                &exceptions,
+                                id,
+                                credit,
+                                artist_id,
+                            );
+                        }
+                    }
                     Err(e) => errors.push(e.to_string()),
                 }
             }
@@ -1013,6 +1040,33 @@ pub(super) async fn import_plex_entree(State(state): State<AppState>, req: Reque
     lancer_import_de_pistes(state, "plex_import", pistes).await
 }
 
+/// Chantier artistes multiples — relie une piste importée à tous les
+/// artistes de son crédit, avec le découpage du scan
+/// (`track_artist_repo::liens_du_credit`). `principal` est l'artiste déjà
+/// résolu pour le crédit entier. Un crédit qui ne se découpe pas ne pose rien.
+fn relier_les_artistes_importes(
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    artist_repo: &ArtistRepo,
+    exceptions: &[String],
+    track_id: i64,
+    credit: &str,
+    principal: Option<i64>,
+) {
+    use tune_core::db::track_artist_repo::{
+        liens_du_credit, remplacer_par_id, resoudre_par_la_base,
+    };
+    let mut resoudre = resoudre_par_la_base(artist_repo);
+    let liens = liens_du_credit(
+        artist_repo,
+        exceptions,
+        credit,
+        None,
+        principal.map(|id| (id, credit)),
+        &mut resoudre,
+    );
+    remplacer_par_id(backend.as_ref(), track_id, &liens);
+}
+
 /// Écrire des pistes importées : artiste, album, puis la piste.
 ///
 /// Partagée par le chemin JSON de `import_roon` et par les deux téléversements,
@@ -1028,6 +1082,7 @@ fn ecrire_les_pistes(
 ) -> (i32, i32, Vec<String>) {
     let track_repo = TrackRepo::with_backend(backend.clone());
     let artist_repo = ArtistRepo::with_backend(backend.clone());
+    let exceptions = tune_core::db::track_artist_repo::exceptions_du_reglage(backend);
     let album_repo = AlbumRepo::with_backend(backend.clone());
 
     let mut imported = 0i32;
@@ -1068,7 +1123,17 @@ fn ecrire_les_pistes(
         track.source = source.to_string();
 
         match track_repo.create(&track) {
-            Ok(_) => imported += 1,
+            Ok(id) => {
+                imported += 1;
+                relier_les_artistes_importes(
+                    backend,
+                    &artist_repo,
+                    &exceptions,
+                    id,
+                    artist_name,
+                    artist_id,
+                );
+            }
             Err(e) => errors.push(format!("{}: {e}", entry.title)),
         }
     }
@@ -1213,6 +1278,7 @@ fn parse_jriver_xml(
     let artist_repo = ArtistRepo::with_backend(backend.clone());
     let album_repo = AlbumRepo::with_backend(backend.clone());
     let track_repo = TrackRepo::with_backend(backend.clone());
+    let exceptions = tune_core::db::track_artist_repo::exceptions_du_reglage(backend);
 
     let mut imported = 0;
     let mut skipped = 0;
@@ -1287,7 +1353,16 @@ fn parse_jriver_xml(
                     track.genre = fields.get("Genre").cloned();
                     track.year = fields.get("Year").and_then(|y| y.parse().ok());
                     track.source = "jriver".into();
-                    track_repo.create(&track).ok();
+                    if let Ok(id) = track_repo.create(&track) {
+                        relier_les_artistes_importes(
+                            backend,
+                            &artist_repo,
+                            &exceptions,
+                            id,
+                            &artist_name,
+                            artist_id,
+                        );
+                    }
                     imported += 1;
                 }
             }
@@ -1518,5 +1593,46 @@ mod tests {
                 .contains("annoncer_bibliotheque_modifiee"),
             "le module de test ne doit pas servir de preuve au code de production"
         );
+    }
+
+    /// Chantier artistes multiples — une piste importée dont le crédit nomme
+    /// deux artistes est reliée aux deux ; un crédit entier ne relie rien.
+    ///
+    /// Contre-épreuve : retirer l'appel à `relier_les_artistes_importes` de
+    /// `ecrire_les_pistes` fait tomber la première assertion.
+    #[test]
+    fn l_import_relie_la_piste_a_tous_les_artistes_du_credit() {
+        use tune_core::db::track_artist_repo::artistes_de_la_piste;
+        let db = tune_core::db::sqlite::SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        tune_core::db::migrations::run_migrations(&db).unwrap();
+        let backend: std::sync::Arc<dyn tune_core::db::backend::DbBackend> =
+            std::sync::Arc::new(db);
+        let entree = |titre: &str, artiste: &str, chemin: &str| ImportTrackEntry {
+            title: titre.into(),
+            artist: Some(artiste.into()),
+            album: Some("Mix".into()),
+            file_path: Some(chemin.into()),
+            duration_ms: None,
+            track_number: None,
+            genre: None,
+        };
+        let (ecrites, _, echecs) = ecrire_les_pistes(
+            &backend,
+            "roon_import",
+            &[
+                entree("Duo", "The Beatles feat. Genesis", "/m/1.flac"),
+                entree("Seul", "Simon & Garfunkel", "/m/2.flac"),
+            ],
+        );
+        assert_eq!((ecrites, echecs.len()), (2, 0));
+        let repo = TrackRepo::with_backend(backend.clone());
+        let id = |c: &str| repo.get_by_path(c).unwrap().unwrap().id.unwrap();
+        let noms: Vec<String> = artistes_de_la_piste(backend.as_ref(), id("/m/1.flac"))
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(noms, ["The Beatles", "Genesis"]);
+        assert!(artistes_de_la_piste(backend.as_ref(), id("/m/2.flac")).is_empty());
     }
 }

@@ -1072,6 +1072,20 @@ pub mod sql {
         )
     }
 
+    /// Chantier artistes multiples — les pistes de l'artiste ET celles où il
+    /// est RELIÉ par un crédit découpé (`track_artists`).
+    pub fn list_by_artist_et_relies<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "{} WHERE (t.artist_id = {} OR t.id IN (SELECT ta.track_id FROM track_artists ta \
+             WHERE ta.artist_id = {})) AND {} ORDER BY al.year, al.title, \
+             CAST(t.disc_number AS INTEGER), CAST(t.track_number AS INTEGER)",
+            select_track(),
+            d.placeholder(1),
+            d.placeholder(2),
+            crate::db::facet_filter::hidden_tracks_excluded(),
+        )
+    }
+
     pub fn list_by_path<D: SqlDialect>(d: &D) -> String {
         format!(
             "{} WHERE t.file_path = {}",
@@ -3037,6 +3051,16 @@ impl TrackRepo {
     pub fn list_by_artist(&self, artist_id: i64) -> Result<Vec<Track>, TuneError> {
         let sql = self.dialect_sql(sql::list_by_artist, sql::list_by_artist);
         let params: [&dyn ToSqlValue; 1] = [&artist_id];
+        let rows = self.db.query_many_strong(&sql, &params)?;
+        Ok(rows.iter().map(row_to_track).collect())
+    }
+
+    /// Chantier artistes multiples — [`Self::list_by_artist`], plus les
+    /// pistes où l'artiste est relié par un crédit découpé (« The Beatles &
+    /// Genesis » figure aussi chez Genesis). Pour la page d'un artiste.
+    pub fn list_by_artist_et_relies(&self, artist_id: i64) -> Result<Vec<Track>, TuneError> {
+        let sql = self.dialect_sql(sql::list_by_artist_et_relies, sql::list_by_artist_et_relies);
+        let params: [&dyn ToSqlValue; 2] = [&artist_id, &artist_id];
         let rows = self.db.query_many_strong(&sql, &params)?;
         Ok(rows.iter().map(row_to_track).collect())
     }
