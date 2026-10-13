@@ -119,7 +119,8 @@ fn la_selection_discogs_ne_prend_que_les_albums_servables() {
          (album_id, discogs_release_id, methode, proposition, statut, cree_le) \
          VALUES (5, 99, 'barcode', '{}', 'rejetee', '2026-10-13T00:00:00Z')",
     );
-    assert_eq!(ids(b, &sql_candidats_discogs(), 0), vec![2, 3]);
+    let seuil = tune_core::metadata::discogs_propositions::seuil_de_fraicheur(chrono::Utc::now());
+    assert_eq!(ids(b, &sql_candidats_discogs(&seuil), 0), vec![2, 3]);
     let sans_code = b
         .query_one(&sql_sans_code_discogs(), &[])
         .unwrap()
@@ -339,4 +340,57 @@ async fn la_passe_bpm_mesure_un_vrai_fichier_par_la_route() {
     let (s, v) = appeler(&e, "POST", "/bpm-all").await;
     assert_eq!(s, StatusCode::ACCEPTED, "{v}");
     assert_eq!(v["total"], 0, "relancée, la passe n'a plus rien à estimer");
+}
+
+/// Conditions de Discogs : une proposition EN ATTENTE de plus de six heures
+/// est relue par la passe ; une proposition fraîche ou tranchée ne l'est pas.
+#[test]
+fn une_proposition_perimee_est_relue_par_la_passe() {
+    let e = etat();
+    let b = &e.backend;
+    exec(
+        b,
+        "INSERT INTO albums (id, title, source, barcode) VALUES \
+         (1, 'Périmée', 'local', '0077774600127'), (2, 'Fraîche', 'local', '0077774600127'), \
+         (3, 'Rejetée hier', 'local', '0077774600127')",
+    );
+    exec(
+        b,
+        "INSERT INTO propositions_discogs \
+         (album_id, discogs_release_id, methode, proposition, statut, cree_le) VALUES \
+         (1, 11, 'barcode', '{}', 'proposee', '2026-10-13T01:00:00Z'), \
+         (2, 22, 'barcode', '{}', 'proposee', '2026-10-13T09:00:00Z'), \
+         (3, 33, 'barcode', '{}', 'rejetee', '2026-10-12T09:00:00Z')",
+    );
+    let midi = chrono::DateTime::parse_from_rfc3339("2026-10-13T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let seuil = tune_core::metadata::discogs_propositions::seuil_de_fraicheur(midi);
+    assert_eq!(seuil, "2026-10-13T06:00:00Z");
+    assert_eq!(ids(b, &sql_candidats_discogs(&seuil), 0), vec![1]);
+}
+
+/// Décision de Bertrand du 13/10/2026 : les passes BPM et Discogs sont
+/// GRATUITES. Dans un même état sans Premium, `identify-all` (Premium) rend
+/// `402`, les deux passes jamais.
+#[tokio::test]
+async fn les_passes_sont_gratuites() {
+    let e = etat();
+    assert!(
+        !e.license
+            .check_feature(tune_core::license::Feature::AutoEnrichment)
+            .await,
+        "l'état de test doit être sans Premium"
+    );
+    let (s, _) = appeler(&e, "POST", "/identify-all").await;
+    assert_eq!(
+        s,
+        StatusCode::PAYMENT_REQUIRED,
+        "identify-all reste Premium"
+    );
+    for chemin in ["/bpm-all", "/discogs-all"] {
+        let (s, v) = appeler(&e, "POST", chemin).await;
+        assert_ne!(s, StatusCode::PAYMENT_REQUIRED, "{chemin} : {v}");
+        assert_ne!(v["code"], "premium_required", "{chemin} : {v}");
+    }
 }

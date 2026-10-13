@@ -31,7 +31,13 @@
 //!   `DISCOGS` (0,9 requête/s, soit 54/min, adaptatif sur `429` et
 //!   `Retry-After`), le même que la fiche et les portraits d'artistes. Deux
 //!   passes n'iraient donc pas plus vite.
-//! * **Pas de Premium** dans ce lot : la question reste ouverte (voir la PR).
+//! * **Gratuites, sans Premium.** Décision de Bertrand du 13/10/2026 : aucune
+//!   garde de droit, contrairement à `identify-all`. Pour Discogs, les
+//!   conditions de l'API interdisent de faire payer l'accès à une partie de
+//!   l'application qui l'intègre. Témoin : `les_passes_sont_gratuites`.
+//! * **Fraîcheur Discogs : six heures.** Une proposition en attente lue il y a
+//!   plus de six heures est périmée : la fiche n'en montre plus le contenu,
+//!   elle ne s'accepte plus, et la passe la relit au lieu de la sauter.
 //!
 //! # Pause et reprise
 //!
@@ -152,14 +158,24 @@ const ALBUM_SANS_MBID: &str = "(al.musicbrainz_release_id IS NULL OR TRIM(al.mus
 const ALBUM_AVEC_CODE: &str = "((al.barcode IS NOT NULL AND TRIM(al.barcode) <> '') \
      OR (al.catalog_number IS NOT NULL AND TRIM(al.catalog_number) <> ''))";
 
-/// Albums sans MBID, avec un code, et sans aucune proposition (en attente,
-/// acceptée ou rejetée) : une proposition tranchée n'est pas recherchée deux
-/// fois, et une reprise ne repaye pas les albums déjà servis.
-pub(super) fn sql_candidats_discogs() -> String {
+/// Albums sans MBID, avec un code, et sans proposition FRAÎCHE ni tranchée :
+/// une proposition acceptée ou rejetée n'est pas recherchée deux fois, une
+/// reprise ne repaye pas les albums déjà servis, mais une proposition en
+/// attente PÉRIMÉE (plus de six heures, conditions de Discogs) est relue.
+///
+/// `seuil` vient de [`discogs::seuil_de_fraicheur`] : une date que le serveur
+/// fabrique lui-même, au format fixe de la table, jamais une saisie.
+pub(super) fn sql_candidats_discogs(seuil: &str) -> String {
+    debug_assert!(
+        seuil
+            .chars()
+            .all(|c| c.is_ascii_digit() || "-:TZ".contains(c))
+    );
     format!(
         "SELECT al.id FROM albums al \
          WHERE {ALBUM_SANS_MBID} AND {ALBUM_AVEC_CODE} \
-           AND NOT EXISTS (SELECT 1 FROM propositions_discogs p WHERE p.album_id = al.id) \
+           AND NOT EXISTS (SELECT 1 FROM propositions_discogs p WHERE p.album_id = al.id \
+             AND (p.statut <> 'proposee' OR p.cree_le >= '{seuil}')) \
            AND al.id > ? \
          ORDER BY al.id"
     )
@@ -556,7 +572,7 @@ pub(super) async fn discogs_lot_start(State(state): State<AppState>) -> (StatusC
     lancer(
         state,
         &PASSE_DISCOGS,
-        sql_candidats_discogs(),
+        sql_candidats_discogs(&discogs::seuil_de_fraicheur(chrono::Utc::now())),
         Some(("albums_sans_code", sql_sans_code_discogs())),
         |lignes| lignes.len() as f64 * SECONDES_PAR_ALBUM_DISCOGS,
         move |album_id| {

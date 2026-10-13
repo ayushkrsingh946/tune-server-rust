@@ -593,8 +593,22 @@ where
 
 // ── En base ─────────────────────────────────────────────────────────────────
 
+/// Le format des dates de `propositions_discogs` : il se compare en texte.
+const FORMAT_DATE: &str = "%Y-%m-%dT%H:%M:%SZ";
+
 fn maintenant() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    chrono::Utc::now().format(FORMAT_DATE).to_string()
+}
+
+/// Au-delà, une proposition en attente est périmée (conditions de Discogs).
+pub const FRAICHEUR_HEURES: i64 = 6;
+
+/// La date avant laquelle une proposition en attente est périmée, au format
+/// de la table (comparable en texte).
+pub fn seuil_de_fraicheur(maintenant: chrono::DateTime<chrono::Utc>) -> String {
+    (maintenant - chrono::Duration::hours(FRAICHEUR_HEURES))
+        .format(FORMAT_DATE)
+        .to_string()
 }
 
 /// Garde une proposition. Une proposition déjà TRANCHÉE (acceptée, rejetée)
@@ -608,7 +622,8 @@ pub fn garder(backend: &Arc<dyn DbBackend>, album_id: i64, p: &Proposition) {
          (album_id, discogs_release_id, methode, proposition, statut, cree_le) \
          VALUES (?, ?, ?, ?, 'proposee', ?) \
          ON CONFLICT (album_id, discogs_release_id) DO UPDATE SET \
-         proposition = excluded.proposition, methode = excluded.methode \
+         proposition = excluded.proposition, methode = excluded.methode, \
+         cree_le = excluded.cree_le \
          WHERE propositions_discogs.statut = 'proposee'",
         &[
             &album_id as &dyn ToSqlValue,
@@ -628,10 +643,23 @@ pub struct PropositionGardee {
     pub statut: String,
     pub cree_le: String,
     pub decide_le: Option<String>,
+    /// En attente et lue il y a plus de [`FRAICHEUR_HEURES`] heures : son
+    /// contenu ne s'affiche plus et elle ne s'accepte plus (voir l'en-tête).
+    pub perimee: bool,
     pub proposition: Proposition,
 }
 
 pub fn lister(backend: &Arc<dyn DbBackend>, album_id: i64) -> Vec<PropositionGardee> {
+    lister_au(backend, album_id, chrono::Utc::now())
+}
+
+/// [`lister`] à une date donnée (les témoins avancent l'horloge).
+pub fn lister_au(
+    backend: &Arc<dyn DbBackend>,
+    album_id: i64,
+    maintenant: chrono::DateTime<chrono::Utc>,
+) -> Vec<PropositionGardee> {
+    let seuil = seuil_de_fraicheur(maintenant);
     backend
         .query_many(
             "SELECT proposition, statut, cree_le, decide_le FROM propositions_discogs \
@@ -641,10 +669,13 @@ pub fn lister(backend: &Arc<dyn DbBackend>, album_id: i64) -> Vec<PropositionGar
         .unwrap_or_default()
         .into_iter()
         .filter_map(|r| {
+            let statut = r.get(1)?.as_string()?;
+            let cree_le = r.get(2)?.as_string()?;
             Some(PropositionGardee {
                 proposition: serde_json::from_str(&r.first()?.as_string()?).ok()?,
-                statut: r.get(1)?.as_string()?,
-                cree_le: r.get(2)?.as_string()?,
+                perimee: statut == "proposee" && cree_le < seuil,
+                statut,
+                cree_le,
                 decide_le: r.get(3).and_then(|v| v.as_string()),
             })
         })
@@ -717,6 +748,12 @@ pub fn accepter(
     let gardee = lire_une(backend, album_id, discogs_id).ok_or("unknown_proposal")?;
     if gardee.statut != "proposee" {
         return Err("already_decided".into());
+    }
+    // Conditions de Discogs : une donnée de plus de six heures ne s'affiche
+    // plus, elle ne s'accepte donc pas non plus. Une nouvelle recherche la
+    // rafraîchit.
+    if gardee.perimee {
+        return Err("proposition_perimee".into());
     }
     let p = gardee.proposition;
     let mut bilan = BilanAcceptation::default();
@@ -1066,6 +1103,42 @@ mod tests {
         );
         chercher_par(&b, 5, transport_enregistre).await.unwrap();
         assert_eq!(lister(&b, 5)[0].statut, "acceptee");
+    }
+
+    /// Conditions de Discogs : une proposition en attente de plus de six
+    /// heures est périmée — marquée, refusée à l'acceptation — et une
+    /// nouvelle recherche la rafraîchit.
+    #[tokio::test]
+    async fn une_proposition_de_plus_de_six_heures_est_perimee() {
+        let b = base();
+        album_sans_mbid(&b);
+        chercher_par(&b, 5, transport_enregistre).await.unwrap();
+        let tout_de_suite = lister(&b, 5);
+        assert!(
+            !tout_de_suite[0].perimee,
+            "une proposition fraîche n'est pas périmée"
+        );
+        // On recule sa lecture de sept heures.
+        let il_y_a_7_h = (chrono::Utc::now() - chrono::Duration::hours(7))
+            .format(FORMAT_DATE)
+            .to_string();
+        b.execute(
+            "UPDATE propositions_discogs SET cree_le = ? WHERE album_id = 5",
+            &[&il_y_a_7_h as &dyn ToSqlValue],
+        )
+        .unwrap();
+        assert!(lister(&b, 5)[0].perimee, "plus de six heures : périmée");
+        assert_eq!(
+            accepter(&b, 5, 249504, false).unwrap_err(),
+            "proposition_perimee"
+        );
+        // Une nouvelle recherche la relit : fraîche de nouveau, acceptable.
+        chercher_par(&b, 5, transport_enregistre).await.unwrap();
+        assert!(
+            !lister(&b, 5)[0].perimee,
+            "la recherche rafraîchit la proposition"
+        );
+        assert!(accepter(&b, 5, 249504, false).is_ok());
     }
 
     #[tokio::test]
