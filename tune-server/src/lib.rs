@@ -66,6 +66,9 @@ pub mod scan_import;
 /// L'echelle de dialectes CIFS, partagee par la route de montage et par le
 /// remontage au demarrage. Voir [`smb`] pour ce que leur divergence coutait.
 pub mod smb;
+/// #6197 — les greffons WASM qui fournissent une source de streaming.
+#[cfg(feature = "plugins-wasm")]
+pub mod sources_wasm;
 mod sqlite_write_gate;
 pub mod startup;
 pub mod state;

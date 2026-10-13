@@ -1,0 +1,21 @@
+{
+  "id": "source-exemple",
+  "name": "Source d'exemple",
+  "version": "0.1.0",
+  "description": "Greffon d'exemple (#6197) : un faux service de streaming qui lit son catalogue et ses adresses de flux sur un serveur HTTP. Sert de modèle et de banc d'essai au socle des sources WASM.",
+  "author": "MozAIk Labs",
+  "entry_point": "main.wasm",
+  "permissions": ["http", "streaming_source"],
+  "http_allowed_domains": ["127.0.0.1", "api.exemple.invalid"],
+  "streaming_source": {
+    "name": "exemple-wasm",
+    "display_name": "Exemple (greffon)",
+    "login_fields": [
+      { "key": "email", "label": "Adresse électronique", "type": "email", "required": true },
+      { "key": "password", "label": "Mot de passe", "type": "password", "required": true },
+      { "key": "base_url", "label": "Adresse du service", "type": "text", "required": false }
+    ]
+  },
+  "min_server_version": "1.0.0-rc5",
+  "premium": false
+}

@@ -121,6 +121,9 @@ pub struct AppStateHost {
     /// Le parc des services de streaming (#4716) : la permission `streaming`
     /// lit et écrit à travers lui, exactement comme les routes.
     services: Arc<tokio::sync::Mutex<ServiceRegistry>>,
+    /// #6197 — le client HTTP des greffons (permission `http`) et leur boîte
+    /// à cookies cloisonnée.
+    reseau: Arc<crate::sources_wasm::ReseauDesGreffons>,
 }
 
 /// Préfixe des clés du stockage cloisonné des greffons (#4716).
@@ -212,7 +215,14 @@ impl AppStateHost {
             orchestrator: state.orchestrator.clone(),
             event_bus: state.event_bus.clone(),
             services: state.services.clone(),
+            reseau: Arc::new(crate::sources_wasm::ReseauDesGreffons::new()),
         }
+    }
+
+    /// #6197 — le réseau des greffons, partagé avec les sources de streaming
+    /// (la déconnexion d'une source oublie ses cookies).
+    pub fn reseau(&self) -> Arc<crate::sources_wasm::ReseauDesGreffons> {
+        self.reseau.clone()
     }
 
     /// Le profil au nom duquel un greffon agit.
@@ -799,6 +809,13 @@ impl HostContext for AppStateHost {
         cles.sort();
         Ok(json!({ "count": cles.len(), "keys": cles }))
     }
+
+    /// #6197 — `http` : le runtime a jugé la permission et la liste de
+    /// domaines ; l'hôte fait la requête, par le même pont `block_on` que
+    /// `now_playing` (l'appel wasm tourne sur un fil `spawn_blocking`).
+    fn http_request(&self, plugin_id: &str, request: Value) -> Result<Value, String> {
+        block_on(self.reseau.executer(plugin_id, request))
+    }
 }
 
 /// A wasm plugin that loaded successfully, plus the manifest the route mount
@@ -807,7 +824,9 @@ impl HostContext for AppStateHost {
 /// requires (one `Store`/`Instance` per active plugin).
 pub struct LoadedWasmPlugin {
     pub manifest: PluginManifest,
-    pub plugin: tokio::sync::Mutex<WasmPlugin>,
+    /// `Arc` depuis #6197 : un greffon source de streaming partage son `Store`
+    /// entre ses routes et son adaptateur `WasmStreamingService`.
+    pub plugin: Arc<tokio::sync::Mutex<WasmPlugin>>,
 }
 
 /// The set of loaded wasm plugins, keyed by manifest id. Published once into
@@ -1074,7 +1093,12 @@ pub async fn load_wasm_plugins(state: &AppState) {
         }
     };
 
-    let host: Arc<dyn HostContext> = Arc::new(AppStateHost::from_state(state));
+    let hote = AppStateHost::from_state(state);
+    let reseau = hote.reseau();
+    let host: Arc<dyn HostContext> = Arc::new(hote);
+    // #6197 — le coffre des identifiants, ouvert à la PREMIÈRE source de
+    // streaming : un serveur sans source ne crée aucun fichier de clé.
+    let mut coffre: Option<Arc<tune_core::coffre_greffons::CoffreDIdentifiants>> = None;
     let settings = SettingsRepo::with_backend(state.backend.clone());
     let mut plugins: HashMap<String, LoadedWasmPlugin> = HashMap::new();
 
@@ -1122,8 +1146,15 @@ pub async fn load_wasm_plugins(state: &AppState) {
         // L'identifiant de manifeste part avec le greffon : c'est lui qui
         // cloisonne son stockage clé/valeur (#4716), et il vient d'ici — du
         // manifeste lu par l'hôte —, jamais du greffon lui-même.
-        let charge =
-            WasmPlugin::load_with_host(&entry, Limits::default(), host.clone(), permissions, &id);
+        // #6197 — la liste de domaines de `http` vient du manifeste, lu ici.
+        let charge = WasmPlugin::load_with_host_http(
+            &entry,
+            Limits::default(),
+            host.clone(),
+            permissions,
+            &id,
+            &info.manifest.http_allowed_domains,
+        );
         let elapsed = started.elapsed();
         let duration_ms = elapsed.as_millis() as u64;
         let slow = tune_core::plugin_sdk::PLUGIN_SETUP_SLOW_THRESHOLD;
@@ -1144,11 +1175,36 @@ pub async fn load_wasm_plugins(state: &AppState) {
                     duration_ms,
                     "wasm_plugin_loaded"
                 );
+                let plugin = Arc::new(tokio::sync::Mutex::new(plugin));
+                // #6197 — un greffon qui déclare une source s'inscrit comme
+                // service de streaming.
+                if info.manifest.streaming_source.is_some() {
+                    let coffre = coffre
+                        .get_or_insert_with(|| {
+                            crate::sources_wasm::coffre_du_serveur(&state.config.db_path)
+                        })
+                        .clone();
+                    match crate::sources_wasm::inscrire_la_source(
+                        &state.services,
+                        &state.backend,
+                        &info.manifest,
+                        plugin.clone(),
+                        coffre,
+                        Some(reseau.clone()),
+                    )
+                    .await
+                    {
+                        Ok(nom) => info!(id = %id, service = %nom, "wasm_plugin_streaming_source"),
+                        Err(refus) => {
+                            warn!(id = %id, refus = ?refus, "wasm_plugin_streaming_source_refused")
+                        }
+                    }
+                }
                 plugins.insert(
                     id,
                     LoadedWasmPlugin {
                         manifest: info.manifest,
-                        plugin: tokio::sync::Mutex::new(plugin),
+                        plugin,
                     },
                 );
             }

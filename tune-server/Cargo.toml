@@ -1456,6 +1456,15 @@ name = "greffon_liens_sync_4719"
 path = "tests/greffon_liens_sync_4719.rs"
 required-features = ["plugins-wasm"]
 
+# #6197 — un greffon WASM FOURNIT une source de streaming, de bout en bout : le
+# greffon d'exemple (`tests/fixtures/plugins/source-exemple`) contre le vrai
+# hôte et les routes `/streaming/{service}/…`. `autotests = false` en tête de
+# ce manifeste : sans ce bloc, le fichier ne serait jamais compilé.
+[[test]]
+name = "source_wasm_6197"
+path = "tests/source_wasm_6197.rs"
+required-features = ["plugins-wasm"]
+
 # #4984 — les crédits de piste sur PostgreSQL : écriture, purge et relecture
 # par le vrai routeur. `track_id` y est BIGINT ; il était lié en texte.
 [[test]]
