@@ -67,7 +67,19 @@ pub struct HqplayerOutput {
     /// (« Lire ensuite » dans la fenêtre, préparation expirée) laisserait la
     /// suivante périmée dans la playlist, jouée AVANT la bonne.
     enchainement: Arc<std::sync::Mutex<Enchainement>>,
+    /// #6115 — le dernier état de transport que `Status` a rapporté.
+    ///
+    /// `play_media` le lit pour savoir si une piste joue (ou est en pause)
+    /// au moment de lancer un AUTRE titre : il faut alors arrêter HQPlayer
+    /// avant de vider sa playlist. Un HQPlayer jamais sondé vaut `None`, et
+    /// l'enchaînement d'avant le correctif reste celui-là.
+    dernier_etat: Arc<std::sync::Mutex<Option<TransportState>>>,
 }
+
+/// #6115 — la borne d'attente de l'arrêt avant de lancer un autre titre.
+const ATTENTE_ARRET: std::time::Duration = std::time::Duration::from_secs(2);
+/// #6115 — l'intervalle entre deux `Status` pendant cette attente.
+const SONDE_ARRET: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// #4851 — ce que la sortie sait de la suivante posée chez HQPlayer.
 #[derive(Debug, Default)]
@@ -154,7 +166,70 @@ impl HqplayerOutput {
             connection: Arc::new(Mutex::new(None)),
             etat_inconnu_dit: Arc::new(AtomicBool::new(false)),
             enchainement: Arc::new(std::sync::Mutex::new(Enchainement::default())),
+            dernier_etat: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    fn dernier_etat(&self) -> std::sync::MutexGuard<'_, Option<TransportState>> {
+        self.dernier_etat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// #6115 — arrête HQPlayer et attend que `Status` rapporte l'arrêt,
+    /// au plus [`ATTENTE_ARRET`].
+    ///
+    /// Retour terrain (hifi25nl, rc4) : en pleine lecture, `PlaylistAdd
+    /// clear="1"` puis `Play` laisse HQPlayer sur le titre précédent ; son
+    /// intégration Audiolinux envoie `hqp-control2 --stop` avant `--play`.
+    /// La source de HQPlayer Control 6.0.1 montre que `Stop` est une commande
+    /// à part, acquittée (`stopComplete`), et que l'état `3` (STOPREQ) précède
+    /// l'arrêt effectif (`0`) : d'où l'attente sur `Status`, pas seulement
+    /// l'envoi. La borne dépassée n'est pas une erreur : le lancement suit,
+    /// et le journal le dit.
+    async fn arreter_et_attendre(&self) -> Result<(), String> {
+        self.action("<Stop />").await?;
+        let debut = tokio::time::Instant::now();
+        let limite = debut + ATTENTE_ARRET;
+        loop {
+            let reste = limite.saturating_duration_since(tokio::time::Instant::now());
+            if reste.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(reste, self.command(r#"<Status subscribe="0" />"#)).await {
+                Ok(Ok(reponse)) => {
+                    if etat_reconnu(&reponse) == Some(TransportState::Stopped) {
+                        *self.dernier_etat() = Some(TransportState::Stopped);
+                        info!(
+                            device = %self.name,
+                            attente_ms = debut.elapsed().as_millis() as u64,
+                            "hqplayer_arret_avant_lancement"
+                        );
+                        return Ok(());
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!(device = %self.name, error = %e, "hqplayer_arret_status_illisible");
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Réponse coupée en plein vol : la connexion ne doit pas
+                    // garder un reste de `Status` pour la commande suivante.
+                    *self.connection.lock().await = None;
+                    break;
+                }
+            }
+            tokio::time::sleep(
+                SONDE_ARRET.min(limite.saturating_duration_since(tokio::time::Instant::now())),
+            )
+            .await;
+        }
+        warn!(
+            device = %self.name,
+            borne_ms = ATTENTE_ARRET.as_millis() as u64,
+            "hqplayer_arret_non_confirme — lancement sans arret rapporte par Status"
+        );
+        Ok(())
     }
 
     fn enchainement(&self) -> std::sync::MutexGuard<'_, Enchainement> {
@@ -706,15 +781,45 @@ impl OutputTarget for HqplayerOutput {
         // #4851 — `clear="1"` vide la playlist : plus de suivante posée.
         self.enchainement().suivante = None;
 
+        // #6115 — un AUTRE titre alors qu'une piste joue ou est en pause :
+        // HQPlayer d'abord arrêté — `PlaylistClear` garde la piste qui JOUE
+        // et un `Play` sur un moteur qui joue ne change rien (pont LMS, moteur
+        // 6.0.4). L'enchaînement sans blanc (#4851) ne passe pas par ici
+        // (`set_next_media`, `clear="0"`) et n'est pas touché.
+        let etat = *self.dernier_etat();
+        if matches!(
+            etat,
+            Some(TransportState::Playing | TransportState::Paused | TransportState::Transitioning)
+        ) {
+            self.arreter_et_attendre().await.map_err(|e| {
+                warn!(error = %e, "hqplayer_stop_before_play_failed");
+                e
+            })?;
+        }
+
         // ACTION commands go through the fire-and-forget path: HQPlayer 6 executes
         // transport commands but sends NO reply, so blocking on a response would
         // hit the 5s read timeout and fail the play. `action` writes and only
         // briefly drains any v4/v5 ack. See `send_action` for the full rationale.
         //
-        // This is the only place that puts TWO commands on one control
+        // This is the only place that puts SEVERAL commands on one control
         // connection, which is why #4023 showed up here and nowhere else: the
         // second one must NOT be preceded by another XML declaration, or
         // HQPlayer's stream parser dies on it and `Play` is never executed.
+
+        // #6115 (suite) — vider la playlist par un `PlaylistClear` EXPLICITE,
+        // quel que soit l'état, arrêt compris (Piero, fil 2240 : « even if I
+        // stop the previous one »). `clear="1"` seul ne suffit pas : le pont
+        // LMS-HQPlayer de Simon Arnold l'a mesuré ignoré par le moteur 6.0.4
+        // (`PlaylistAdd` répond OK et AJOUTE), la playlist devient
+        // [précédent, nouveau] et `Play` repart sur l'entrée courante, le
+        // précédent. Son chargement vérifié en direct est `Stop`,
+        // `PlaylistClear`, `PlaylistAdd`, `Play`. `clear="1"` reste écrit :
+        // c'est l'orthographe documentée, et il ne coûte rien.
+        self.action("<PlaylistClear />").await.map_err(|e| {
+            warn!(error = %e, "hqplayer_playlist_clear_failed");
+            e
+        })?;
 
         // Add URI to playlist (clear existing, start playing)
         let xml = format!(
@@ -823,6 +928,11 @@ impl OutputTarget for HqplayerOutput {
         }
 
         let state = parse_state_from_xml(&response);
+        // #6115 — seul un état RECONNU est retenu : le repli `Stopped` d'une
+        // réponse incomprise ne doit pas faire sauter l'arrêt de `play_media`.
+        if let Some(reconnu) = etat_reconnu(&response) {
+            *self.dernier_etat() = Some(reconnu);
+        }
         let position = extract_xml_attr(&response, "position")
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0);
@@ -1000,3 +1110,7 @@ mod state_tests_4377;
 #[cfg(test)]
 #[path = "hqplayer_enchainement_tests_4851.rs"]
 pub(crate) mod enchainement_tests_4851;
+
+#[cfg(test)]
+#[path = "hqplayer_lancement_tests_6115.rs"]
+mod lancement_tests_6115;

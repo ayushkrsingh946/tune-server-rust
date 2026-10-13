@@ -886,6 +886,9 @@ pub(super) async fn diagnostics(State(state): State<AppState>) -> Json<Value> {
     let rss_mb = get_rss_mb();
     // #5189 — température du processeur pour l'écran « État du serveur ».
     let cpu_temp_c = temperature_processeur().await;
+    // #5410 — sans température lisible, les analyses de fond sont bridées à
+    // un fichier à la fois : l'écran doit le dire.
+    let analyses_bridees = bridage_des_analyses().await;
 
     // #3205 — le seul chiffre qui dise si l'audio a réellement sauté.
     let ring_starvation = releve_famine_anneau(&state).await;
@@ -919,8 +922,15 @@ pub(super) async fn diagnostics(State(state): State<AppState>) -> Json<Value> {
         "process_started_at": state.process_started_at_rfc3339(),
         "memory_rss_mb": rss_mb,
         // #5189 — °C, au dixième ; `null` sans capteur lisible (macOS,
-        // Windows, conteneur, machine virtuelle) ou si sysfs tarde.
+        // Windows sans zone thermique, conteneur, machine virtuelle) ou si la
+        // lecture tarde. #5410 : Windows lit ses zones thermiques ACPI.
         "cpu_temp_c": cpu_temp_c,
+        // #5410 — `null` quand la garde thermique mesure ; sinon le motif
+        // (`temperature_illisible`, `temperature_figee`) : les analyses de
+        // fond tournent alors à `analyses_bridees_largeur` fichier à la fois.
+        "analyses_bridees": analyses_bridees,
+        "analyses_bridees_largeur": analyses_bridees
+            .map(|_| tune_core::audio::thermal::LARGEUR_SANS_THERMOMETRE),
         "db_backend": db_backend,
         "active_zones": zone_count,
         "zone_poller_metrics": zone_poller_metrics,
@@ -1028,6 +1038,24 @@ async fn temperature_processeur() -> Option<f64> {
     let lecture = tokio::task::spawn_blocking(tune_core::audio::thermal::cpu_package_temp_celsius);
     match tokio::time::timeout(std::time::Duration::from_millis(300), lecture).await {
         Ok(Ok(Some(c))) => Some((c * 10.0).round() / 10.0),
+        _ => None,
+    }
+}
+
+/// #5410 — le motif du bridage des analyses de fond, ou `None` quand la
+/// température est lisible. Même lecture que celle des analyses
+/// (`tune_core::audio::thermal::lecture_thermique`, relue au plus toutes les
+/// 15 s), passée hors de l'exécuteur et abandonnée au-delà de 300 ms comme
+/// la température : un capteur lent ne retient pas le rapport. Un abandon
+/// rend `None` (rien n'est affirmé).
+async fn bridage_des_analyses() -> Option<&'static str> {
+    let lecture = tokio::task::spawn_blocking(|| {
+        tune_core::audio::thermal::lecture_thermique()
+            .motif_du_bridage()
+            .map(|m| m.id())
+    });
+    match tokio::time::timeout(std::time::Duration::from_millis(300), lecture).await {
+        Ok(Ok(motif)) => motif,
         _ => None,
     }
 }

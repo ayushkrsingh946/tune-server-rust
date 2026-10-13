@@ -268,6 +268,16 @@ jobs:
           TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
         run: cargo test --no-fail-fast -p tune-core --lib --no-default-features --features postgres pg_4889 -- --nocapture
 
+      # #6179 — une ligne de playlist survit à sa piste : migration 089 (clé
+      # étrangère en SET NULL, CHECK à trois formes), déclencheur qui fige
+      # l'identité avant la suppression, réconciliation qui la rattache, sur
+      # les deux naissances (native et bascule tout-TEXT). Schémas de côté,
+      # supprimés à la fin.
+      - name: Lignes de playlist introuvables sur PostgreSQL (#6179)
+        env:
+          TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
+        run: cargo test --no-fail-fast -p tune-core --lib --no-default-features --features postgres pg_6179 -- --nocapture
+
       # #5003 — les gardes de migration lisent le schéma COURANT : un schéma
       # voisin portant les mêmes tables (tout-TEXT, ou déjà BIGINT) ne doit
       # rien changer au schéma que Tune reçoit. Le test monte SES bases
@@ -748,6 +758,21 @@ jobs:
         env:
           TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
         run: cargo test --no-fail-fast -p tune-server --no-default-features --features postgres,oaat --test pg_artiste_de_l_album_6121 -- --nocapture --test-threads=1
+
+      # #6271 — collections : « finit par » et les motifs sur un nombre
+      # (`CAST(… AS TEXT)` au lieu de `LOWER(entier)`, refusé par PostgreSQL).
+      - name: Motifs des collections sur un nombre sur PostgreSQL (#6271)
+        env:
+          TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
+        run: cargo test --no-fail-fast -p tune-server --no-default-features --features postgres,oaat --test pg_motifs_collections_6271 -- --nocapture --test-threads=1
+
+      # #6250 — « ne contient pas » : `NOT EXISTS` sur les pistes de l'album
+      # dans les collections, négation tolérante au NULL dans les playlists.
+      # Sans cette étape, l'épreuve prendrait son « saut annoncé ».
+      - name: Règle « ne contient pas » sur PostgreSQL (#6250)
+        env:
+          TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
+        run: cargo test --no-fail-fast -p tune-server --no-default-features --features postgres,oaat --test pg_ne_contient_pas_6250 -- --nocapture --test-threads=1
 
       # #6122 — « dans les N derniers jours » : des littéraux calculés à chaque
       # requête (secondes pour `file_mtime`, ISO pour `listened_at`) au lieu de

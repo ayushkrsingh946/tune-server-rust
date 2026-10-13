@@ -24,6 +24,7 @@ use cpal::SampleFormat;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tracing::{debug, info, warn};
 
+use super::canaux_de_carte_6171::{CanauxDeCarte, Dispersion, PlanDeCanaux, remplir_le_tampon};
 use super::local::{NativePcmRing, RingBuf};
 use super::silence_avant_liberation_6133::{
     BORNE_SILENCE_AVANT_LIBERATION, SilenceAvantLiberation,
@@ -167,8 +168,12 @@ pub struct AsioExclusiveOutput {
     current_sample_rate: u32,
     /// Ce que `find_exclusive_config` a négocié : la cadence demandée et
     /// `channels.min(config.channels())`. C'est le `FormatOuvert` du backend.
+    /// #6171 — avec des canaux de carte réglés, `opened_channels` reste celui
+    /// de la piste (la largeur d'une trame de l'anneau) ; la carte, elle, est
+    /// ouverte sur `card_channels`.
     opened_sample_rate: u32,
     opened_channels: u16,
+    card_channels: u16,
     stream: Option<cpal::Stream>,
     /// Lu par l'anneau retenu (`available`, `capacity`) et prêté au puits
     /// flottant de la route traitée.
@@ -278,6 +283,7 @@ impl AsioExclusiveOutput {
         starvation: Arc<RingStarvation>,
         volume: Arc<AtomicU32>,
         paused: Arc<AtomicBool>,
+        canaux_de_carte: Option<&CanauxDeCarte>,
     ) -> Result<Self, String> {
         // Serialize device access process-wide BEFORE touching the driver: if
         // the previous exclusive session is still tearing down, block here
@@ -338,14 +344,43 @@ impl AsioExclusiveOutput {
         // channel count.  The returned `native_fmt` is the driver's native
         // sample format — cpal's ASIO backend does NO format conversion, so
         // we must build the stream with an exact-match callback type.
+        //
+        // #6171 — des canaux de carte réglés : la carte s'ouvre sur la
+        // LARGEUR (le plus grand canal visé), et le rappel place chaque canal
+        // de la piste à sa position. Le refus (piste à trop de canaux) est
+        // rendu avant de toucher la configuration du pilote.
+        let plan = super::canaux_de_carte_6171::planifier(canaux_de_carte, channels as u16, None)
+            .map_err(|e| format!("ASIO device {resolved_name}: {e}"))?;
+        let canaux_a_ouvrir = plan
+            .as_ref()
+            .map_or(channels as u16, |p| p.largeur() as u16);
         let (stream_config, native_fmt) = Self::find_exclusive_config(
             &device,
-            channels as u16,
+            canaux_a_ouvrir,
             sample_rate,
         )
         .ok_or_else(|| {
-            format!("ASIO device {resolved_name} does not support {channels}ch @ {sample_rate} Hz")
+            format!(
+                "ASIO device {resolved_name} does not support {canaux_a_ouvrir}ch @ {sample_rate} Hz"
+            )
         })?;
+        if plan.is_some() && stream_config.channels < canaux_a_ouvrir {
+            return Err(format!(
+                "ASIO device {resolved_name}: la zone vise le canal {canaux_a_ouvrir} de la carte, \
+                 qui n'a que {} sorties",
+                stream_config.channels
+            ));
+        }
+        if let Some(p) = plan.as_ref() {
+            info!(
+                device = %resolved_name,
+                card_channels = canaux_a_ouvrir,
+                source_channels = channels,
+                card_channel_numbers = ?canaux_de_carte.map(|c| c.numeros()),
+                targets = ?p.cible(),
+                "asio_exclusive_card_channels"
+            );
+        }
 
         info!(
             device = %resolved_name,
@@ -376,6 +411,7 @@ impl AsioExclusiveOutput {
         let stream = Self::build_native_stream(
             &device,
             &stream_config,
+            plan.as_ref(),
             transport,
             float_ring.clone(),
             native_ring.clone(),
@@ -438,7 +474,14 @@ impl AsioExclusiveOutput {
             original_sample_rate,
             current_sample_rate: sample_rate,
             opened_sample_rate: stream_config.sample_rate,
-            opened_channels: stream_config.channels,
+            // #6171 — avec un plan, la trame de l'anneau est celle de la
+            // piste ; sans, ce qui a été négocié, comme avant.
+            opened_channels: if plan.is_some() {
+                channels as u16
+            } else {
+                stream_config.channels
+            },
+            card_channels: stream_config.channels,
             stream: Some(stream),
             float_ring,
             native_ring,
@@ -472,6 +515,7 @@ impl AsioExclusiveOutput {
             sample_rate = self.current_sample_rate,
             opened_sample_rate = self.opened_sample_rate,
             channels = self.opened_channels,
+            card_channels = self.card_channels,
             "asio_exclusive_started"
         );
         Ok(())
@@ -636,9 +680,11 @@ impl AsioExclusiveOutput {
     /// Integer callbacks only move native words. The f32 callback is retained
     /// for drivers whose advertised format cannot represent the source words
     /// exactly; its reason is exposed by `bit_perfect_unavailable_reason`.
+    #[allow(clippy::too_many_arguments)]
     fn build_native_stream(
         device: &cpal::Device,
         config: &cpal::StreamConfig,
+        plan: Option<&PlanDeCanaux>,
         transport: AsioTransport,
         float_ring: Arc<RingBuf>,
         native_ring: Arc<NativePcmRing>,
@@ -651,6 +697,7 @@ impl AsioExclusiveOutput {
             AsioTransport::NativeI32 => {
                 info!("asio_exclusive_building_i32_stream");
                 let errors = counters.clone();
+                let mut dispersion = plan.cloned().map(|p| Dispersion::new(p, 0i32));
                 device
                     .build_output_stream(
                         config,
@@ -659,11 +706,9 @@ impl AsioExclusiveOutput {
                                 data.fill(0);
                                 return;
                             }
-                            let read = native_ring.pop(data);
-                            if read < data.len() {
+                            if remplir_le_tampon(data, &mut dispersion, 0, |d| native_ring.pop(d)) {
                                 counters.underruns.fetch_add(1, Ordering::Relaxed);
                             }
-                            data[read..].fill(0);
                         },
                         move |_| {
                             errors.callback_errors.fetch_add(1, Ordering::Relaxed);
@@ -675,6 +720,7 @@ impl AsioExclusiveOutput {
             AsioTransport::NativeI24 => {
                 info!("asio_exclusive_building_native_i24_stream");
                 let errors = counters.clone();
+                let mut dispersion = plan.cloned().map(|p| Dispersion::new(p, I24_ZERO));
                 device
                     .build_output_stream(
                         config,
@@ -683,12 +729,11 @@ impl AsioExclusiveOutput {
                                 data.fill(I24_ZERO);
                                 return;
                             }
-                            let read =
-                                native_ring.pop_mapped(data, |sample| i24_borne(sample >> 8));
-                            if read < data.len() {
+                            if remplir_le_tampon(data, &mut dispersion, I24_ZERO, |d| {
+                                native_ring.pop_mapped(d, |sample| i24_borne(sample >> 8))
+                            }) {
                                 counters.underruns.fetch_add(1, Ordering::Relaxed);
                             }
-                            data[read..].fill(I24_ZERO);
                         },
                         move |_| {
                             errors.callback_errors.fetch_add(1, Ordering::Relaxed);
@@ -700,6 +745,7 @@ impl AsioExclusiveOutput {
             AsioTransport::NativeI16 => {
                 info!("asio_exclusive_building_i16_stream");
                 let errors = counters.clone();
+                let mut dispersion = plan.cloned().map(|p| Dispersion::new(p, 0i16));
                 device
                     .build_output_stream(
                         config,
@@ -708,11 +754,11 @@ impl AsioExclusiveOutput {
                                 data.fill(0);
                                 return;
                             }
-                            let read = native_ring.pop_mapped(data, |sample| (sample >> 16) as i16);
-                            if read < data.len() {
+                            if remplir_le_tampon(data, &mut dispersion, 0, |d| {
+                                native_ring.pop_mapped(d, |sample| (sample >> 16) as i16)
+                            }) {
                                 counters.underruns.fetch_add(1, Ordering::Relaxed);
                             }
-                            data[read..].fill(0);
                         },
                         move |_| {
                             errors.callback_errors.fetch_add(1, Ordering::Relaxed);
@@ -723,6 +769,7 @@ impl AsioExclusiveOutput {
             }
             AsioTransport::ProcessedI32(_) => {
                 let errors = counters.clone();
+                let mut dispersion = plan.cloned().map(|p| Dispersion::new(p, 0i32));
                 device
                     .build_output_stream(
                         config,
@@ -732,16 +779,16 @@ impl AsioExclusiveOutput {
                                 return;
                             }
                             let volume = volume.load(Ordering::Relaxed) as f64 / 1000.0;
-                            let read = float_ring.pop_mapped(data, |sample| {
-                                let scaled = (f64::from(sample) * volume * 2_147_483_648.0)
-                                    .round()
-                                    .clamp(i32::MIN as f64, i32::MAX as f64);
-                                scaled as i32
-                            });
-                            if read < data.len() {
+                            if remplir_le_tampon(data, &mut dispersion, 0, |d| {
+                                float_ring.pop_mapped(d, |sample| {
+                                    let scaled = (f64::from(sample) * volume * 2_147_483_648.0)
+                                        .round()
+                                        .clamp(i32::MIN as f64, i32::MAX as f64);
+                                    scaled as i32
+                                })
+                            }) {
                                 counters.underruns.fetch_add(1, Ordering::Relaxed);
                             }
-                            data[read..].fill(0);
                         },
                         move |_| {
                             errors.callback_errors.fetch_add(1, Ordering::Relaxed);
@@ -752,6 +799,7 @@ impl AsioExclusiveOutput {
             }
             AsioTransport::ProcessedI24(_) => {
                 let errors = counters.clone();
+                let mut dispersion = plan.cloned().map(|p| Dispersion::new(p, I24_ZERO));
                 device
                     .build_output_stream(
                         config,
@@ -762,17 +810,17 @@ impl AsioExclusiveOutput {
                                 return;
                             }
                             let volume = volume.load(Ordering::Relaxed) as f64 / 1000.0;
-                            let read = float_ring.pop_mapped(data, |sample| {
-                                let scaled = (f64::from(sample) * volume * 8_388_608.0)
-                                    .round()
-                                    .clamp(-8_388_608.0, 8_388_607.0)
-                                    as i32;
-                                i24_borne(scaled)
-                            });
-                            if read < data.len() {
+                            if remplir_le_tampon(data, &mut dispersion, zero, |d| {
+                                float_ring.pop_mapped(d, |sample| {
+                                    let scaled = (f64::from(sample) * volume * 8_388_608.0)
+                                        .round()
+                                        .clamp(-8_388_608.0, 8_388_607.0)
+                                        as i32;
+                                    i24_borne(scaled)
+                                })
+                            }) {
                                 counters.underruns.fetch_add(1, Ordering::Relaxed);
                             }
-                            data[read..].fill(zero);
                         },
                         move |_| {
                             errors.callback_errors.fetch_add(1, Ordering::Relaxed);
@@ -783,6 +831,7 @@ impl AsioExclusiveOutput {
             }
             AsioTransport::ProcessedI16(_) => {
                 let errors = counters.clone();
+                let mut dispersion = plan.cloned().map(|p| Dispersion::new(p, 0i16));
                 device
                     .build_output_stream(
                         config,
@@ -792,16 +841,16 @@ impl AsioExclusiveOutput {
                                 return;
                             }
                             let volume = volume.load(Ordering::Relaxed) as f64 / 1000.0;
-                            let read = float_ring.pop_mapped(data, |sample| {
-                                let scaled = (f64::from(sample) * volume * 32_768.0)
-                                    .round()
-                                    .clamp(i16::MIN as f64, i16::MAX as f64);
-                                scaled as i16
-                            });
-                            if read < data.len() {
+                            if remplir_le_tampon(data, &mut dispersion, 0, |d| {
+                                float_ring.pop_mapped(d, |sample| {
+                                    let scaled = (f64::from(sample) * volume * 32_768.0)
+                                        .round()
+                                        .clamp(i16::MIN as f64, i16::MAX as f64);
+                                    scaled as i16
+                                })
+                            }) {
                                 counters.underruns.fetch_add(1, Ordering::Relaxed);
                             }
-                            data[read..].fill(0);
                         },
                         move |_| {
                             errors.callback_errors.fetch_add(1, Ordering::Relaxed);
@@ -812,6 +861,7 @@ impl AsioExclusiveOutput {
             }
             AsioTransport::ProcessedF32(_) => {
                 let errors = counters.clone();
+                let mut dispersion = plan.cloned().map(|p| Dispersion::new(p, 0.0f32));
                 device
                     .build_output_stream(
                         config,
@@ -820,16 +870,15 @@ impl AsioExclusiveOutput {
                                 data.fill(0.0);
                                 return;
                             }
-                            let read = float_ring.pop(data);
-                            if read < data.len() {
+                            if remplir_le_tampon(data, &mut dispersion, 0.0, |d| float_ring.pop(d))
+                            {
                                 counters.underruns.fetch_add(1, Ordering::Relaxed);
                             }
+                            // Les zéros (fin de famine, canaux non visés)
+                            // restent des zéros.
                             let v = volume.load(Ordering::Relaxed) as f32 / 1000.0;
-                            for sample in &mut data[..read] {
+                            for sample in data.iter_mut() {
                                 *sample *= v;
-                            }
-                            for sample in &mut data[read..] {
-                                *sample = 0.0;
                             }
                         },
                         move |_| {

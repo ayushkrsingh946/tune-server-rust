@@ -4344,7 +4344,13 @@ pub fn read_extended_metadata(path: &Path) -> HashMap<String, String> {
     // Pas de lecture pour un fichier qui n'est pas dans un dossier, ni quand
     // il n'y a pas de rapport : un `stat` par piste, rien de plus, pour
     // l'immense majorité des bibliothèques qui n'en ont pas.
-    if !meta.contains_key("dr_track")
+    //
+    // #5519 : le rapport est AUSSI lu pour une piste qui a son DR mais pas de
+    // ReplayGain — sa crête et son RMS servent à approcher un gain
+    // (`audio::replaygain::gain_approche`), rangés sous une clé à eux et
+    // jamais sous `rg_track_gain` : une mesure réelle les remplacera.
+    let sans_rg = get(ItemKey::ReplayGainTrackGain).is_none();
+    if (!meta.contains_key("dr_track") || sans_rg)
         && let Some(rapport) = foo_dr::rapport_voisin(path)
     {
         let numero = tag.track().or_else(|| {
@@ -4353,11 +4359,21 @@ pub fn read_extended_metadata(path: &Path) -> HashMap<String, String> {
                 .and_then(foo_dr::numero_dans_le_nom)
         });
         let canaux = tagged.properties().channels().map(u16::from);
-        if let Some(dr) =
-            rapport.dr_pour_la_piste(numero, tag.disk(), tag.title().as_deref(), canaux)
+        if !meta.contains_key("dr_track")
+            && let Some(dr) =
+                rapport.dr_pour_la_piste(numero, tag.disk(), tag.title().as_deref(), canaux)
         {
             meta.insert("dr_track".into(), dr.to_string());
             meta.insert("dr_source".into(), DR_SOURCE_SIDECAR.into());
+        }
+        if sans_rg
+            && let Some(m) =
+                rapport.mesures_pour_la_piste(numero, tag.disk(), tag.title().as_deref(), canaux)
+        {
+            meta.insert(
+                crate::audio::replaygain::gain_approche::CLE_MESURE_FOO_DR.into(),
+                crate::audio::replaygain::gain_approche::encoder(m.crete_db, m.rms_db),
+            );
         }
     }
     if let Some(v) = get(ItemKey::CopyrightMessage) {
@@ -6959,6 +6975,45 @@ mod foo_dr_voisin_4186 {
         let meta = super::read_extended_metadata(&piste);
         assert_eq!(meta.get("dr_track"), None, "Relevé : {meta:?}");
         assert_eq!(meta.get("dr_source"), None, "Relevé : {meta:?}");
+    }
+
+    const RAPPORT_TADES_RU: &[u8] = include_bytes!("../../tests/fixtures/foo_dr_tades_2050_ru.txt");
+
+    /// #5519 — la piste 1 du Mahler 5 de Tades (rapport RÉEL, en russe, fil
+    /// 2050), sans ReplayGain : le scan garde la crête et le RMS du rapport
+    /// sous `foo_dr_mesure`, et JAMAIS sous `rg_track_gain`.
+    #[test]
+    fn une_piste_sans_replaygain_garde_crete_et_rms_du_rapport_5519() {
+        let (_dossier, piste) = album(
+            "niveaux-5519",
+            "01 - Trauermarsch.flac",
+            &[("TRACKNUMBER", "1"), ("DYNAMIC RANGE", "13")],
+            Some((super::foo_dr::NOM_DU_RAPPORT, RAPPORT_TADES_RU)),
+        );
+        let meta = super::read_extended_metadata(&piste);
+        assert_eq!(
+            meta.get("foo_dr_mesure").map(String::as_str),
+            Some("v1;-4.93;-24.8"),
+            "#5519 — sans ReplayGain, la crête (−4,93) et le RMS (−24,80) du \
+             rapport doivent être gardés, même quand le DR vient d'un tag. \
+             Relevé : {meta:?}"
+        );
+        assert_eq!(meta.get("rg_track_gain"), None, "Relevé : {meta:?}");
+        assert_eq!(meta.get("dr_source").map(String::as_str), Some("tag"));
+    }
+
+    /// #5519 — un ReplayGain tagué prime : rien n'est gardé du rapport.
+    #[test]
+    fn un_replaygain_tague_ne_laisse_rien_approcher_5519() {
+        let (_dossier, piste) = album(
+            "niveaux-rg-5519",
+            "01 - Trauermarsch.flac",
+            &[("TRACKNUMBER", "1"), ("REPLAYGAIN_TRACK_GAIN", "-3.20 dB")],
+            Some((super::foo_dr::NOM_DU_RAPPORT, RAPPORT_TADES_RU)),
+        );
+        let meta = super::read_extended_metadata(&piste);
+        assert_eq!(meta.get("foo_dr_mesure"), None, "Relevé : {meta:?}");
+        assert_eq!(meta.get("dr_track").map(String::as_str), Some("13"));
     }
 
     /// Sans tag de numéro, le NOM DE FICHIER le fournit (`03 - ….flac`).

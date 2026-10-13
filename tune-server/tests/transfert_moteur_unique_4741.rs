@@ -134,6 +134,7 @@ impl StreamingService for ServiceSimule {
                 covers: Vec::new(),
                 track_count: pistes.len() as _,
                 owner: None,
+                editable: None,
             })
             .collect())
     }

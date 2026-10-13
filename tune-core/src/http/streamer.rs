@@ -100,6 +100,31 @@ pub struct StreamInfo {
     /// n'entre dans le flux — piste servie telle quelle (cas 3 de #2742),
     /// sortie locale, PURE, interrupteur coupé, radio, préchargement.
     pub compensation_db: Option<f64>,
+    /// #6221 — le flux est un DSF FABRIQUÉ à la volée depuis un DSDIFF
+    /// compressé DST (`audio::dsf_depuis_dst`) : DSD natif, décompressé sans
+    /// perte, aucune conversion PCM. Même règle que [`Self::crossfeed`] : un
+    /// fait du flux, posé là où il est bâti, lu tel quel par le chemin du
+    /// signal (« DST décompressé → DSF »). `false` partout ailleurs.
+    pub dsd_reconstruit_depuis_dst: bool,
+}
+
+/// #6221 — un fichier VIRTUEL servi par la branche fichier (`serve_file`) :
+/// taille connue d'avance, octets calculés à la demande pour une tranche
+/// quelconque — donc `Content-Length` exact et requêtes `Range` honorées.
+/// Le seul producteur est le DSF fabriqué depuis un DST
+/// (`audio::dsf_depuis_dst::DsfDepuisDst`).
+pub trait SourceVirtuelle: Send + Sync + std::fmt::Debug {
+    /// Taille totale du fichier virtuel.
+    fn total(&self) -> u64;
+    /// Rend les octets `[debut, debut + longueur)` (bornés à [`Self::total`])
+    /// morceau par morceau. BLOQUANT : à appeler hors de l'exécuteur async.
+    /// `rendre` rend `Err` pour interrompre (consommateur parti).
+    fn lire(
+        &self,
+        debut: u64,
+        longueur: u64,
+        rendre: &mut dyn FnMut(Vec<u8>) -> Result<(), String>,
+    ) -> Result<(), String>;
 }
 
 impl StreamInfo {
@@ -256,6 +281,10 @@ pub struct StreamSession {
     /// `ftyp + patched-moov` (from memory) followed by the original mdat, so a
     /// DLNA renderer gets the metadata up front without seeking to the file end.
     pub faststart: std::sync::Mutex<Option<crate::audio::faststart::FaststartMap>>,
+    /// #6221 — quand elle est posée, la branche fichier sert CE fichier
+    /// virtuel au lieu des octets de `file_path` (qui reste le fichier source,
+    /// pour l'existence et le journal).
+    pub source_virtuelle: std::sync::Mutex<Option<Arc<dyn SourceVirtuelle>>>,
     pub proxy_url: Mutex<Option<String>>,
     /// Re-resolver for the proxied CDN URL. Set for streaming proxy sessions
     /// whose signed URL can expire (Qobuz/Tidal). When a proxied upstream
@@ -597,6 +626,7 @@ impl StreamSession {
             rx: Mutex::new(rx),
             file_path: Mutex::new(None),
             faststart: std::sync::Mutex::new(None),
+            source_virtuelle: std::sync::Mutex::new(None),
             proxy_url: Mutex::new(None),
             reresolve: Mutex::new(None),
             track_title: None,
@@ -1623,6 +1653,14 @@ impl AudioStreamer {
         }
     }
 
+    /// #6221 — attache un fichier virtuel à une session de fichier : la
+    /// branche fichier le sert à la place des octets du fichier source. À
+    /// poser avant que le renderer ne demande le flux.
+    pub async fn set_source_virtuelle(&self, id: &str, source: Arc<dyn SourceVirtuelle>) {
+        if let Some(s) = self.sessions.lock().await.get(id) {
+            *s.source_virtuelle.lock().unwrap_or_else(|e| e.into_inner()) = Some(source);
+        }
+    }
     /// Create a streaming session for a decoded radio stream (infinite,
     /// exempt from GC).  Same as `create_session` but sets `is_radio = true`
     /// so the stream handler skips coalescing and the GC retains the session.

@@ -8,6 +8,8 @@ pub mod appliance_storage;
 pub mod archive;
 pub mod artist_releases;
 pub mod bridge;
+/// #6171 — les canaux de la carte qu'une zone ASIO utilise.
+pub mod canaux_de_carte;
 pub mod cd_rip;
 pub mod cloud;
 pub mod cloud_error;
@@ -70,6 +72,7 @@ pub mod playlist_manager;
 pub mod playlists;
 pub mod plugins;
 pub mod podcasts;
+pub mod profil_par_appareil;
 pub mod profiles;
 pub mod radios;
 pub mod radios_libelles;
@@ -400,7 +403,15 @@ pub fn router_with_plugins(
     plugin_routers: crate::plugins::PluginRouters,
 ) -> Router {
     let contexte_sendspin = sendspin::ContexteSendspin::pour_base(&state.config.db_path)
-        .avec_zones(sendspin::RaccordZones::depuis_etat(&state));
+        .avec_zones(sendspin::RaccordZones::depuis_etat(&state))
+        .avec_reglages(state.backend.clone());
+    // #3326 — connexions initiées par le serveur : Tune compose vers les
+    // enceintes `_sendspin._tcp` que le scanner mDNS a trouvées.
+    sendspin::sortantes::lancer(
+        state.mdns_scanner.clone(),
+        contexte_sendspin.clone(),
+        tune_core::sendspin::ModeTransition::en_vigueur(),
+    );
     let streamer_sessions = state.streamer.sessions_state();
 
     let web_dir = crate::config::resolve_web_dir()
@@ -503,6 +514,8 @@ pub fn router_with_plugins(
         .nest("/crossfeed", crossfeed::router())
         // #6044 — réaffectation des canaux : préréglages, réglage de zone, règle d'album.
         .nest("/channel-remap", reaffectation_canaux::router())
+        // #6171 — canaux de la carte d'une zone ASIO.
+        .nest("/output-channels", canaux_de_carte::router())
         .nest("/siri", siri::router())
         .nest("/lastfm-social", lastfm_social::router())
         .nest("/stats/listening", listening_stats::router())

@@ -130,6 +130,10 @@ jsonwebtoken = { workspace = true }
 argon2 = { workspace = true }
 unicode-normalization = { workspace = true }
 futures-util = { workspace = true }
+# #3326 — connexions Sendspin initiées par le serveur : Tune compose en
+# WebSocket vers l'enceinte. Version déjà dans Cargo.lock (tune-core,
+# `cloud-relay`) : aucune caisse nouvelle.
+tokio-tungstenite = "0.26"
 socket2 = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 time = { workspace = true }
@@ -375,6 +379,12 @@ path = "tests/radios_libelles_localises.rs"
 [[test]]
 name = "favori_bandcamp_survit_a_la_resignature_4577"
 path = "tests/favori_bandcamp_survit_a_la_resignature_4577.rs"
+
+# #5677 — l'écriture d'une passe d'indexation UPnP (synchronisation horaire)
+# ne tient pas un fil de l'exécuteur. Rangée au MILIEU du manifeste.
+[[test]]
+name = "indexation_upnp_hors_executeur_5677"
+path = "tests/indexation_upnp_hors_executeur_5677.rs"
 
 # #4154 — les trois plafonds de l'indexation UPnP : réglables, mémorisés, et
 # qui DISENT quand ils mordent. Mesuré sur les routes montées.
@@ -1460,11 +1470,44 @@ name = "pg_etiquette_collection_5026"
 path = "tests/pg_etiquette_collection_5026.rs"
 required-features = ["postgres"]
 
+# #6245 — l'artiste d'une piste modifié par son NOM (édition, tagger) :
+# enregistré par `artist_id`, tenu à la NOUVELLE valeur, gardé au rescan.
+# `autotests = false` : sans cette cible, jamais compilé.
+[[test]]
+name = "artiste_par_nom_6245"
+path = "tests/artiste_par_nom_6245.rs"
+
+# #6270 — l'album d'une piste modifié par son TITRE (édition, tagger) :
+# enregistré par `album_id`, tenu à la NOUVELLE valeur, gardé au rescan.
+[[test]]
+name = "album_par_titre_6270"
+path = "tests/album_par_titre_6270.rs"
+
+# #2574 — `tests/piste_artiste_par_id.rs` existait sans cible : jamais
+# compilé (`autotests = false`). Rattaché avec #6245, son voisin direct.
+[[test]]
+name = "piste_artiste_par_id"
+path = "tests/piste_artiste_par_id.rs"
+
 # #6121 — la règle « Artiste de l'album » (collections et playlists) sur
 # PostgreSQL : les deux aperçus par le vrai routeur.
 [[test]]
 name = "pg_artiste_de_l_album_6121"
 path = "tests/pg_artiste_de_l_album_6121.rs"
+required-features = ["postgres"]
+
+# #6271 — collections : « finit par » et les motifs sur une colonne
+# numérique, sur PostgreSQL.
+[[test]]
+name = "pg_motifs_collections_6271"
+path = "tests/pg_motifs_collections_6271.rs"
+required-features = ["postgres"]
+
+# #6250 — la règle « ne contient pas » (collections et playlists) sur
+# PostgreSQL : les deux aperçus par le vrai routeur.
+[[test]]
+name = "pg_ne_contient_pas_6250"
+path = "tests/pg_ne_contient_pas_6250.rs"
 required-features = ["postgres"]
 
 # #6122 — la règle « dans les N derniers jours » (date d'ajout, dernière

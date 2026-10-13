@@ -548,6 +548,52 @@ pub async fn handle_stream(
         .get("Range")
         .and_then(|v| v.to_str().ok())
         .and_then(parse_range_start);
+    // ── #6254 — une reprise WAV se sert depuis une frontière de trame ──
+    //
+    // Zone 10 du .18 (Eversolo DMP-A8, `Lavf/58.45.100`, 1.0.0-rc4, 13/10) :
+    // FLAC 44,1/24 converti en WAV, `bytes=31958520-` servi à l'octet depuis
+    // la retenue — exact. Mais (31958520 − 44) mod 6 = 4 : le lecteur décode
+    // la nouvelle connexion comme si son premier octet ouvrait une trame, et
+    // 4 octets de décalage sur des échantillons de 3 octets, c'est le bruit
+    // blanc fort entendu à 2 min, à la position exacte de la reprise.
+    //
+    // On sert donc depuis l'offset ARRONDI à la trame, et le `Content-Range`
+    // le dit (RFC 9110 : il décrit ce qui part ; ffmpeg `http.c` reprend sa
+    // position depuis lui). Le rattrapage de phase du tuyau (#1894) part de
+    // cet offset-là, la retenue (#5426) aussi : les deux chemins livrent un
+    // premier octet en tête de trame.
+    //
+    // Hors champ : un navigateur (cache à l'octet, qui vérifie que la
+    // réponse commence à l'offset demandé) et une tranche fermée `bytes=N-M`
+    // (AVPlayer, curl) gardent l'octet demandé ; un offset dans l'en-tête ne
+    // bouge pas.
+    let trame_wav = if is_wav && wav_header_included && !is_radio {
+        u64::from(session.info.channels) * u64::from(session.info.bit_depth / 8)
+    } else {
+        0
+    };
+    let range_demande = range_demande.map(|n| {
+        let tranche_fermee = req_headers
+            .get("Range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_range_end)
+            .is_some();
+        let aligne = reprise_alignee_sur_la_trame(n, trame_wav);
+        if aligne == n || tranche_fermee || agent_navigateur(user_agent.as_deref()) {
+            return n;
+        }
+        info!(
+            stream_id,
+            demande = n,
+            aligne,
+            phase = n - aligne,
+            trame = trame_wav,
+            agent = user_agent.as_deref().unwrap_or("-"),
+            "reprise_realignee_sur_la_trame — la reprise tombe au milieu d'une trame PCM ; \
+             servie depuis la frontière précédente, Content-Range compris (#6254)"
+        );
+        aligne
+    });
     // Une requête DEPUIS LE DÉBUT (`bytes=0-`, ou sans `Range`) alors que le
     // tuyau a déjà rendu quelque chose. Zone 10 du .18 (Eversolo DMP-A8,
     // Qobuz FLAC → WAV, 1.0.0-rc1, 02/10) : à chaque piste, deux `bytes=0-`
@@ -1141,11 +1187,13 @@ pub async fn handle_stream(
             // côté ; toute connexion suivante partant de l'octet 0 le reçoit
             // d'abord. `bytes=44-` dit explicitement « je l'ai déjà » : on ne
             // le renvoie pas.
-            let debut_demande = req_headers
-                .get("Range")
-                .and_then(|v| v.to_str().ok())
-                .and_then(parse_range_start);
+            //
+            // `range_demande` et non une relecture de l'en-tête `Range` : c'est
+            // l'offset ANNONCÉ par le 206, réaligné sur la trame (#6254). Le
+            // rattrapage de phase ci-dessous doit viser celui-là.
+            let debut_demande = range_demande;
             let saute_entete = debut_demande.is_some_and(|s| s >= 44);
+            let mut entete_rejoue = false;
             // Rejouée depuis 0, la retenue porte déjà l'en-tête : ne pas
             // l'émettre deux fois.
             if is_wav
@@ -1155,6 +1203,7 @@ pub async fn handle_stream(
                 && let Some(entete) = session.wav_header_stash.get()
             {
                 yield Ok(bytes::Bytes::from(entete.clone()));
+                entete_rejoue = true;
             }
 
             // ── La reprise annonce N ; le tuyau en est ailleurs ──
@@ -1178,6 +1227,16 @@ pub async fn handle_stream(
             };
             let mut a_remettre_en_phase = debut_demande
                 .filter(|_| saute_entete && trame_de_sortie > 1 && reprise_exacte.is_none());
+            // #6254 — l'en-tête mis de côté, PUIS le tuyau là où il en est
+            // (`debut_de_piste_perdu`, retenue impossible) : le renderer place
+            // le premier octet du tuyau à l'offset 44. Un bloc du canal n'a
+            // aucune raison de finir sur une trame (65 536 % 6 = 4 en 24 bits
+            // stéréo) : sans rattrapage, tout ce qui suit l'en-tête est
+            // déphasé — du bruit blanc. Même remède que la reprise : la phase
+            // se rattrape sur l'offset 44.
+            if entete_rejoue && trame_de_sortie > 1 {
+                a_remettre_en_phase = Some(44);
+            }
             // #5426 — prochaine position à servir depuis la retenue ; `None`
             // hors reprise, ou une fois la retenue rattrapée par le direct.
             let mut reprise = reprise_exacte;
@@ -1729,12 +1788,22 @@ async fn serve_file(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    // #6221 — fichier VIRTUEL (DSF fabriqué depuis un DST) : sa taille et
+    // ses octets remplacent ceux du fichier source, Range compris.
+    let virtuelle = session
+        .source_virtuelle
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let file_path = std::path::Path::new(path);
     let disk_size = match tokio::fs::metadata(file_path).await {
         Ok(m) => m.len(),
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
-    let file_size = faststart.as_ref().map(|m| m.total).unwrap_or(disk_size);
+    let file_size = match virtuelle.as_ref() {
+        Some(v) => v.total(),
+        None => faststart.as_ref().map(|m| m.total).unwrap_or(disk_size),
+    };
 
     let range_header = req_headers
         .get("Range")
@@ -1791,19 +1860,22 @@ async fn serve_file(
         // Track served bytes so the poller can tell an actively-fetching
         // renderer from a genuinely-stalled one (fixes false force-stop of
         // DLNA renderers that report Stopped while streaming — Linn, RS130).
-        let body = build_file_body(
-            faststart.clone(),
-            path.to_string(),
-            start,
-            length,
-            session.clone(),
-            debit_nominal_octets_par_seconde(
-                &info.format,
-                info.sample_rate,
-                info.bit_depth,
-                info.channels,
+        let body = match virtuelle.clone() {
+            Some(v) => corps_virtuel(v, start, length, session.clone()),
+            None => build_file_body(
+                faststart.clone(),
+                path.to_string(),
+                start,
+                length,
+                session.clone(),
+                debit_nominal_octets_par_seconde(
+                    &info.format,
+                    info.sample_rate,
+                    info.bit_depth,
+                    info.channels,
+                ),
             ),
-        );
+        };
         return (StatusCode::PARTIAL_CONTENT, headers, body).into_response();
     }
 
@@ -1825,20 +1897,69 @@ async fn serve_file(
         HeaderValue::from_static("DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000"),
     );
 
-    let body = build_file_body(
-        faststart,
-        path.to_string(),
-        0,
-        file_size,
-        session.clone(),
-        debit_nominal_octets_par_seconde(
-            &info.format,
-            info.sample_rate,
-            info.bit_depth,
-            info.channels,
+    let body = match virtuelle {
+        Some(v) => corps_virtuel(v, 0, file_size, session.clone()),
+        None => build_file_body(
+            faststart,
+            path.to_string(),
+            0,
+            file_size,
+            session.clone(),
+            debit_nominal_octets_par_seconde(
+                &info.format,
+                info.sample_rate,
+                info.bit_depth,
+                info.channels,
+            ),
         ),
-    );
+    };
     (StatusCode::OK, headers, body).into_response()
+}
+
+/// #6221 — le corps d'une tranche `[start, start + length)` d'un fichier
+/// virtuel. Le producteur (bloquant : il décode du DST) tourne sur un fil
+/// `spawn_blocking` et pousse ses morceaux dans un canal borné : il ne
+/// décode pas plus vite que le renderer ne tire, et s'arrête dès que le
+/// corps est abandonné (canal fermé). Mêmes compteurs que `build_file_body`.
+fn corps_virtuel(
+    source: std::sync::Arc<dyn tune_core::http::streamer::SourceVirtuelle>,
+    start: u64,
+    length: u64,
+    byte_counter: std::sync::Arc<StreamSession>,
+) -> Body {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let stream_id = byte_counter.id.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut rendre = |morceau: Vec<u8>| {
+            tx.blocking_send(morceau)
+                .map_err(|_| tune_core::audio::dsf_depuis_dst::CONSOMMATEUR_PARTI.to_string())
+        };
+        if let Err(e) = source.lire(start, length, &mut rendre)
+            && e != tune_core::audio::dsf_depuis_dst::CONSOMMATEUR_PARTI
+        {
+            warn!(stream_id = %stream_id, error = %e, "fichier_virtuel_lecture_en_echec");
+        }
+    });
+    let mut chrono = ChronoServiceFichier::new(byte_counter.id.clone(), length, None);
+    Body::from_stream(async_stream::stream! {
+        let mut remaining = length;
+        while remaining > 0 {
+            let Some(morceau) = rx.recv().await else { break };
+            let n = (morceau.len() as u64).min(remaining);
+            remaining -= n;
+            byte_counter.bytes_sent.fetch_add(n, Relaxed);
+            chrono.compter(n);
+            let mut octets = bytes::Bytes::from(morceau);
+            octets.truncate(n as usize);
+            yield Ok::<_, std::io::Error>(octets);
+        }
+        if remaining == 0 {
+            chrono.noter_fin(FinDuService::Complet);
+        } else {
+            chrono.noter_fin(FinDuService::FichierPlusCourt);
+        }
+    })
 }
 
 /// Taille de l'en-tête que TOUS les WAV de Tune portent
@@ -1946,6 +2067,23 @@ fn decalage_de_trame(debut: u64, en_tete: u64, trame: u64) -> u64 {
         return 0;
     }
     (debut - en_tete) % trame
+}
+
+/// #6254 — l'offset depuis lequel servir une reprise `bytes=N-` d'une
+/// conversion WAV : `N` ramené à la frontière de trame qui le précède
+/// (`44 + ((N − 44) / trame) × trame`). Un offset dans l'en-tête, ou une
+/// trame inconnue (`trame <= 1`), ne bouge pas.
+fn reprise_alignee_sur_la_trame(debut: u64, trame: u64) -> u64 {
+    debut - decalage_de_trame(debut, EN_TETE_WAV, trame)
+}
+
+/// Un navigateur ? Même critère que [`accepts_chunked_live_stream`] :
+/// `Mozilla/5.0` est le préfixe de Firefox, Chrome, Safari et Edge, et
+/// d'aucun renderer DLNA connu. Un navigateur range une reprise dans un cache
+/// à l'octet et vérifie que la réponse part de l'offset demandé : il ne doit
+/// pas être réaligné (#6254).
+fn agent_navigateur(user_agent: Option<&str>) -> bool {
+    user_agent.is_some_and(|ua| ua.to_ascii_lowercase().contains("mozilla"))
 }
 
 /// Trace une reprise hors trame sur une session de fichier WAV — WARN les
@@ -5081,18 +5219,23 @@ mod tests {
             .expect("l'encodeur de production doit rendre un porteur DoP valide");
 
         // Les six résidus de la trame de 6 : 0, 1, 2, 4, 5, 3.
+        //
+        // #6254 : hors navigateur, une reprise au milieu d'une trame est
+        // servie depuis la frontière qui la précède, et le 206 l'annonce.
         for offset in [8_234u64, 8_235, 8_236, 8_238, 12_289, 20_483] {
             let (plage, recu) = reprise_sur_une_session_dop(offset, &charge).await;
+            let annonce = super::reprise_alignee_sur_la_trame(offset, 6);
             assert!(
-                plage.starts_with(&format!("bytes {offset}-")),
-                "le 206 doit annoncer l'offset demandé, il annonce « {plage} »"
+                plage.starts_with(&format!("bytes {annonce}-")),
+                "le 206 doit annoncer la frontière de trame {annonce} (demandé {offset}), il \
+                 annonce « {plage} »"
             );
             assert!(
                 recu.len() > 1024,
                 "reprise à {offset} : {} octets reçus, rien à juger",
                 recu.len()
             );
-            if let Err(pourquoi) = porteur_dop_lisible(&recu, offset, 2) {
+            if let Err(pourquoi) = porteur_dop_lisible(&recu, annonce, 2) {
                 panic!(
                     "reprise `Range: bytes={offset}-` : le porteur DoP est illisible sur la \
                      grille que le 206 annonce — {pourquoi}. C'est exactement le bruit blanc \
@@ -5382,6 +5525,12 @@ mod long_wav_4016;
 mod reprise_navigateur_5426;
 
 #[cfg(test)]
+mod reprise_hors_trame_6254;
+
+#[cfg(test)]
+mod connexions_chevauchantes_6254;
+
+#[cfg(test)]
 mod relais_wav24_b209bf;
 
 #[cfg(test)]
@@ -5390,6 +5539,10 @@ mod bruit_trois_connexions_b209bruit;
 #[cfg(test)]
 mod bruit_suspect_de_bout_en_bout_6130;
 
+/// #6221 — un fichier virtuel (DSF fabriqué depuis un DST) servi avec le
+/// contrat fichier : Content-Length, Range, 416.
+#[cfg(test)]
+mod fichier_virtuel_6221;
 #[cfg(test)]
 mod plages_avplayer_b209;
 
