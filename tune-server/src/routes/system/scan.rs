@@ -846,10 +846,19 @@ pub fn etat_du_fichier(path: &std::path::Path, existing_tracks: &CarteDesChemins
     // #5299 — même mesure que le parcours (`ScannedFile`), chemins virtuels
     // `image.iso!/…` compris : sans elle, chaque piste d'une image serait
     // relue à chaque scan.
-    let (Some(info), Some((taille, mtime))) = (
-        existing_tracks.get(path_str.as_str()),
-        tune_core::audio::iso9660::taille_et_mtime(path),
-    ) else {
+    //
+    // #6163 — ce `stat` est borné comme celui du parcours : sur un partage
+    // SMB qui ne répond plus pour un fichier, il figeait le préfiltre entier.
+    // Sans réponse, le fichier part « à relire » : le parcours le sautera à
+    // son tour, le journalisera et le rangera dans les échecs du scan, sans
+    // rien écrire en base. Un fichier inconnu de la base est à relire de toute
+    // façon : on ne le mesure plus pour rien.
+    let Some(info) = existing_tracks.get(path_str.as_str()) else {
+        return EtatDuFichier::ARelire;
+    };
+    let tune_core::scanner::walker::StatBorne::Lu(Some((taille, mtime))) =
+        tune_core::scanner::walker::taille_et_mtime_du_scan(path)
+    else {
         return EtatDuFichier::ARelire;
     };
     if !info.taille.is_some_and(|s| s == taille as i64) {
