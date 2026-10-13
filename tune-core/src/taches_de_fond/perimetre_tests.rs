@@ -64,7 +64,7 @@ fn listes_vides_aucune_clause() {
     assert_eq!(clause_hors_racines("t.file_path", &[]), "");
     let (_db, backend) = base();
     assert_eq!(
-        clause_decodage(&backend),
+        clause_decodage(&backend, Passe::ReplayGain),
         "",
         "rien de réglé : rien d'ajouté"
     );
@@ -152,7 +152,7 @@ fn une_valeur_illisible_en_base_vaut_rien_d_exclu() {
         .set(CLE_RACINES_EXCLUES, "pas du json")
         .unwrap();
     assert!(racines_exclues(&backend).is_empty());
-    assert_eq!(clause_decodage(&backend), "");
+    assert_eq!(clause_decodage(&backend, Passe::ReplayGain), "");
 }
 
 // ── Les compteurs ───────────────────────────────────────────────────────
@@ -577,8 +577,11 @@ fn les_genres_ne_touchent_que_le_clap() {
         CLE_GENRES_CLAP_EXCLUS,
         serde_json::json!(["Metal"]),
     );
-    assert_eq!(clause_decodage(&backend), "");
-    assert_eq!(clause_hors_perimetre_decodage(&backend), "");
+    assert_eq!(clause_decodage(&backend, Passe::ReplayGain), "");
+    assert_eq!(
+        clause_hors_perimetre_decodage(&backend, Passe::ReplayGain),
+        ""
+    );
     assert!(!clause_clap(&backend).is_empty());
 }
 
@@ -620,9 +623,15 @@ fn un_sous_dossier_exclu_sort_des_quatre_passes_et_lui_seul() {
         (2, 2, Some(2), 2),
         "2 et 3 (les deux séparateurs) sortent ; 4, voisin de même préfixe, reste"
     );
-    assert_eq!(ids(&backend, &clause_decodage(&backend)), vec![1, 4]);
     assert_eq!(
-        ids(&backend, &clause_hors_perimetre_decodage(&backend)),
+        ids(&backend, &clause_decodage(&backend, Passe::ReplayGain)),
+        vec![1, 4]
+    );
+    assert_eq!(
+        ids(
+            &backend,
+            &clause_hors_perimetre_decodage(&backend, Passe::ReplayGain)
+        ),
         vec![2, 3]
     );
 
@@ -671,8 +680,11 @@ fn dossiers_et_genres_partitionnent_la_bibliotheque() {
     piste_de_genre(&db, 5, "/local/5.flac", None, None);
     regler(&backend, CLE_RACINES_EXCLUES, serde_json::json!(["/nas"]));
     regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!(["Podcast"]));
-    let dedans = ids(&backend, &clause_decodage(&backend));
-    let dehors = ids(&backend, &clause_hors_perimetre_decodage(&backend));
+    let dedans = ids(&backend, &clause_decodage(&backend, Passe::ReplayGain));
+    let dehors = ids(
+        &backend,
+        &clause_hors_perimetre_decodage(&backend, Passe::ReplayGain),
+    );
     assert_eq!(dedans, vec![1, 5]);
     assert_eq!(
         dehors,
@@ -683,13 +695,19 @@ fn dossiers_et_genres_partitionnent_la_bibliotheque() {
     // Seuls les genres : la clause hors périmètre ne dépend plus des racines.
     regler(&backend, CLE_RACINES_EXCLUES, serde_json::json!([]));
     assert_eq!(
-        ids(&backend, &clause_hors_perimetre_decodage(&backend)),
+        ids(
+            &backend,
+            &clause_hors_perimetre_decodage(&backend, Passe::ReplayGain)
+        ),
         vec![2, 4]
     );
     // Rien d'exclu : les deux clauses sont vides.
     regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!([]));
-    assert_eq!(clause_decodage(&backend), "");
-    assert_eq!(clause_hors_perimetre_decodage(&backend), "");
+    assert_eq!(clause_decodage(&backend, Passe::ReplayGain), "");
+    assert_eq!(
+        clause_hors_perimetre_decodage(&backend, Passe::ReplayGain),
+        ""
+    );
 }
 
 /// Une piste sans plage dynamique d'un genre écarté est comptée à part, comme
@@ -741,4 +759,228 @@ async fn aucune_passe_ne_decode_une_piste_d_un_genre_exclu() {
             .unwrap()
             .contains_key("rg_analyzed")
     );
+}
+
+// ── Étapes 2 et 3 (décisions de Bertrand du 13/10) ──────────────────────
+
+/// Un album de genre `genre` (colonne) et `genres` (tableau), d'id `id`.
+fn album_de_genre(db: &SqliteDb, id: i64, genre: Option<&str>, genres: Option<&str>) {
+    db.execute(
+        "INSERT INTO albums (id, title, artist_id, genre, genres) VALUES (?, 'Compil', 1, ?, ?)",
+        &[&id, &genre, &genres],
+    )
+    .unwrap();
+}
+
+/// Une piste de l'album `album`, de genre `genre`.
+fn piste_d_album(db: &SqliteDb, id: i64, album: i64, chemin: &str, genre: Option<&str>) {
+    db.execute(
+        "INSERT INTO tracks (id, title, album_id, artist_id, file_path, duration_ms, \
+         sample_rate, channels, genre) VALUES (?, 'T', ?, 1, ?, 1000, 44100, 2, ?)",
+        &[&id, &album, &chemin, &genre],
+    )
+    .unwrap();
+}
+
+/// Le genre se juge À L'ALBUM. Une compilation « Jazz » dont une piste porte
+/// « Podcast » est analysée EN ENTIER (son gain d'album reste calculable :
+/// toutes ses pistes sont candidates) ; un album « Podcast » sort en entier,
+/// même sa piste « Jazz » ; une piste d'un album SANS genre est jugée sur la
+/// sienne. Contre-épreuve : la liste levée, tout revient.
+#[test]
+fn une_compilation_aux_genres_meles_est_jugee_a_l_album() {
+    let (db, backend) = base();
+    album_de_genre(&db, 2, Some("Jazz"), None);
+    album_de_genre(&db, 3, None, Some(r#"["Talk","Podcast"]"#));
+    piste_d_album(&db, 10, 2, "/m/c/1.flac", Some("Jazz"));
+    piste_d_album(&db, 11, 2, "/m/c/2.flac", Some("Podcast"));
+    piste_d_album(&db, 20, 3, "/m/p/1.mp3", Some("Jazz"));
+    piste_d_album(&db, 21, 3, "/m/p/2.mp3", Some("Podcast"));
+    // L'album 1 de `base()` n'a pas de genre : ses pistes se jugent seules.
+    piste_d_album(&db, 30, 1, "/m/s/1.mp3", Some("Podcast"));
+    piste_d_album(&db, 31, 1, "/m/s/2.flac", Some("Jazz"));
+    assert_eq!(quatre_compteurs(&backend), (6, 6, Some(6), 6));
+
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!(["podcast"]));
+    assert_eq!(
+        ids(&backend, &clause_decodage(&backend, Passe::ReplayGain)),
+        vec![10, 11, 31],
+        "la compilation Jazz reste entière ; l'album Podcast sort entier ; \
+         l'album sans genre se juge piste par piste"
+    );
+    assert_eq!(
+        ids(
+            &backend,
+            &clause_hors_perimetre_decodage(&backend, Passe::ReplayGain)
+        ),
+        vec![20, 21, 30],
+        "le complément exact"
+    );
+    assert_eq!(quatre_compteurs(&backend), (3, 3, Some(3), 3));
+    assert_eq!(candidats_clap(&backend), vec![10, 11, 31]);
+
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!([]));
+    assert_eq!(quatre_compteurs(&backend), (6, 6, Some(6), 6));
+}
+
+/// Étape 2 — un périmètre PAR PASSE. Le commun exclut `/nas` ; le ReplayGain
+/// le reprend (`[]` remplace), les empreintes héritent du ReplayGain, la
+/// plage dynamique garde le commun, le CLAP écarte en plus un genre à lui.
+/// Contre-épreuve : le réglage par passe levé, toutes les passes reviennent
+/// au commun.
+#[test]
+fn chaque_passe_a_son_perimetre_et_herite_du_commun() {
+    let (db, backend) = base();
+    piste_de_genre(&db, 1, "/local/1.flac", Some("Jazz"), None);
+    piste_de_genre(&db, 2, "/nas/2.flac", Some("Jazz"), None);
+    piste_de_genre(&db, 3, "/local/3.flac", Some("Rock"), None);
+    regler(&backend, CLE_RACINES_EXCLUES, serde_json::json!(["/nas"]));
+    assert_eq!(
+        quatre_compteurs(&backend),
+        (2, 2, Some(2), 2),
+        "le commun seul"
+    );
+
+    regler(
+        &backend,
+        CLE_PAR_PASSE,
+        serde_json::json!({
+            "replaygain": { "excluded_roots": [] },
+            "audio_embedding": { "excluded_genres": ["Rock"] }
+        }),
+    );
+    assert_eq!(
+        quatre_compteurs(&backend),
+        (3, 2, Some(3), 1),
+        "RG reprend /nas, les empreintes suivent RG, la DR garde le commun, \
+         le CLAP garde /nas ET écarte Rock"
+    );
+    assert_eq!(
+        perimetre_de(&backend, Passe::Empreintes),
+        perimetre_de(&backend, Passe::ReplayGain)
+    );
+    assert_eq!(candidats_clap(&backend), vec![1]);
+    assert_eq!(
+        ids(
+            &backend,
+            &clause_hors_perimetre_decodage(&backend, Passe::PlageDynamique)
+        ),
+        vec![2]
+    );
+    assert_eq!(
+        clause_hors_perimetre_decodage(&backend, Passe::ReplayGain),
+        ""
+    );
+
+    // Les empreintes peuvent avoir le leur, qui prime sur l'héritage.
+    regler(
+        &backend,
+        CLE_PAR_PASSE,
+        serde_json::json!({
+            "replaygain": { "excluded_roots": [] },
+            "fingerprints": { "excluded_roots": ["/local"] }
+        }),
+    );
+    assert_eq!(quatre_compteurs(&backend), (3, 2, Some(1), 2));
+
+    regler(&backend, CLE_PAR_PASSE, serde_json::json!({}));
+    assert_eq!(quatre_compteurs(&backend), (2, 2, Some(2), 2));
+}
+
+/// La forme de `background_analysis_scope_by_pass` : passes et champs connus,
+/// `null` hérite (retiré), le reste refusé en nommant la faute.
+#[test]
+fn normaliser_par_passe_garde_la_forme_unique() {
+    assert_eq!(
+        normaliser_par_passe(&serde_json::Value::Null).unwrap(),
+        serde_json::json!({})
+    );
+    assert_eq!(
+        normaliser_par_passe(&serde_json::json!({
+            "replaygain": { "excluded_roots": [" /nas ", "/nas", ""], "excluded_genres": null },
+            "dynamic_range": null,
+            "fingerprints": {},
+            "audio_embedding": { "excluded_genres": [] }
+        }))
+        .unwrap(),
+        serde_json::json!({
+            "replaygain": { "excluded_roots": ["/nas"] },
+            "audio_embedding": { "excluded_genres": [] }
+        })
+    );
+    for (mauvais, faute) in [
+        (serde_json::json!([]), "objet"),
+        (serde_json::json!({ "clap": {} }), "passe inconnue"),
+        (serde_json::json!({ "replaygain": [] }), "replaygain"),
+        (
+            serde_json::json!({ "replaygain": { "roots": [] } }),
+            "champ inconnu",
+        ),
+        (
+            serde_json::json!({ "replaygain": { "excluded_roots": "/nas" } }),
+            "replaygain.excluded_roots",
+        ),
+    ] {
+        let e = normaliser_par_passe(&mauvais).unwrap_err();
+        assert!(e.contains(faute), "{mauvais} : {e}");
+    }
+    // Une valeur illisible en base vaut « tout hérite ».
+    let (db, backend) = base();
+    piste(&db, 1, "/nas/1.flac");
+    regler(&backend, CLE_RACINES_EXCLUES, serde_json::json!(["/nas"]));
+    regler(
+        &backend,
+        CLE_PAR_PASSE,
+        serde_json::json!({ "replaygain": 3 }),
+    );
+    assert_eq!(
+        perimetre_de(&backend, Passe::ReplayGain).dossiers,
+        vec!["/nas"]
+    );
+}
+
+/// Étape 3 — combien de pistes chaque entrée retire, commun et par passe ;
+/// une entrée mal orthographiée compte 0. Les genres se comptent à l'album,
+/// comme ils s'appliquent.
+#[test]
+fn chaque_entree_dit_combien_de_pistes_elle_retire() {
+    let (db, backend) = base();
+    album_de_genre(&db, 2, Some("Jazz"), None);
+    piste_d_album(&db, 10, 2, "/nas/c/1.flac", Some("Jazz"));
+    piste_d_album(&db, 11, 2, "/nas/c/2.flac", Some("Podcast"));
+    piste_d_album(&db, 30, 1, "/local/1.mp3", Some("Podcast"));
+    piste_d_album(&db, 31, 1, "/local/2.mp3", Some("Podcast"));
+    regler(
+        &backend,
+        CLE_RACINES_EXCLUES,
+        serde_json::json!(["/nas", "/nsa"]),
+    );
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!(["Podcast"]));
+    regler(
+        &backend,
+        CLE_PAR_PASSE,
+        serde_json::json!({ "dynamic_range": { "excluded_roots": ["/local"] } }),
+    );
+    let (commun, par_passe) = compter_les_retraits(&backend);
+    let n = |r: &[Retrait]| {
+        r.iter()
+            .map(|x| (x.value.clone(), x.tracks))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        n(&commun.excluded_roots),
+        vec![("/nas".to_string(), 2), ("/nsa".to_string(), 0)]
+    );
+    assert_eq!(
+        n(&commun.excluded_genres),
+        vec![("Podcast".to_string(), 2)],
+        "la piste Podcast de la compilation Jazz n'est pas retirée"
+    );
+    assert_eq!(par_passe.len(), 1);
+    assert_eq!(par_passe[0].0, Passe::PlageDynamique);
+    assert_eq!(
+        n(&par_passe[0].1.excluded_roots),
+        vec![("/local".to_string(), 2)]
+    );
+    assert!(par_passe[0].1.excluded_genres.is_empty());
 }

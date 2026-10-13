@@ -453,6 +453,13 @@ pub(super) async fn get_config(
             tune_core::taches_de_fond::perimetre::CLE_GENRES_EXCLUS,
             json!([]),
         ),
+        // Étape 2 — le périmètre propre à chaque passe. Vide par défaut :
+        // toutes les passes héritent du périmètre commun (les empreintes, du
+        // ReplayGain).
+        (
+            tune_core::taches_de_fond::perimetre::CLE_PAR_PASSE,
+            json!({}),
+        ),
         // #6198 — les genres de la passe CLAP : retenus (vide : tous) et
         // écartés (vide : aucun). Ils ne touchent que le CLAP.
         (
@@ -1256,7 +1263,45 @@ fn normaliser_perimetre_des_analyses(
         values.insert(cle.to_string(), json!(liste));
         touche = true;
     }
+    // Étape 2 — le périmètre par passe, même règle : une seule forme en base,
+    // 400 sinon. Il touche le ReplayGain : la campagne se referme aussi.
+    let cle = tune_core::taches_de_fond::perimetre::CLE_PAR_PASSE;
+    if let Some(brut) = values.get(cle) {
+        let propre = tune_core::taches_de_fond::perimetre::normaliser_par_passe(brut)
+            .map_err(|e| AppError::bad_request(format!("{cle} : {e}")))?;
+        values.insert(cle.to_string(), propre);
+        touche = true;
+    }
     Ok(touche)
+}
+
+/// Étape 3 du chantier périmètre — `GET /system/analysis-scope/counts` :
+/// combien de pistes chaque dossier ou genre exclu retire, pour le périmètre
+/// commun et pour le réglage propre de chaque passe. Une entrée mal
+/// orthographiée se lit 0.
+///
+/// ```json
+/// { "common": { "excluded_roots": [{"value": "/nas", "tracks": 4212}],
+///               "excluded_genres": [{"value": "Podcast", "tracks": 31}] },
+///   "by_pass": { "dynamic_range": { "excluded_roots": [...], "excluded_genres": [] } } }
+/// ```
+///
+/// Les comptes sont posés hors de l'exécuteur (`spawn_blocking`) : un
+/// parcours de `tracks` sur une grande bibliothèque.
+pub(super) async fn analysis_scope_counts(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    let backend = state.backend.clone();
+    let (commun, par_passe) = tokio::task::spawn_blocking(move || {
+        tune_core::taches_de_fond::perimetre::compter_les_retraits(&backend)
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("comptage du périmètre : {e}")))?;
+    let mut by_pass = serde_json::Map::new();
+    for (passe, r) in par_passe {
+        by_pass.insert(passe.id().to_string(), json!(r));
+    }
+    Ok(Json(json!({ "common": commun, "by_pass": by_pass })))
 }
 
 /// #6198 — les genres de la passe CLAP, retenus et écartés : la même forme
@@ -5897,5 +5942,133 @@ mod perimetre_des_analyses_5593_tests {
                 "{CLE_GENRES_EXCLUS} = {mauvais}"
             );
         }
+    }
+
+    /// Étape 2 — le périmètre par passe : publié `{}` par défaut, normalisé
+    /// (un `null` hérite, il disparaît), relu tel quel par le moteur ; une
+    /// forme inconnue est refusée en nommant la clé ; le poser referme la
+    /// campagne ReplayGain (`Ok(true)`).
+    #[tokio::test]
+    async fn le_perimetre_par_passe_est_publie_normalise_et_relu() {
+        use tune_core::taches_de_fond::perimetre::{CLE_PAR_PASSE, Passe, perimetre_de};
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let c = config(&state).await;
+        assert_eq!(c[CLE_PAR_PASSE], json!({}), "{c}");
+
+        let mut v: serde_json::Map<String, Value> = json!({
+            CLE_PAR_PASSE: {
+                "replaygain": { "excluded_roots": [" /nas ", "/nas"], "excluded_genres": null },
+                "dynamic_range": null
+            },
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(matches!(
+            normaliser_perimetre_des_analyses(&mut v),
+            Ok(true)
+        ));
+        let settings = SettingsRepo::with_backend(state.backend.clone());
+        for (k, val) in v {
+            settings.set(&k, &val.to_string()).unwrap();
+        }
+        let c = config(&state).await;
+        assert_eq!(
+            c[CLE_PAR_PASSE],
+            json!({ "replaygain": { "excluded_roots": ["/nas"] } }),
+            "{c}"
+        );
+        assert_eq!(
+            perimetre_de(&state.backend, Passe::ReplayGain).dossiers,
+            vec!["/nas"]
+        );
+        assert_eq!(
+            perimetre_de(&state.backend, Passe::Empreintes).dossiers,
+            vec!["/nas"],
+            "les empreintes suivent le ReplayGain"
+        );
+        assert!(
+            perimetre_de(&state.backend, Passe::PlageDynamique)
+                .dossiers
+                .is_empty()
+        );
+
+        for mauvais in [
+            json!([]),
+            json!({ "clap": {} }),
+            json!({ "replaygain": { "excluded_roots": "/nas" } }),
+        ] {
+            let mut v: serde_json::Map<String, Value> = json!({ CLE_PAR_PASSE: mauvais.clone() })
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(
+                normaliser_perimetre_des_analyses(&mut v).is_err(),
+                "{CLE_PAR_PASSE} = {mauvais}"
+            );
+        }
+    }
+
+    /// Étape 3 — `GET /system/analysis-scope/counts` : ce que retire chaque
+    /// entrée, commun et par passe ; une faute de frappe se lit 0.
+    #[tokio::test]
+    async fn la_route_dit_combien_de_pistes_chaque_entree_retire() {
+        use tune_core::taches_de_fond::perimetre::{CLE_GENRES_EXCLUS, CLE_PAR_PASSE};
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let b = &state.backend;
+        b.execute("INSERT INTO artists (id, name) VALUES (1, 'A')", &[])
+            .unwrap();
+        b.execute(
+            "INSERT INTO albums (id, title, artist_id) VALUES (1, 'D', 1)",
+            &[],
+        )
+        .unwrap();
+        for (id, chemin, genre) in [
+            (1, "/nas/1.flac", "Jazz"),
+            (2, "/nas/2.flac", "Podcast"),
+            (3, "/local/3.flac", "Podcast"),
+        ] {
+            b.execute(
+                "INSERT INTO tracks (id, title, album_id, artist_id, file_path, duration_ms, \
+                 sample_rate, channels, genre) VALUES (?, 'T', 1, 1, ?, 1000, 44100, 2, ?)",
+                &[&id, &chemin, &genre],
+            )
+            .unwrap();
+        }
+        let settings = SettingsRepo::with_backend(b.clone());
+        settings
+            .set(CLE_RACINES_EXCLUES, &json!(["/nas", "/nsa"]).to_string())
+            .unwrap();
+        settings
+            .set(CLE_GENRES_EXCLUS, &json!(["Podcast"]).to_string())
+            .unwrap();
+        settings
+            .set(
+                CLE_PAR_PASSE,
+                &json!({ "audio_embedding": { "excluded_genres": ["Jazz"] } }).to_string(),
+            )
+            .unwrap();
+        let Ok(r) = super::analysis_scope_counts(State(state.clone())).await else {
+            panic!("la route du comptage a échoué");
+        };
+        let r = r.0;
+        assert_eq!(
+            r,
+            json!({
+                "common": {
+                    "excluded_roots": [
+                        { "value": "/nas", "tracks": 2 },
+                        { "value": "/nsa", "tracks": 0 }
+                    ],
+                    "excluded_genres": [{ "value": "Podcast", "tracks": 2 }]
+                },
+                "by_pass": {
+                    "audio_embedding": {
+                        "excluded_roots": [],
+                        "excluded_genres": [{ "value": "Jazz", "tracks": 1 }]
+                    }
+                }
+            })
+        );
     }
 }

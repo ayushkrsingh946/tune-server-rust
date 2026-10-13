@@ -76,7 +76,10 @@ pub const TRUE_PEAK_ECHEC_KEY: &str = "rg_true_peak_echec";
 /// a jamais décodés et n'a jamais écrit leur crête. Les pistes CUE aussi :
 /// elles n'ont jamais de mesure de Tune (voir `analyze_track_batch`).
 fn candidats_where(backend: &Arc<dyn DbBackend>) -> String {
-    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(backend);
+    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::ReplayGain,
+    );
     format!(
         "t.file_path IS NOT NULL AND t.file_path != '' \
          AND EXISTS (SELECT 1 FROM track_metadata s WHERE s.track_id = t.id \

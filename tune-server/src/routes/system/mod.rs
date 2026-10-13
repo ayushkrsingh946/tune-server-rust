@@ -130,6 +130,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/artist-split-preview", get(scan::artist_split_preview))
         .route("/background-tasks", get(enrich::background_tasks_status))
+        // Chantier périmètre des analyses, étape 3 : ce que retire chaque entrée.
+        .route("/analysis-scope/counts", get(config::analysis_scope_counts))
         // Suspendre et reprendre les traitements de fond (#4574). Le scan avait
         // `/scan/cancel` ; le ReplayGain, la plage dynamique, l'analyse
         // acoustique, l'enrichissement et les images d'artistes n'avaient
