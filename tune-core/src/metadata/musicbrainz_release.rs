@@ -1116,6 +1116,34 @@ const ARTISTES_FICTIFS: &[&str] = &[
     "artista desconocido",
 ];
 
+/// Les titres d'album qui n'en sont pas, normalisés par [`normalize`].
+const TITRES_FICTIFS: &[&str] = &[
+    "unknown",
+    "unknown album",
+    "album inconnu",
+    "untitled",
+    "sans titre",
+    "no title",
+    "album",
+];
+
+/// `true` pour un titre d'album qui n'en est pas : `Unknown Album`,
+/// `Untitled`, ou un simple numéro de disque (`Disque 1`, `CD 2`). Sert à ne
+/// pas chercher un tel titre SANS artiste (#4805) : la recherche ramènerait
+/// un pressage quelconque du même nom.
+pub fn est_un_titre_fictif(titre: &str) -> bool {
+    let n = normalize(titre);
+    if n.is_empty() || TITRES_FICTIFS.contains(&n.as_str()) {
+        return true;
+    }
+    let sans_chiffres = n.trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ');
+    sans_chiffres.len() < n.len()
+        && MOTS_DE_DISQUE
+            .iter()
+            .chain(&["disk", "track"])
+            .any(|m| sans_chiffres == *m)
+}
+
 /// `true` pour un artiste qui n'en est pas (`Unknown Artist`, chaîne vide…).
 pub fn est_un_artiste_fictif(nom: &str) -> bool {
     let n = normalize(nom);
@@ -1336,6 +1364,11 @@ where
 {
     if title.trim().is_empty() {
         // Rien n'a été demandé à MusicBrainz, et ce n'est pas sa faute.
+        return RechercheDePressages::repondue(Vec::new());
+    }
+    // Sans artiste, un titre qui n'en est pas un (`Unknown Album`, `Disque 1`)
+    // ramènerait n'importe quel pressage du même nom : on ne demande rien.
+    if artist.trim().is_empty() && est_un_titre_fictif(title) {
         return RechercheDePressages::repondue(Vec::new());
     }
 
@@ -2661,6 +2694,38 @@ mod tests {
         ] {
             assert_eq!(artiste_de_requete(Some(intact), None), intact, "{intact}");
         }
+    }
+
+    /// Sans artiste, un titre fictif ne part pas chez MusicBrainz ; un vrai
+    /// titre, si.
+    #[tokio::test(start_paused = true)]
+    async fn un_titre_fictif_n_est_pas_cherche_sans_artiste() {
+        for fictif in ["Unknown Album", "Disque 1", "CD 2", "Untitled", "Album"] {
+            assert!(est_un_titre_fictif(fictif), "{fictif}");
+        }
+        for vrai in [
+            "Mosaic",
+            "Disque d'or",
+            "CD Single",
+            "Album 1700",
+            "Caravan",
+        ] {
+            assert!(!est_un_titre_fictif(vrai), "{vrai}");
+        }
+        let vues = std::cell::RefCell::new(Vec::new());
+        for titre in ["Unknown Album", "Mosaic"] {
+            let r = recherche_de_pressages_complete(titre, "", Some(9), 15, |requete, _| {
+                vues.borrow_mut().push(requete);
+                std::future::ready(Ok(json!({ "releases": [] })))
+            })
+            .await;
+            assert!(r.candidats.is_empty() && r.refus.is_none());
+        }
+        assert_eq!(
+            *vues.borrow(),
+            vec![r#"release:"Mosaic""#.to_string()],
+            "un titre fictif sans artiste ne part pas ; un vrai titre, si"
+        );
     }
 
     /// #4805, introuvables de la mesure A : la balise sans accents, le
