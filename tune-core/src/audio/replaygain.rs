@@ -6655,6 +6655,7 @@ mod tests {
             interne: interne.clone(),
             lectures: std::sync::atomic::AtomicUsize::new(0),
             demarre_apres: 1,
+            lenteur: std::time::Duration::ZERO,
         });
         let backend: Arc<dyn DbBackend> = veilleur.clone();
 
@@ -6730,6 +6731,7 @@ mod tests {
             interne: interne.clone(),
             lectures: std::sync::atomic::AtomicUsize::new(0),
             demarre_apres: 2,
+            lenteur: std::time::Duration::ZERO,
         });
         let backend: Arc<dyn DbBackend> = veilleur.clone();
 
