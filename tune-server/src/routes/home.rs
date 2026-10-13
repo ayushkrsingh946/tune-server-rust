@@ -154,7 +154,7 @@ fn ph(engine: Engine, idx: usize) -> String {
 /// web#916 (go du 13/10/2026) — la page composée suit les mêmes règles que
 /// les routes qu'elle agrège : chaque élément porte sa `raison`, et ce que le
 /// profil qui regarde (`X-Profile-Id`) a écarté n'est plus proposé (reprises,
-/// plus écoutés, à découvrir ; les ajouts récents restent factuels). Les
+/// plus écoutés, radios, à découvrir ; les ajouts récents restent factuels). Les
 /// titres de section suivent la langue de l'interface (`Accept-Language`) au
 /// lieu d'être écrits en français ; `id` reste la clé stable.
 async fn home_page(
@@ -184,7 +184,7 @@ async fn home_page(
         })
         .collect();
     top_tracks.truncate(20);
-    let radios = fetch_radio_picks(&state)?;
+    let radios = radios_du_profil(&state, &ecartees)?;
     let discover = recommandations_du_profil(&state, &ecartees, 20)?;
     let titre = |cle: &str| crate::i18n::t(&lang, cle);
 
@@ -2744,9 +2744,27 @@ mod tests_other_versions {
 }
 
 /// Favorite radios + recently played radios.
-async fn radio_picks(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    let items = fetch_radio_picks(&state)?;
-    Ok(Json(json!(items)))
+///
+/// web#916 (décision du 13/10/2026) — une station que le profil qui regarde a
+/// écartée (« Pas pour moi ») n'y revient plus.
+async fn radio_picks(
+    State(state): State<AppState>,
+    profile: crate::routes::active_profile::ActiveProfile,
+) -> Result<Json<Value>, AppError> {
+    let ecartees = super::accueil_justifie::ecartees_du_profil(&state, &profile);
+    Ok(Json(json!(radios_du_profil(&state, &ecartees)?)))
+}
+
+/// Les radios de l'accueil pour un profil : sans celles qu'il a écartées.
+fn radios_du_profil(
+    state: &AppState,
+    ecartees: &tune_core::db::suggestions_ecartees::Ecartees,
+) -> Result<Vec<Value>, AppError> {
+    let mut items = fetch_radio_picks(state)?;
+    if !ecartees.est_vide() {
+        items.retain(|r| !r["id"].as_i64().is_some_and(|id| ecartees.radio(id)));
+    }
+    Ok(items)
 }
 
 fn fetch_radio_picks(state: &AppState) -> Result<Vec<Value>, AppError> {

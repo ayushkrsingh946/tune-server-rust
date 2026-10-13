@@ -24,7 +24,9 @@
 //!  (i) `/home/top-mixes` porte `raison: genre_frequent` par mix, et ses
 //!      pistes n'incluent plus un album écarté ;
 //!  (j) `/home` (page composée) parle la langue de l'interface et filtre
-//!      « À découvrir » et les reprises par profil.
+//!      « À découvrir » et les reprises par profil ;
+//!  (k) une RADIO écartée (décision du 13/10/2026) quitte `/home/radio-picks`
+//!      et la section `radios` de `/home`, pour ce profil seulement.
 //!
 //! ⚠️ `tune-server` porte `autotests = false` — ce fichier n'est compilé que
 //! par sa cible `[[test]]` dans `Cargo.toml`.
@@ -479,4 +481,67 @@ async fn la_page_composee_parle_la_langue_et_filtre_par_profil() {
         vec![2, 3],
         "profil 2 : {fr}"
     );
+}
+
+#[tokio::test]
+async fn une_radio_ecartee_quitte_l_accueil_du_profil() {
+    let (app, state) = app_et_etat();
+    ProfileRepo::with_backend(state.backend.clone())
+        .create("voisin", Some("Le voisin"), None)
+        .expect("profil 2");
+    sql(
+        &state,
+        "INSERT INTO radio_stations (id, name, url, is_favorite, last_played) VALUES \
+         (9007, 'FIP', 'http://exemple.test/fip', 1, NULL), \
+         (9008, 'Récente', 'http://exemple.test/rec', 0, '2026-10-12T12:00:00Z')",
+    );
+    let ids = |v: &Value| {
+        let mut i: Vec<i64> = v
+            .as_array()
+            .expect("tableau")
+            .iter()
+            .filter_map(|r| r["id"].as_i64())
+            // Le catalogue livré peut avoir semé ses propres stations.
+            .filter(|id| *id >= 9007)
+            .collect();
+        i.sort();
+        i
+    };
+    let (st, v) = appel(&app, "GET", "/api/v1/home/radio-picks", "1", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(ids(&v), vec![9007, 9008], "{v}");
+    let recente = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(9008))
+        .unwrap();
+    assert_eq!(
+        recente["raison"],
+        json!({"type": "radio_ecoutee", "ecoute_le": 1_791_806_400_i64}),
+        "{recente}"
+    );
+
+    ecarter(
+        &app,
+        "1",
+        json!({"item_type": "radio", "source": "local", "item_id": "9007"}),
+    )
+    .await;
+    let (_, v) = appel(&app, "GET", "/api/v1/home/radio-picks", "1", None).await;
+    assert_eq!(ids(&v), vec![9008], "FIP écartée par le profil 1 : {v}");
+    let (_, v) = appel(&app, "GET", "/api/v1/home/radio-picks", "2", None).await;
+    assert_eq!(
+        ids(&v),
+        vec![9007, 9008],
+        "le profil 2 n'a rien écarté : {v}"
+    );
+    let (_, page) = appel(&app, "GET", "/api/v1/home", "1", None).await;
+    let radios = page["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == json!("radios"))
+        .expect("section radios");
+    assert_eq!(ids(&radios["items"]), vec![9008], "{page}");
 }

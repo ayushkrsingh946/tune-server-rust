@@ -44,8 +44,8 @@
 //! SQLite 125 / PG 089). Les rangées de RECOMMANDATION — recommandations,
 //! nouveautés de vos artistes, autres versions — ne proposent plus ce que le
 //! profil a écarté. Depuis le go du 13/10, « Continuer l'écoute », les mix
-//! par genre et la page composée `/home` aussi (reprises, plus écoutés, à
-//! découvrir). Les AJOUTS RÉCENTS ne filtrent pas : un album ajouté hier
+//! par genre, les radios (`/home/radio-picks`) et la page composée `/home`
+//! aussi (reprises, plus écoutés, radios, à découvrir). Les AJOUTS RÉCENTS ne filtrent pas : un album ajouté hier
 //! reste ajouté hier.
 
 use axum::Json;
@@ -260,8 +260,8 @@ pub(crate) async fn ecarter(
             "item": rangee,
         }))),
         None => Err(AppError::bad_request(
-            "item_type must be album, artist or playlist, with a usable item_id \
-             (a library album id, a service source_id, or an artist name); \
+            "item_type must be album, artist, playlist or radio, with a usable item_id \
+             (a library album or radio id, a service source_id, or an artist name); \
              a playlist must come from a streaming service",
         )),
     }

@@ -7,7 +7,7 @@
 //!
 //! # Ce qu'on écarte
 //!
-//! Trois sortes d'objets, et rien d'autre :
+//! Quatre sortes d'objets, et rien d'autre :
 //!
 //! | `item_type` | `source`              | `item_id`                       |
 //! |-------------|-----------------------|---------------------------------|
@@ -15,6 +15,7 @@
 //! | `album`     | un service (`qobuz`…) | son `source_id` chez le service  |
 //! | `playlist`  | un service            | son `source_id` chez le service  |
 //! | `artist`    | `nom`                 | le NOM normalisé ([`nom_normalise`]) |
+//! | `radio`     | `local`               | l'`radio_stations.id` (13/10/2026) |
 //!
 //! Un artiste se désigne par son NOM, et non par un identifiant : les rangées
 //! qui le proposent (« Nouveautés de vos artistes », recommandations) n'en
@@ -79,6 +80,9 @@ pub const TYPE_ALBUM: &str = "album";
 pub const TYPE_ARTISTE: &str = "artist";
 /// Une playlist de SERVICE.
 pub const TYPE_PLAYLIST: &str = "playlist";
+/// Une station de radio de Tune (`radio_stations.id`) — décision du
+/// 13/10/2026 : les radios de l'accueil s'écartent aussi.
+pub const TYPE_RADIO: &str = "radio";
 
 /// La source d'un album de la bibliothèque.
 pub const SOURCE_LOCALE: &str = "local";
@@ -144,6 +148,13 @@ pub fn normaliser(s: &SuggestionEcartee) -> Option<SuggestionEcartee> {
             (SOURCE_LOCALE.to_string(), id.to_string())
         }
         TYPE_ALBUM => (source, brut.to_string()),
+        // Une station se désigne par son id local : `radio_stations` n'est
+        // pas rebâtie par le scan, l'id ne meurt pas sous elle.
+        TYPE_RADIO if source.is_empty() || source == SOURCE_LOCALE => {
+            let id: i64 = brut.parse().ok().filter(|n| *n > 0)?;
+            (SOURCE_LOCALE.to_string(), id.to_string())
+        }
+        TYPE_RADIO => return None,
         TYPE_PLAYLIST if source.is_empty() || source == SOURCE_LOCALE || source == SOURCE_NOM => {
             return None;
         }
@@ -180,17 +191,21 @@ pub struct Ecartees {
     /// `(item_type, source, item_id)` des objets de service.
     distants: HashSet<(String, String, String)>,
     artistes: HashSet<String>,
+    radios: HashSet<i64>,
 }
 
 impl Ecartees {
     pub fn est_vide(&self) -> bool {
-        self.albums_locaux.is_empty() && self.distants.is_empty() && self.artistes.is_empty()
+        self.albums_locaux.is_empty()
+            && self.distants.is_empty()
+            && self.artistes.is_empty()
+            && self.radios.is_empty()
     }
 
     /// Combien d'objets sont écartés — la marge qu'une rangée demande en plus
     /// à sa requête pour rester pleine après filtrage.
     pub fn len(&self) -> usize {
-        self.albums_locaux.len() + self.distants.len() + self.artistes.len()
+        self.albums_locaux.len() + self.distants.len() + self.artistes.len() + self.radios.len()
     }
 
     pub fn album_local(&self, id: i64) -> bool {
@@ -203,6 +218,10 @@ impl Ecartees {
 
     pub fn playlist_de_service(&self, source: &str, source_id: &str) -> bool {
         self.distant(TYPE_PLAYLIST, source, source_id)
+    }
+
+    pub fn radio(&self, id: i64) -> bool {
+        self.radios.contains(&id)
     }
 
     pub fn artiste(&self, nom: &str) -> bool {
@@ -227,6 +246,11 @@ impl Ecartees {
             (TYPE_ALBUM, SOURCE_LOCALE) => {
                 if let Ok(id) = s.item_id.parse() {
                     self.albums_locaux.insert(id);
+                }
+            }
+            (TYPE_RADIO, _) => {
+                if let Ok(id) = s.item_id.parse() {
+                    self.radios.insert(id);
                 }
             }
             _ => {
@@ -315,15 +339,14 @@ impl SuggestionsEcarteesRepo {
         };
         // L'identité d'un album local vivant, lue en base : c'est elle que la
         // réconciliation suivra si l'id meurt au rescan.
-        if n.item_type == TYPE_ALBUM && n.source == SOURCE_LOCALE {
-            if let Ok(id) = n.item_id.parse::<i64>() {
-                if let Some((titre, artiste)) = album_live_identity(self.db.as_ref(), id)? {
-                    if !titre.trim().is_empty() {
-                        n.title = Some(titre);
-                        n.subtitle = (!artiste.trim().is_empty()).then_some(artiste);
-                    }
-                }
-            }
+        if n.item_type == TYPE_ALBUM
+            && n.source == SOURCE_LOCALE
+            && let Ok(id) = n.item_id.parse::<i64>()
+            && let Some((titre, artiste)) = album_live_identity(self.db.as_ref(), id)?
+            && !titre.trim().is_empty()
+        {
+            n.title = Some(titre);
+            n.subtitle = (!artiste.trim().is_empty()).then_some(artiste);
         }
         let sql = self.dialect_sql(sql::ecarter, sql::ecarter);
         let params: [&dyn ToSqlValue; 7] = [
@@ -579,6 +602,10 @@ mod tests {
         assert!(normaliser(&s("playlist", "", "3")).is_none());
         assert!(normaliser(&s("track", "qobuz", "3")).is_none());
         assert!(normaliser(&s("album", "nom", "x")).is_none());
+        assert!(normaliser(&s("radio", "local", "fip")).is_none());
+        assert!(normaliser(&s("radio", "qobuz", "7")).is_none());
+        let r = normaliser(&s("radio", "", " 7 ")).unwrap();
+        assert_eq!((r.source.as_str(), r.item_id.as_str()), ("local", "7"));
         let a = normaliser(&s("artist", "", "  Miles   DAVIS ")).unwrap();
         assert_eq!(
             (a.source.as_str(), a.item_id.as_str()),
@@ -622,6 +649,11 @@ mod tests {
             "une playlist n'est pas un album"
         );
         assert!(r.ensemble(2).est_vide());
+
+        assert!(r.ecarter(1, &s("radio", "local", "7")).unwrap().is_some());
+        let e = r.ensemble(1);
+        assert!(e.radio(7) && !e.radio(8) && !e.album_local(7));
+        assert!(r.retablir(1, &s("radio", "local", "7")).unwrap());
 
         assert!(r.retablir(1, &s("album", "local", "42")).unwrap());
         assert!(!r.retablir(1, &s("album", "local", "42")).unwrap());
