@@ -49,6 +49,19 @@
 //! Réglages (« Suggestions écartées ») doit pouvoir dire QUOI a été écarté
 //! sans réinterroger un service, ni retrouver un album dont l'id aurait
 //! changé.
+//!
+//! # Un album local survit au rescan (go du 13/10/2026)
+//!
+//! Un album local se désigne par son `albums.id`, et un id meurt quand la
+//! racine est déplacée ou la bibliothèque vidée puis rescannée. Même
+//! mécanique que `hidden_items` ([`super::hidden_repo::HiddenRepo::reconcile`]),
+//! et SANS colonne de plus : l'instantané `title` / `subtitle` EST l'identité
+//! (titre de l'album, nom de son artiste). C'est pourquoi l'écart d'un album
+//! local vivant fige le titre et l'artiste LUS EN BASE, et non ce que le
+//! client a affiché sous la vignette : une ligne de raison n'est pas un nom
+//! d'artiste. [`SuggestionsEcarteesRepo::reconcile`] re-rattache ensuite par
+//! [`super::favorites_reconcile::find_album_by_identity`], aux mêmes ancrages
+//! que les albums masqués (démarrage, fin de scan, scan auto, purge).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -58,6 +71,7 @@ use tracing::info;
 
 use super::backend::{DbBackend, ToSqlValue};
 use super::engine::{Engine, PostgresDialect, SqlDialect, SqliteDialect};
+use super::favorites_reconcile::{ReconcileStats, album_live_identity, find_album_by_identity};
 
 /// Un album, local ou de service.
 pub const TYPE_ALBUM: &str = "album";
@@ -204,7 +218,8 @@ impl Ecartees {
             ))
     }
 
-    fn ajouter(&mut self, s: &SuggestionEcartee) {
+    /// Ajoute une désignation rangée (déjà normalisée) à l'ensemble.
+    pub fn ajouter(&mut self, s: &SuggestionEcartee) {
         match (s.item_type.as_str(), s.source.as_str()) {
             (TYPE_ARTISTE, _) => {
                 self.artistes.insert(nom_normalise(&s.item_id));
@@ -295,9 +310,21 @@ impl SuggestionsEcarteesRepo {
         profile_id: i64,
         s: &SuggestionEcartee,
     ) -> Result<Option<SuggestionEcartee>, String> {
-        let Some(n) = normaliser(s) else {
+        let Some(mut n) = normaliser(s) else {
             return Ok(None);
         };
+        // L'identité d'un album local vivant, lue en base : c'est elle que la
+        // réconciliation suivra si l'id meurt au rescan.
+        if n.item_type == TYPE_ALBUM && n.source == SOURCE_LOCALE {
+            if let Ok(id) = n.item_id.parse::<i64>() {
+                if let Some((titre, artiste)) = album_live_identity(self.db.as_ref(), id)? {
+                    if !titre.trim().is_empty() {
+                        n.title = Some(titre);
+                        n.subtitle = (!artiste.trim().is_empty()).then_some(artiste);
+                    }
+                }
+            }
+        }
         let sql = self.dialect_sql(sql::ecarter, sql::ecarter);
         let params: [&dyn ToSqlValue; 7] = [
             &profile_id,
@@ -352,6 +379,127 @@ impl SuggestionsEcarteesRepo {
             .collect())
     }
 
+    /// Re-rattache les albums LOCAUX écartés dont l'id a disparu, par leur
+    /// instantané (`title` = titre, `subtitle` = artiste) — la mécanique de
+    /// [`super::hidden_repo::HiddenRepo::reconcile`], pour la même raison.
+    ///
+    /// `delete_unresolved` n'est vrai qu'après un scan COMPLET et sain : c'est
+    /// la seule situation où « introuvable » veut dire « n'existe plus ». Au
+    /// démarrage ou sur un scan partiel, l'écart orphelin est CONSERVÉ — un
+    /// volume pas encore monté peut ramener l'album, et un album écarté qui
+    /// revient dans les suggestions est précisément ce que l'auditeur a
+    /// refusé.
+    ///
+    /// Ne touche ni aux artistes (désignés par leur nom) ni aux objets de
+    /// service (leur `source_id` ne dépend pas du scan).
+    pub fn reconcile(&self, delete_unresolved: bool) -> Result<ReconcileStats, String> {
+        let params: [&dyn ToSqlValue; 2] = [&TYPE_ALBUM, &SOURCE_LOCALE];
+        let rows = self.db.query_many(
+            "SELECT profile_id, item_id, title, subtitle FROM suggestions_ecartees \
+             WHERE item_type = ? AND source = ?",
+            &params,
+        )?;
+        let mut stats = ReconcileStats::default();
+        for row in &rows {
+            let Some(profile_id) = row.first().and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let Some(item_id) = row.get(1).and_then(|v| v.as_string()) else {
+                continue;
+            };
+            let Ok(album_id) = item_id.parse::<i64>() else {
+                continue;
+            };
+            stats.scanned += 1;
+            let titre = row.get(2).and_then(|v| v.as_string()).unwrap_or_default();
+            let artiste = row.get(3).and_then(|v| v.as_string()).unwrap_or_default();
+
+            if let Some((t, a)) = album_live_identity(self.db.as_ref(), album_id)? {
+                // Vivant : au plus un instantané à rattraper (écart posé
+                // avant que l'identité ne soit figée en base).
+                if titre.trim().is_empty() && !t.trim().is_empty() {
+                    let a = (!a.trim().is_empty()).then_some(a);
+                    let params: [&dyn ToSqlValue; 6] =
+                        [&t, &a, &profile_id, &TYPE_ALBUM, &SOURCE_LOCALE, &item_id];
+                    self.db.execute(
+                        "UPDATE suggestions_ecartees SET title = ?, subtitle = ? \
+                         WHERE profile_id = ? AND item_type = ? AND source = ? AND item_id = ?",
+                        &params,
+                    )?;
+                    stats.snapshots_backfilled += 1;
+                }
+                continue;
+            }
+
+            let cible = if titre.trim().is_empty() {
+                None
+            } else {
+                find_album_by_identity(self.db.as_ref(), titre.trim(), artiste.trim())?
+            };
+            let supprimer = |stats_champ: &mut u64| -> Result<(), String> {
+                let params: [&dyn ToSqlValue; 4] =
+                    [&profile_id, &TYPE_ALBUM, &SOURCE_LOCALE, &item_id];
+                self.db.execute(
+                    "DELETE FROM suggestions_ecartees \
+                     WHERE profile_id = ? AND item_type = ? AND source = ? AND item_id = ?",
+                    &params,
+                )?;
+                *stats_champ += 1;
+                Ok(())
+            };
+            match cible {
+                Some(nouvel_id) if nouvel_id != album_id => {
+                    let nouvel = nouvel_id.to_string();
+                    let params: [&dyn ToSqlValue; 4] =
+                        [&profile_id, &TYPE_ALBUM, &SOURCE_LOCALE, &nouvel];
+                    let deja = self
+                        .db
+                        .query_one(
+                            "SELECT COUNT(*) FROM suggestions_ecartees \
+                             WHERE profile_id = ? AND item_type = ? AND source = ? AND item_id = ?",
+                            &params,
+                        )?
+                        .and_then(|c| c.first().and_then(|v| v.as_i64()))
+                        .unwrap_or(0)
+                        > 0;
+                    if deja {
+                        // Le profil a déjà écarté l'album vivant : l'orphelin
+                        // est un doublon.
+                        supprimer(&mut stats.deduplicated)?;
+                    } else {
+                        let (t, a) = album_live_identity(self.db.as_ref(), nouvel_id)?
+                            .unwrap_or((titre.clone(), artiste.clone()));
+                        let a = (!a.trim().is_empty()).then_some(a);
+                        let params: [&dyn ToSqlValue; 7] = [
+                            &nouvel,
+                            &t,
+                            &a,
+                            &profile_id,
+                            &TYPE_ALBUM,
+                            &SOURCE_LOCALE,
+                            &item_id,
+                        ];
+                        self.db.execute(
+                            "UPDATE suggestions_ecartees SET item_id = ?, title = ?, subtitle = ? \
+                             WHERE profile_id = ? AND item_type = ? AND source = ? AND item_id = ?",
+                            &params,
+                        )?;
+                        info!(
+                            profile_id,
+                            old_id = album_id,
+                            new_id = nouvel_id,
+                            "suggestion_ecartee_rerattachee"
+                        );
+                        stats.relinked += 1;
+                    }
+                }
+                _ if delete_unresolved => supprimer(&mut stats.deleted)?,
+                _ => stats.unresolved += 1,
+            }
+        }
+        Ok(stats)
+    }
+
     /// L'ensemble en mémoire que lisent les rangées. Une erreur de lecture
     /// rend un ensemble VIDE : une rangée qui ne filtre pas vaut mieux qu'un
     /// accueil vide.
@@ -362,6 +510,38 @@ impl SuggestionsEcarteesRepo {
             Err(err) => tracing::warn!(profile_id, error = %err, "suggestions_ecartees_illisibles"),
         }
         e
+    }
+}
+
+/// La réconciliation telle que l'appellent les ancrages du serveur
+/// (démarrage, fin de scan, scan auto, purge) : une ligne de journal si
+/// quelque chose a bougé ou reste orphelin, un avertissement sur erreur.
+/// `contexte` nomme l'ancrage dans le journal.
+pub fn reconcilier_journalise(
+    db: Arc<dyn DbBackend>,
+    delete_unresolved: bool,
+    contexte: &str,
+) -> ReconcileStats {
+    match SuggestionsEcarteesRepo::with_backend(db).reconcile(delete_unresolved) {
+        Ok(s) => {
+            if s.changed() > 0 || s.unresolved > 0 {
+                info!(
+                    contexte,
+                    scanned = s.scanned,
+                    snapshots = s.snapshots_backfilled,
+                    relinked = s.relinked,
+                    deduplicated = s.deduplicated,
+                    deleted = s.deleted,
+                    unresolved = s.unresolved,
+                    "suggestions_ecartees_reconciliees"
+                );
+            }
+            s
+        }
+        Err(e) => {
+            tracing::warn!(contexte, error = %e, "suggestions_ecartees_reconcile_failed");
+            ReconcileStats::default()
+        }
     }
 }
 
@@ -446,5 +626,114 @@ mod tests {
         assert!(r.retablir(1, &s("album", "local", "42")).unwrap());
         assert!(!r.retablir(1, &s("album", "local", "42")).unwrap());
         assert!(!r.ensemble(1).album_local(42));
+    }
+
+    fn sql(r: &SuggestionsEcarteesRepo, q: &str) {
+        r.db.execute(q, &[]).expect(q);
+    }
+
+    /// Miles Davis, « Kind of Blue » sous l'id 1 ; un homonyme de titre chez
+    /// un autre artiste sous l'id 2.
+    fn bibliotheque(r: &SuggestionsEcarteesRepo) {
+        sql(
+            r,
+            "INSERT INTO artists (id, name) VALUES (1, 'Miles Davis'), (2, 'Autre')",
+        );
+        sql(
+            r,
+            "INSERT INTO albums (id, title, artist_id, track_count) VALUES \
+             (1, 'Kind of Blue', 1, 5), (2, 'Kind of Blue', 2, 5)",
+        );
+    }
+
+    /// Le rescan : l'album 1 meurt et renaît sous l'id 7.
+    fn rescan(r: &SuggestionsEcarteesRepo) {
+        sql(r, "DELETE FROM albums WHERE id = 1");
+        sql(
+            r,
+            "INSERT INTO albums (id, title, artist_id, track_count) VALUES (7, 'Kind of Blue', 1, 5)",
+        );
+    }
+
+    #[test]
+    fn l_ecart_d_un_album_local_fige_son_identite_lue_en_base() {
+        let r = repo();
+        bibliotheque(&r);
+        let mut d = s("album", "local", "1");
+        // Ce que la vignette affichait sous le titre : une raison, pas l'artiste.
+        d.subtitle = Some("Un genre que vous écoutez souvent : Jazz".into());
+        d.title = Some("Kind of Blue (vignette)".into());
+        let n = r.ecarter(1, &d).unwrap().unwrap();
+        assert_eq!(n.title.as_deref(), Some("Kind of Blue"));
+        assert_eq!(n.subtitle.as_deref(), Some("Miles Davis"));
+        assert_eq!(
+            r.lister(1).unwrap()[0].subtitle.as_deref(),
+            Some("Miles Davis")
+        );
+    }
+
+    #[test]
+    fn l_ecart_suit_l_album_renouvele_au_rescan_et_pas_son_homonyme() {
+        let r = repo();
+        bibliotheque(&r);
+        r.ecarter(1, &s("album", "local", "1")).unwrap();
+        r.ecarter(2, &s("album", "local", "1")).unwrap();
+        rescan(&r);
+        assert!(!r.ensemble(1).album_local(7), "avant : l'écart est perdu");
+
+        let st = r.reconcile(false).unwrap();
+        assert_eq!(
+            (st.scanned, st.relinked, st.unresolved),
+            (2, 2, 0),
+            "{st:?}"
+        );
+        for profil in [1, 2] {
+            let e = r.ensemble(profil);
+            assert!(e.album_local(7), "profil {profil} : suivi vers 7");
+            assert!(!e.album_local(2), "jamais l'homonyme d'un autre artiste");
+            assert!(!e.album_local(1));
+        }
+        // Idempotent.
+        assert_eq!(r.reconcile(false).unwrap().changed(), 0);
+    }
+
+    #[test]
+    fn l_orphelin_n_est_purge_que_sur_scan_complet_et_le_doublon_est_retire() {
+        let r = repo();
+        bibliotheque(&r);
+        r.ecarter(1, &s("album", "local", "1")).unwrap();
+        sql(&r, "DELETE FROM albums WHERE id = 1");
+        let st = r.reconcile(false).unwrap();
+        assert_eq!((st.unresolved, st.deleted), (1, 0));
+        assert_eq!(
+            r.lister(1).unwrap().len(),
+            1,
+            "gardé : un volume peut revenir"
+        );
+        let st = r.reconcile(true).unwrap();
+        assert_eq!(st.deleted, 1);
+        assert!(r.lister(1).unwrap().is_empty());
+
+        // Doublon : le profil a écarté l'ancien ET le nouvel id.
+        let r = repo();
+        bibliotheque(&r);
+        r.ecarter(1, &s("album", "local", "1")).unwrap();
+        rescan(&r);
+        r.ecarter(1, &s("album", "local", "7")).unwrap();
+        let st = r.reconcile(false).unwrap();
+        assert_eq!(st.deduplicated, 1, "{st:?}");
+        let l = r.lister(1).unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].item_id, "7");
+    }
+
+    #[test]
+    fn la_reconciliation_ne_touche_ni_artistes_ni_objets_de_service() {
+        let r = repo();
+        r.ecarter(1, &s("artist", "", "Miles Davis")).unwrap();
+        r.ecarter(1, &s("album", "qobuz", "0060253")).unwrap();
+        let st = r.reconcile(true).unwrap();
+        assert_eq!(st.scanned, 0);
+        assert_eq!(r.lister(1).unwrap().len(), 2);
     }
 }
