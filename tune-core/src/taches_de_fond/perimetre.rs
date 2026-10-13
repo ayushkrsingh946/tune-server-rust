@@ -36,8 +36,9 @@
 //!   comme les genres du CLAP (colonne `genre` ou tableau `genres`, casse
 //!   ignorée). Une piste SANS genre n'est jamais écartée par cette liste.
 //!
-//! Le genre se juge À L'ALBUM (décision du 13/10, [`termes_des_genres_a_l_album`]) :
-//! un album dont le genre n'est pas exclu est analysé en entier, et son gain
+//! Le genre se juge À L'ALBUM (décisions du 13/10, [`termes_des_genres_a_l_album`]) :
+//! un album dont le genre n'est pas exclu — ou qui n'a pas de genre — est
+//! analysé en entier, et son gain
 //! d'album — calculé seulement quand TOUTES ses pistes ont leur gain de piste
 //! (garde de complétude de `analyze_album_batch`) — reste calculable.
 //!
@@ -502,14 +503,20 @@ pub fn clause_genres_exclus(genres: &[String]) -> String {
     }
 }
 
-/// Le test « la piste est d'un des `genres` », JUGÉ À L'ALBUM (décision de
-/// Bertrand du 13/10) : une piste d'un album qui porte un genre (colonne
-/// `albums.genre` ou tableau `albums.genres`) est jugée sur le genre de son
-/// ALBUM — un album dont le genre n'est pas exclu est analysé EN ENTIER, et
-/// son gain d'album reste calculable, même si une piste d'une compilation
-/// porte un genre exclu. Une piste sans album, ou dont l'album ne porte aucun
-/// genre, est jugée sur ses propres genres. Vrai ou faux, jamais NULL.
-/// `None` si la liste est vide.
+/// Le test « la piste est d'un des `genres` », JUGÉ À L'ALBUM (décisions de
+/// Bertrand du 13/10) :
+///
+/// * une piste d'un album qui porte un genre (colonne `albums.genre` ou
+///   tableau `albums.genres`) est jugée sur le genre de son ALBUM — un album
+///   dont le genre n'est pas exclu est analysé EN ENTIER, et son gain d'album
+///   reste calculable, même si une piste d'une compilation porte un genre
+///   exclu ;
+/// * une piste d'un album SANS genre d'album n'est JAMAIS exclue par une
+///   règle de genre : sans genre d'album, rien ne dit que tout l'album sort,
+///   et en exclure une piste priverait l'album de son gain d'album ;
+/// * seule une piste SANS album est jugée sur ses propres genres.
+///
+/// Vrai ou faux, jamais NULL. `None` si la liste est vide.
 fn termes_des_genres_a_l_album(genres: &[String]) -> Option<String> {
     let piste = termes_des_genres_sur("t", genres)?;
     let album = termes_des_genres_sur("alb_p", genres)?;
@@ -517,7 +524,7 @@ fn termes_des_genres_a_l_album(genres: &[String]) -> Option<String> {
                       OR TRIM(COALESCE(alb_p.genres, '')) NOT IN ('', '[]'))";
     Some(format!(
         "(EXISTS (SELECT 1 FROM albums alb_p WHERE alb_p.id = t.album_id AND {a_un_genre} AND ({album})) \
-         OR (NOT EXISTS (SELECT 1 FROM albums alb_p WHERE alb_p.id = t.album_id AND {a_un_genre}) \
+         OR (NOT EXISTS (SELECT 1 FROM albums alb_p WHERE alb_p.id = t.album_id) \
              AND ({piste})))"
     ))
 }

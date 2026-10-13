@@ -85,8 +85,9 @@ passes : `replaygain` (gain de piste et d'album, crêtes, remesures),
   analysé **en entier**, même ses pistes d'un genre exclu, et son gain
   d'album reste calculable (la garde de complétude de `analyze_album_batch`
   trouve toutes ses pistes). Un album d'un genre exclu sort en entier. Une
-  piste sans album, ou dont l'album ne porte aucun genre, est jugée sur ses
-  propres genres. Vaut pour les listes d'exclusion du périmètre (commun et
+  piste d'un album SANS genre d'album n'est JAMAIS exclue par une règle de
+  genre (décision du 13/10, pour que le gain d'album reste calculable). Seule
+  une piste sans album est jugée sur ses propres genres. Vaut pour les listes d'exclusion du périmètre (commun et
   par passe) ; les deux listes du CLAP (#6198) restent jugées sur la piste.
 - **Avertissement** (décision du 13/10) : quand un genre est exclu du
   ReplayGain, l'écran affiche sous le réglage « Ces pistes seront lues sans
@@ -163,11 +164,10 @@ demande.
 - Étape 2 (par passe, le commun par défaut) et étape 3 (comptage) : go.
 - Les empreintes suivent le ReplayGain : on garde.
 
-## Décisions encore ouvertes
+## Décisions de Bertrand (13/10, suite)
 
-- Un album SANS genre d'album est jugé piste par piste : une compilation sans
-  genre d'album dont une piste porte un genre exclu perd son gain d'album
-  (cas d'avant la décision). L'alternative serait de ne jamais exclure une
-  piste d'un album sans genre.
-- Le comptage par entrée compte les pistes qu'elle DÉSIGNE, pas celles qu'elle
-  est seule à retirer (une piste désignée par deux entrées compte deux fois).
+- Une piste d'un album sans genre d'album n'est jamais exclue par une règle
+  de genre.
+- « Pistes retirées » compte les pistes que chaque entrée DÉSIGNE : une piste
+  désignée par deux entrées compte deux fois. Le texte d'aide de l'écran le
+  dit.

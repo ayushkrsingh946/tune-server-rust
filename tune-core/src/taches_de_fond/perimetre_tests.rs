@@ -421,10 +421,12 @@ fn la_selection_clap_respecte_les_racines_exclues() {
 
 // ── #6198 — les genres du CLAP ──────────────────────────────────────────
 
+/// Une piste SANS album, de genre `genre` / `genres` : jugée sur ses propres
+/// genres (une piste d'un album sans genre ne serait jamais exclue).
 fn piste_de_genre(db: &SqliteDb, id: i64, chemin: &str, genre: Option<&str>, genres: Option<&str>) {
     db.execute(
         "INSERT INTO tracks (id, title, album_id, artist_id, file_path, duration_ms, \
-         sample_rate, channels, genre, genres) VALUES (?, 'T', 1, 1, ?, 1000, 44100, 2, ?, ?)",
+         sample_rate, channels, genre, genres) VALUES (?, 'T', NULL, 1, ?, 1000, 44100, 2, ?, ?)",
         &[&id, &chemin, &genre, &genres],
     )
     .unwrap();
@@ -796,31 +798,88 @@ fn une_compilation_aux_genres_meles_est_jugee_a_l_album() {
     piste_d_album(&db, 11, 2, "/m/c/2.flac", Some("Podcast"));
     piste_d_album(&db, 20, 3, "/m/p/1.mp3", Some("Jazz"));
     piste_d_album(&db, 21, 3, "/m/p/2.mp3", Some("Podcast"));
-    // L'album 1 de `base()` n'a pas de genre : ses pistes se jugent seules.
+    // L'album 1 de `base()` n'a pas de genre : AUCUNE de ses pistes n'est
+    // exclue par une règle de genre (décision du 13/10).
     piste_d_album(&db, 30, 1, "/m/s/1.mp3", Some("Podcast"));
     piste_d_album(&db, 31, 1, "/m/s/2.flac", Some("Jazz"));
-    assert_eq!(quatre_compteurs(&backend), (6, 6, Some(6), 6));
+    // Une piste SANS album se juge sur son propre genre.
+    piste_de_genre(&db, 40, "/m/x/1.mp3", Some("Podcast"), None);
+    piste_de_genre(&db, 41, "/m/x/2.flac", Some("Jazz"), None);
+    assert_eq!(quatre_compteurs(&backend), (8, 8, Some(8), 8));
 
     regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!(["podcast"]));
     assert_eq!(
         ids(&backend, &clause_decodage(&backend, Passe::ReplayGain)),
-        vec![10, 11, 31],
+        vec![10, 11, 30, 31, 41],
         "la compilation Jazz reste entière ; l'album Podcast sort entier ; \
-         l'album sans genre se juge piste par piste"
+         l'album SANS genre reste entier ; seule la piste sans album se juge seule"
     );
     assert_eq!(
         ids(
             &backend,
             &clause_hors_perimetre_decodage(&backend, Passe::ReplayGain)
         ),
-        vec![20, 21, 30],
+        vec![20, 21, 40],
         "le complément exact"
     );
-    assert_eq!(quatre_compteurs(&backend), (3, 3, Some(3), 3));
-    assert_eq!(candidats_clap(&backend), vec![10, 11, 31]);
+    assert_eq!(quatre_compteurs(&backend), (5, 5, Some(5), 5));
+    assert_eq!(candidats_clap(&backend), vec![10, 11, 30, 31, 41]);
 
     regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!([]));
-    assert_eq!(quatre_compteurs(&backend), (6, 6, Some(6), 6));
+    assert_eq!(quatre_compteurs(&backend), (8, 8, Some(8), 8));
+}
+
+/// Décision du 13/10 : une piste d'un album SANS genre d'album n'est jamais
+/// exclue par une règle de genre — commune ou propre à une passe —, pour que
+/// le gain d'album reste calculable : toutes ses pistes restent candidates au
+/// gain de piste, dont la garde de complétude de la passe d'album a besoin.
+/// Contre-épreuve : la même piste, sans album, est exclue.
+#[test]
+fn un_album_sans_genre_n_est_jamais_exclu_par_un_genre() {
+    let (db, backend) = base();
+    piste_d_album(&db, 1, 1, "/m/a/1.mp3", Some("Podcast"));
+    piste_d_album(&db, 2, 1, "/m/a/2.flac", Some("Jazz"));
+    regler(
+        &backend,
+        CLE_GENRES_EXCLUS,
+        serde_json::json!(["Podcast", "Jazz"]),
+    );
+    assert_eq!(
+        ids(&backend, &clause_decodage(&backend, Passe::ReplayGain)),
+        vec![1, 2]
+    );
+    assert!(
+        ids(
+            &backend,
+            &clause_hors_perimetre_decodage(&backend, Passe::ReplayGain)
+        )
+        .is_empty()
+    );
+    regler(
+        &backend,
+        CLE_PAR_PASSE,
+        serde_json::json!({ "dynamic_range": { "excluded_genres": ["Podcast"] } }),
+    );
+    assert_eq!(
+        ids(&backend, &clause_decodage(&backend, Passe::PlageDynamique)),
+        vec![1, 2]
+    );
+    assert_eq!(quatre_compteurs(&backend), (2, 2, Some(2), 2));
+    let (commun, _) = compter_les_retraits(&backend);
+    assert!(
+        commun.excluded_genres.iter().all(|r| r.tracks == 0),
+        "rien n'est retiré : {:?}",
+        commun.excluded_genres
+    );
+    // Contre-épreuve : la même piste « Podcast », sans album, sort.
+    piste_de_genre(&db, 3, "/m/b/3.mp3", Some("Podcast"), None);
+    assert_eq!(
+        ids(
+            &backend,
+            &clause_hors_perimetre_decodage(&backend, Passe::ReplayGain)
+        ),
+        vec![3]
+    );
 }
 
 /// Étape 2 — un périmètre PAR PASSE. Le commun exclut `/nas` ; le ReplayGain
@@ -948,8 +1007,8 @@ fn chaque_entree_dit_combien_de_pistes_elle_retire() {
     album_de_genre(&db, 2, Some("Jazz"), None);
     piste_d_album(&db, 10, 2, "/nas/c/1.flac", Some("Jazz"));
     piste_d_album(&db, 11, 2, "/nas/c/2.flac", Some("Podcast"));
-    piste_d_album(&db, 30, 1, "/local/1.mp3", Some("Podcast"));
-    piste_d_album(&db, 31, 1, "/local/2.mp3", Some("Podcast"));
+    piste_de_genre(&db, 30, "/local/1.mp3", Some("Podcast"), None);
+    piste_de_genre(&db, 31, "/local/2.mp3", Some("Podcast"), None);
     regler(
         &backend,
         CLE_RACINES_EXCLUES,

@@ -6030,7 +6030,7 @@ mod perimetre_des_analyses_5593_tests {
         ] {
             b.execute(
                 "INSERT INTO tracks (id, title, album_id, artist_id, file_path, duration_ms, \
-                 sample_rate, channels, genre) VALUES (?, 'T', 1, 1, ?, 1000, 44100, 2, ?)",
+                 sample_rate, channels, genre) VALUES (?, 'T', NULL, 1, ?, 1000, 44100, 2, ?)",
                 &[&id, &chemin, &genre],
             )
             .unwrap();
