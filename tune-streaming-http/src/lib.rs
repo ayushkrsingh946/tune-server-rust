@@ -1302,7 +1302,10 @@ async fn service_logout(
     state.save_tokens().await;
     // Le compte change : ses listes ne doivent pas survivre à la session.
     purge_contenu_utilisateur(&service);
-    Json(json!({ "service": service, "status": "logged_out" })).into_response()
+    // #6173 — `disconnectStreaming` (web) lit `disconnected` ; `status` reste
+    // pour les clients qui le lisaient déjà.
+    Json(json!({ "service": service, "status": "logged_out", "disconnected": true }))
+        .into_response()
 }
 
 /// Nombre de titres rendus par défaut par « Plus comme ça » sur un titre de
@@ -1608,7 +1611,8 @@ async fn service_enable(
     settings
         .set(&format!("streaming_{service}_enabled"), "true")
         .ok();
-    Json(json!({"service": service, "enabled": true})).into_response()
+    // #6173 — `enableStreamingService` (web) lit `status`.
+    Json(json!({"service": service, "enabled": true, "status": "enabled"})).into_response()
 }
 
 async fn service_disable(
@@ -1624,7 +1628,8 @@ async fn service_disable(
     settings
         .set(&format!("streaming_{service}_enabled"), "false")
         .ok();
-    Json(json!({"service": service, "enabled": false})).into_response()
+    // #6173 — `disableStreamingService` (web) lit `status`.
+    Json(json!({"service": service, "enabled": false, "status": "disabled"})).into_response()
 }
 
 async fn service_auth_url(
