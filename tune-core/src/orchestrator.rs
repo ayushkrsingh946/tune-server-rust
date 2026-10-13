@@ -1847,6 +1847,8 @@ mod greffon_natif_tiers_tests;
 mod duree_du_flux_2062;
 #[cfg(test)]
 mod duree_du_flux_2062_tests;
+#[cfg(test)]
+mod lecture_upnp_wav_4201_tests;
 mod resolve_direct;
 /// #2264 — la règle de version appliquée à la lecture.
 mod version_de_lecture;

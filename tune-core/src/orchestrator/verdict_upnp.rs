@@ -9,8 +9,8 @@
 //! |---|---|
 //! | réseau (DLNA / OpenHome) | joue — **sans DSP** : pas un octet ne traverse Tune |
 //! | navigateur | joue — **sans DSP** : relais octet pour octet |
-//! | locale | joue **avec** DSP — mais **sans ReplayGain**, et le **seek est cassé** |
-//! | OAAT | **silence** — donc **refus explicite** |
+//! | locale | joue **avec** DSP — mais **sans ReplayGain** ; le seek reprend à la position quand la fréquence de la piste est connue (#4201, phase 3) |
+//! | OAAT | décodée en WAV quand la fréquence est connue (#4201, phase 3) ; sinon **silence** — donc **refus explicite** |
 //!
 //! # Pourquoi une table, et pas deux listes qui se ressemblent
 //!
@@ -29,12 +29,14 @@
 //!
 //! # Ce que ce module ne fait pas
 //!
-//! Il ne **corrige** aucune de ces dégradations. Brancher le DSP sur les
-//! sorties réseau et navigateur (le portage de #2863 qui n'a jamais eu lieu sur
-//! ce chemin), rendre le ReplayGain disponible sans fichier local, et propager
-//! `seek_ms` dans `resolve_direct.rs` — qui n'en contient toujours aucune
-//! occurrence — restent à faire. Ce module fait la seule chose qui ne pouvait
-//! pas attendre : **ne pas faire semblant**.
+//! Il ne **corrige** aucune de ces dégradations. Depuis la phase 3 de #4201,
+//! `resolve_direct.rs` décode en WAV, à la position demandée, une piste dont
+//! la fréquence est connue, vers une sortie locale (après un saut) ou OAAT
+//! (`doit_decoder_la_piste_upnp_en_wav`). Brancher le DSP sur les sorties
+//! réseau et navigateur (le portage de #2863 qui n'a jamais eu lieu sur ce
+//! chemin) et rendre le ReplayGain disponible sans fichier local restent à
+//! faire. Ce module fait la seule chose qui ne pouvait pas attendre : **ne pas
+//! faire semblant**.
 
 /// Les quatre familles de sortie que D4 distingue.
 ///
@@ -129,8 +131,9 @@ impl SortieD4 {
             Self::Locale => &[
                 "Le ReplayGain ne s'applique pas : il est mesuré sur un fichier \
                  local, et cette piste n'en a pas.",
-                "Un saut dans la piste la relance au début : la position n'est \
-                 pas encore propagée sur ce chemin.",
+                "Un saut dans la piste ne reprend à la position demandée que si \
+                 le serveur a publié la fréquence d'échantillonnage de la piste ; \
+                 sans elle, la piste repart du début.",
             ],
             // Voir la note du doc-commentaire : une piste qui joue sur OAAT est
             // déjà en WAV, et rien n'a été mesuré à lui reprocher.
@@ -149,8 +152,10 @@ impl SortieD4 {
         match self {
             Self::Oaat => Some(
                 "un point de sortie OAAT ne lit que du PCM en conteneur WAV : \
-                 une piste publiée dans un autre format est refusée avant \
-                 d'être lancée, avec son motif, plutôt que jouée en silence.",
+                 Tune y convertit une piste publiée dans un autre format quand \
+                 le serveur en a publié la fréquence d'échantillonnage ; sans \
+                 elle, la piste est refusée avant d'être lancée, avec son \
+                 motif, plutôt que jouée en silence.",
             ),
             _ => None,
         }
@@ -168,10 +173,11 @@ pub fn motif_du_refus_oaat(titre: &str, mime: &str) -> String {
     format!(
         "Lecture refusée : « {titre} » vient d'un serveur multimédia UPnP et \
          n'est publiée qu'en {mime}, alors qu'un point de sortie OAAT ne lit que \
-         du PCM en conteneur WAV. Tune ne sait pas encore convertir ce flux au \
-         fil de l'eau pour OAAT — la piste n'a pas été lancée, elle n'aurait \
-         produit qu'un silence. Elle joue en revanche sur une zone réseau, \
-         navigateur ou locale."
+         du PCM en conteneur WAV. Tune convertit ce flux pour OAAT quand le \
+         serveur en publie la fréquence d'échantillonnage, et celui-ci ne l'a \
+         pas fait : la piste n'a pas été lancée, elle n'aurait produit qu'un \
+         silence. Elle joue en revanche sur une zone réseau, navigateur ou \
+         locale."
     )
 }
 

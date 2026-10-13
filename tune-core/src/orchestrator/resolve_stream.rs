@@ -635,7 +635,7 @@ impl PlaybackOrchestrator {
     /// (REF-2 phase 2, #2219) : ces sorties attendent du PCM brut en WAV, le
     /// flux compressé du service est téléchargé, décodé et transcodé comme un
     /// fichier local. Rend (url servie, identifiant de session, mime, taille).
-    async fn resoudre_flux_local_ou_oaat(
+    pub(super) async fn resoudre_flux_local_ou_oaat(
         &self,
         req: &PlayRequest,
         service_name: &str,
@@ -2619,7 +2619,13 @@ pub(crate) fn decodage_progressif_par_range(service: &str, codec: &str, url: &st
     if service.eq_ignore_ascii_case("youtube") {
         return matches!(codec.as_str(), "m4a" | "mp4" | "aac");
     }
-    (service.eq_ignore_ascii_case("tidal") || service.eq_ignore_ascii_case("qobuz"))
+    // #4201, phase 3 — le FLAC d'un serveur multimédia UPnP décodé pour une
+    // sortie locale ou OAAT (`resolve_direct.rs`, `decoder_la_piste_upnp_en_wav`).
+    // Un saut au milieu d'un 24/192 n'attend pas le téléchargement complet ;
+    // un serveur qui ne répond pas `206` retombe sur le fichier temporaire.
+    (service.eq_ignore_ascii_case("tidal")
+        || service.eq_ignore_ascii_case("qobuz")
+        || service.eq_ignore_ascii_case("upnp"))
         && codec == "flac"
 }
 
@@ -2639,6 +2645,17 @@ mod decodage_progressif_3568_tests {
             "casse du service et du codec"
         );
         assert!(progressif("qobuz", "flac", CDN), "Qobuz FLAC");
+    }
+
+    /// #4201, phase 3 — un FLAC de serveur multimédia, décodé pour une sortie
+    /// locale ou OAAT, se lit par plages ; ses autres formats gardent le
+    /// téléchargement complet.
+    #[test]
+    fn un_flac_de_serveur_upnp_se_decode_par_plages_4201() {
+        let res = "http://192.168.1.42:8888/api/v1/library/tracks/21825/audio";
+        assert!(progressif("upnp", "flac", res));
+        assert!(!progressif("upnp", "mp3", res));
+        assert!(!progressif("upnp", "m4a", res));
     }
 
     #[test]
