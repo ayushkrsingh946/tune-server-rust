@@ -692,6 +692,9 @@ fn retire_un_suffixe(titre: &str) -> Option<String> {
     if let Some((reste, _)) = suffixe_d_edition(t) {
         return Some(reste.to_string());
     }
+    if let Some(reste) = parenthese_de_disque(t) {
+        return Some(reste.to_string());
+    }
 
     // 2. `, Disc 1` / ` - CD 2` / `, Disque 3` en fin de titre. Le découpage
     //    par disque est une propriété de NOTRE arborescence, pas du pressage :
@@ -710,10 +713,21 @@ fn retire_un_suffixe(titre: &str) -> Option<String> {
         }
         let avant = t[..pos].trim_end();
         let avant = avant.strip_suffix('-').or_else(|| avant.strip_suffix('–'));
-        let Some(avant) = avant.map(str::trim_end).or_else(|| {
-            // Sans tiret, il faut une virgule : `Singles and More, Disc 1`.
-            t[..pos].trim_end().strip_suffix(',')
-        }) else {
+        let Some(avant) = avant
+            .map(str::trim_end)
+            .or_else(|| {
+                // Sans tiret, il faut une virgule : `Singles and More, Disc 1`.
+                t[..pos].trim_end().strip_suffix(',')
+            })
+            .or_else(|| {
+                // #4805, introuvables de la mesure A : ni tiret ni virgule,
+                // `Histoires CD1`, `Three Sides Live CD 2` (162 albums sur 919).
+                // Le mot de disque doit alors être un mot entier, précédé
+                // d'une espace : `ABCD 2` reste tel quel.
+                let avant = &t[..pos];
+                (avant.ends_with(char::is_whitespace) && pos > 0).then_some(avant)
+            })
+        else {
             continue;
         };
         let avant = avant.trim_end().trim_end_matches(',').trim_end();
@@ -722,6 +736,38 @@ fn retire_un_suffixe(titre: &str) -> Option<String> {
         }
     }
 
+    None
+}
+
+/// La parenthèse ou le crochet FINAL de `t` quand il ne dit qu'un numéro de
+/// disque : `(CD 1)`, `[Disc 2]`, `(Disque 3)`. Rend ce qui précède.
+///
+/// Mesure A de #4805 : `The Song Remains The Same (CD 1)` restait introuvable,
+/// `cd` n'étant pas un marqueur de pressage (il ne doit pas l'être : `(CD
+/// Single)` ou `(Live on CD)` ne sont pas des numéros de disque).
+fn parenthese_de_disque(t: &str) -> Option<&str> {
+    let t = t.trim_end();
+    for (ouvre, ferme) in [('(', ')'), ('[', ']')] {
+        if !t.ends_with(ferme) {
+            continue;
+        }
+        let Some(pos) = t.rfind(ouvre) else { continue };
+        let contenu = t[pos + ouvre.len_utf8()..t.len() - ferme.len_utf8()]
+            .trim()
+            .to_ascii_lowercase();
+        let numero = MOTS_DE_DISQUE
+            .iter()
+            .chain(&["disk"])
+            .find_map(|mot| contenu.strip_prefix(*mot))
+            .map(str::trim);
+        if !numero.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
+            continue;
+        }
+        let reste = t[..pos].trim_end();
+        if !reste.is_empty() {
+            return Some(reste);
+        }
+    }
     None
 }
 
@@ -1090,9 +1136,12 @@ pub fn artiste_de_requete(artiste_album: Option<&str>, artiste_pistes: Option<&s
     match (artiste_album, artiste_pistes) {
         (Some(a), _) if !est_un_artiste_fictif(a) => canonique(a),
         (_, Some(p)) if !est_un_artiste_fictif(p) => canonique(p),
-        (Some(a), _) => a.trim().to_string(),
-        (None, Some(p)) => p.trim().to_string(),
-        (None, None) => String::new(),
+        // #4805, introuvables de la mesure A (113 albums sur 919) : un artiste
+        // fictif dans la requête (`artist:"Unknown Artist"`) ne ramène rien.
+        // Sans meilleur nom, la requête porte le titre seul ; le choix
+        // (`choix_de_pressage` : score, départage, complétude des pistes)
+        // juge ensuite comme pour tout album.
+        (Some(_), _) | (None, Some(_)) | (None, None) => String::new(),
     }
 }
 
@@ -2141,6 +2190,29 @@ mod tests {
         );
     }
 
+    /// #4805, introuvables de la mesure A : le numéro de disque sans tiret ni
+    /// virgule, ou seul dans une parenthèse, s'en va de la requête.
+    #[test]
+    fn titre_de_requete_retire_un_numero_de_disque_nu() {
+        for (brut, propre) in [
+            ("Histoires CD1", "Histoires"),
+            ("Three Sides Live CD 2", "Three Sides Live"),
+            ("The New Crystal Silence CD2", "The New Crystal Silence"),
+            (
+                "The Song Remains The Same (CD 1)",
+                "The Song Remains The Same",
+            ),
+            ("Anthologie [Disc 2]", "Anthologie"),
+            ("Box Set Disque 3", "Box Set"),
+        ] {
+            assert_eq!(titre_de_requete(brut).as_deref(), Some(propre), "{brut}");
+        }
+        // Un mot qui finit par « cd », un CD qui n'est pas un numéro.
+        for intact in ["ABCD 2", "Single (CD Single)", "Live on CD", "CD 1"] {
+            assert_eq!(titre_de_requete(intact), None, "{intact}");
+        }
+    }
+
     /// La contrepartie : ne rien retirer quand il n'y a rien a retirer. `None`
     /// est ce qui epargne a l'appelant une seconde requete de 1,1 s identique.
     #[test]
@@ -2556,15 +2628,13 @@ mod tests {
         );
         assert_eq!(artiste_de_requete(Some(""), Some("Air")), "Air");
         assert_eq!(artiste_de_requete(None, Some("VA")), "Various Artists");
-        // Rien de mieux : l'artiste d'origine, comme avant.
+        // Rien de mieux : le titre seul (#4805, mesure A), jamais un artiste
+        // fictif dans la requête.
         assert_eq!(
             artiste_de_requete(Some("Unknown Artist"), Some("Unknown Artist")),
-            "Unknown Artist"
+            ""
         );
-        assert_eq!(
-            artiste_de_requete(Some("Unknown Artist"), None),
-            "Unknown Artist"
-        );
+        assert_eq!(artiste_de_requete(Some("Unknown Artist"), None), "");
         assert_eq!(artiste_de_requete(None, None), "");
         // Un vrai artiste d'album n'est jamais remplacé par celui des pistes.
         assert_eq!(
