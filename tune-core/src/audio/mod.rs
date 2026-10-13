@@ -4,6 +4,7 @@ pub mod alac_encoder;
 pub mod analyzer;
 pub mod ape;
 pub mod audiophile;
+pub mod audit_integrite;
 pub mod autoeq;
 pub mod canaux_declares;
 pub mod canaux_reseau_4573;

@@ -86,6 +86,7 @@ fn etat_de(state: &AppState, tache: Tache) -> Etat {
         Tache::Enrichissement => inscrite(state, &["enrich_all", "bios", "credits_enrich_auto"]),
         Tache::ImagesArtistes => inscrite(state, &["artist_artwork", "artwork"]),
         Tache::Identification => inscrite(state, &["identification_lot"]),
+        Tache::Integrite => inscrite(state, &["integrity"]),
     };
     if en_cours {
         Etat::EnCours

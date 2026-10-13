@@ -114,13 +114,15 @@ pub enum Tache {
     /// requêtes sortantes mesurées sur les 3 909 albums locaux du .18 ne
     /// peuvent pas être une passe qu'on ne peut plus arrêter.
     Identification,
+    /// Audit manuel complet des fichiers de la bibliothèque (#6286).
+    Integrite,
 }
 
 impl Tache {
     /// Toutes les tâches, dans l'ordre d'affichage de l'écran « État du
     /// serveur ». C'est la liste que balaient l'interrupteur général et le
     /// relevé : ajouter une tâche ici suffit à l'y faire entrer.
-    pub const TOUTES: [Tache; 7] = [
+    pub const TOUTES: [Tache; 8] = [
         Tache::ReplayGain,
         Tache::Empreintes,
         Tache::PlageDynamique,
@@ -128,6 +130,7 @@ impl Tache {
         Tache::Enrichissement,
         Tache::ImagesArtistes,
         Tache::Identification,
+        Tache::Integrite,
     ];
 
     /// Identifiant STABLE — c'est le mot que lisent l'API et le client web.
@@ -147,6 +150,7 @@ impl Tache {
             Tache::Enrichissement => "enrichment",
             Tache::ImagesArtistes => "artist_images",
             Tache::Identification => "identification",
+            Tache::Integrite => "integrity",
         }
     }
 
@@ -171,6 +175,7 @@ impl Tache {
             Tache::Enrichissement => "tache_de_fond_pause_enrichment",
             Tache::ImagesArtistes => "tache_de_fond_pause_artist_images",
             Tache::Identification => "tache_de_fond_pause_identification",
+            Tache::Integrite => "tache_de_fond_pause_integrity",
         }
     }
 
