@@ -566,7 +566,7 @@ pub(crate) enum Issue<T> {
 /// démarrer dans cette fenêtre-là aussi.
 async fn veiller_lecture(backend: Arc<dyn DbBackend>) {
     loop {
-        if let Some(zone) = playing_zone_name(&backend) {
+        if let Some(zone) = zone_qui_joue(&backend).await {
             debug!(zone = %zone, "replaygain_veille_lecture — zone passee a playing");
             return;
         }
@@ -824,6 +824,43 @@ pub fn playing_zone_name(backend: &Arc<dyn DbBackend>) -> Option<String> {
         })
 }
 
+/// [`playing_zone_name`] posée HORS des fils de l'exécuteur (chantier
+/// « priorité lecture », #4681).
+///
+/// La veille de lecture la pose quatre fois par seconde pendant l'analyse
+/// d'un fichier, et les boucles des passes à chaque tour. Faite sur place,
+/// c'est une lecture SQLite SYNCHRONE sur un fil de l'exécuteur : quand le
+/// pool de lecture (3 connexions) est saturé, le fil attend une connexion —
+/// 8,4 s mesurées chez un testeur sur cette requête-ci
+/// (`attente_ms=8419 sql=SELECT name FROM zones WHERE last_play_state =
+/// 'playing'`), et tout ce qui attend son tour sur ce fil gèle avec lui,
+/// au moment même où une lecture démarre. #5138 l'avait sortie de la seule
+/// passe acoustique ; ce point unique l'étend aux autres.
+///
+/// Même requête, même règle (une erreur — requête, panique — vaut « rien ne
+/// joue »), même cadence : seule change la file qui l'exécute. Le fil n'est
+/// PAS marqué « de fond » : la réponse sert le premier plan (c'est elle qui
+/// arrête l'analyse), la plafonner sous la réserve SQLite retarderait la
+/// cession.
+///
+/// Réglage : `background_playback_policy.playback_watch_off_executor`
+/// (`false` = l'ancienne requête sur place).
+pub(crate) async fn zone_qui_joue(backend: &Arc<dyn DbBackend>) -> Option<String> {
+    if !crate::taches_de_fond::priorite::politique::politique().playback_watch_off_executor {
+        return playing_zone_name(backend);
+    }
+    let b = backend.clone();
+    tokio::task::spawn_blocking(move || playing_zone_name(&b))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// [`any_zone_playing`], hors des fils de l'exécuteur : voir [`zone_qui_joue`].
+pub(crate) async fn une_zone_joue(backend: &Arc<dyn DbBackend>) -> bool {
+    zone_qui_joue(backend).await.is_some()
+}
+
 /// Ce qu'un tour de la cascade de fond a donné.
 ///
 /// Un `usize` ne suffisait plus : « 0 » disait à la fois « plus rien à faire »
@@ -1062,7 +1099,7 @@ pub fn spawn(backend: Arc<dyn DbBackend>) {
             }
             // Yield the decode-heavy track pass to playback (#1310). The
             // album pass yields too since #4681 — see `passe_d_album`.
-            let playing = any_zone_playing(&backend);
+            let playing = une_zone_joue(&backend).await;
             let mut suspendue: Option<crate::taches_de_fond::Tache> = None;
             let did = if playing {
                 // Rien ne décode pendant la lecture (#1310).
@@ -1083,7 +1120,7 @@ pub fn spawn(backend: Arc<dyn DbBackend>) {
             // l'état ici : sinon ce 0 se lirait « plus rien à analyser »,
             // la boucle inscrirait au registre un « rien à faire » faux et
             // dormirait 15 minutes au lieu des 30 s de report lecture.
-            let playing = playing || any_zone_playing(&backend);
+            let playing = playing || une_zone_joue(&backend).await;
             // Le gain d'album EST du ReplayGain : il reste coupé avec lui.
             let albums = if rg_armee {
                 passe_d_albums_du_tour(&backend, playing).await
@@ -6353,14 +6390,25 @@ mod tests {
         interne: Arc<dyn DbBackend>,
         lectures: std::sync::atomic::AtomicUsize,
         demarre_apres: usize,
+        /// Durée de CHAQUE requête de veille : un pool de lecture saturé, où
+        /// la requête attend sa connexion (chantier « priorité lecture »).
+        lenteur: std::time::Duration,
     }
 
     impl ZoneQuiDemarre {
         fn poser(interne: Arc<dyn DbBackend>, demarre_apres: usize) -> Arc<dyn DbBackend> {
+            Self::poser_lente(interne, demarre_apres, std::time::Duration::ZERO)
+        }
+        fn poser_lente(
+            interne: Arc<dyn DbBackend>,
+            demarre_apres: usize,
+            lenteur: std::time::Duration,
+        ) -> Arc<dyn DbBackend> {
             Arc::new(Self {
                 interne,
                 lectures: std::sync::atomic::AtomicUsize::new(0),
                 demarre_apres,
+                lenteur,
             })
         }
         fn lectures(&self) -> usize {
@@ -6384,6 +6432,9 @@ mod tests {
             p: &[&dyn ToSqlValue],
         ) -> Result<Option<Vec<crate::db::backend::SqlValue>>, String> {
             if sql.contains("last_play_state = 'playing'") {
+                if !self.lenteur.is_zero() {
+                    std::thread::sleep(self.lenteur);
+                }
                 let rang = self
                     .lectures
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -6492,6 +6543,96 @@ mod tests {
         );
     }
 
+    /// Chantier « priorité lecture » (#4681) : la veille de lecture ne gèle
+    /// plus l'exécuteur quand sa requête attend une connexion.
+    ///
+    /// Un moteur tokio à UN fil, comme le pire cas d'un exécuteur dont tous
+    /// les fils sont pris. Une tâche de « premier plan » bat toutes les
+    /// 10 ms pendant qu'une analyse court contre la veille ; chaque requête de
+    /// veille dure 600 ms (pool saturé, 8,4 s mesurées sur le terrain). Le
+    /// plus long trou du battement est ce qu'on mesure.
+    ///
+    /// La contre-épreuve est DANS le test : la même course, réglage coupé
+    /// (`playback_watch_off_executor = false`, l'ancienne requête sur place),
+    /// doit faire un trou d'au moins une requête. Dans les deux cas la
+    /// lecture est vue et l'analyse cède : seule change la file qui pose la
+    /// question.
+    #[tokio::test(flavor = "current_thread")]
+    async fn la_veille_de_lecture_ne_gele_pas_l_executeur() {
+        use crate::taches_de_fond::priorite::politique::{politique, regler};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        const LENTEUR: Duration = Duration::from_millis(600);
+        /// Long devant la veille (deux requêtes et un pas de 250 ms).
+        const TRAVAIL: Duration = Duration::from_secs(5);
+
+        /// Remet le réglage tel qu'il était, même si une assertion tombe.
+        struct Remettre(bool);
+        impl Drop for Remettre {
+            fn drop(&mut self) {
+                regler(crate::taches_de_fond::priorite::politique::Politique {
+                    playback_watch_off_executor: self.0,
+                    ..politique()
+                });
+            }
+        }
+        let _remettre = Remettre(politique().playback_watch_off_executor);
+
+        async fn course(interne: Arc<dyn DbBackend>, hors: bool) -> (bool, Duration) {
+            regler(crate::taches_de_fond::priorite::politique::Politique {
+                playback_watch_off_executor: hors,
+                ..politique()
+            });
+            // La zone se met à jouer à la DEUXIÈME vérification : la
+            // première rend « rien », pendant que l'analyse est en cours.
+            let backend = ZoneQuiDemarre::poser_lente(interne, 1, LENTEUR);
+            let fini = Arc::new(AtomicBool::new(false));
+            let f = fini.clone();
+            let battement = tokio::spawn(async move {
+                let mut pire = Duration::ZERO;
+                let mut avant = Instant::now();
+                while !f.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    pire = pire.max(avant.elapsed());
+                    avant = Instant::now();
+                }
+                pire
+            });
+            // Laisser le battement partir avant la course.
+            tokio::task::yield_now().await;
+            let issue = mesurer_en_cedant_a_la_lecture(
+                &backend,
+                delai_d_analyse(None),
+                tokio::time::sleep(TRAVAIL),
+            )
+            .await;
+            fini.store(true, Ordering::SeqCst);
+            let pire = battement.await.expect("le battement a paniqué");
+            (matches!(issue, Issue::CedeeALaLecture), pire)
+        }
+
+        let (_db, interne) = sweep_db(1);
+        let (cedee_hors, trou_hors) = course(interne.clone(), true).await;
+        let (cedee_sur_place, trou_sur_place) = course(interne, false).await;
+
+        assert!(
+            cedee_hors && cedee_sur_place,
+            "la lecture doit être vue dans les deux cas (hors={cedee_hors}, sur place={cedee_sur_place})"
+        );
+        assert!(
+            trou_sur_place >= LENTEUR - Duration::from_millis(100),
+            "contre-épreuve : la requête sur place devait geler le fil unique \
+             (plus long trou {trou_sur_place:?}, requête {LENTEUR:?}) — sinon ce \
+             test ne mesure rien"
+        );
+        assert!(
+            trou_hors < Duration::from_millis(200),
+            "la veille hors de l'exécuteur a gelé le premier plan {trou_hors:?} \
+             (sur place : {trou_sur_place:?})"
+        );
+    }
+
     /// L'autre moitié du contrat, et la plus dangereuse à rater : une piste
     /// ABANDONNÉE n'a pas été analysée. L'estampiller `rg_analyzed` la sortirait
     /// du balayage pour toujours — 114 pistes avaient déjà été gelées ainsi
@@ -6514,6 +6655,7 @@ mod tests {
             interne: interne.clone(),
             lectures: std::sync::atomic::AtomicUsize::new(0),
             demarre_apres: 1,
+            lenteur: std::time::Duration::ZERO,
         });
         let backend: Arc<dyn DbBackend> = veilleur.clone();
 
@@ -6589,6 +6731,7 @@ mod tests {
             interne: interne.clone(),
             lectures: std::sync::atomic::AtomicUsize::new(0),
             demarre_apres: 2,
+            lenteur: std::time::Duration::ZERO,
         });
         let backend: Arc<dyn DbBackend> = veilleur.clone();
 

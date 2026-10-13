@@ -1593,7 +1593,7 @@ pub fn spawn(backend: Arc<dyn DbBackend>, license: Arc<crate::license::LicenseMa
                     pause_utilisateur = false;
                     info!("audio_embed_reprise_utilisateur");
                 }
-                if crate::audio::replaygain::any_zone_playing(&backend) {
+                if crate::audio::replaygain::une_zone_joue(&backend).await {
                     // #4681 — au relevé de `/system/background-tasks`.
                     crate::taches_de_fond::priorite::noter_cedee(
                         crate::taches_de_fond::Tache::Acoustique.id(),
@@ -1823,7 +1823,7 @@ pub fn spawn(backend: Arc<dyn DbBackend>, license: Arc<crate::license::LicenseMa
             // lecture, juste après, dort `PLAYBACK_BACKOFF_SECS`. La cadence
             // pendant l'écoute reste donc celle déjà prévue pour ce cas.
             let sieste =
-                sieste_de_fin_de_tour(crate::audio::replaygain::any_zone_playing(&backend));
+                sieste_de_fin_de_tour(crate::audio::replaygain::une_zone_joue(&backend).await);
             // Une sieste longue ne garde jamais la session : la passe ne s'en
             // servira pas avant quinze minutes, et un lot qui reprendra la
             // rechargera. Cas couvert ici et pas seulement à la fin du
@@ -2641,7 +2641,7 @@ mod tests {
             .find("if !modele_present {")
             .expect("le bloc de téléchargement a disparu ou a été renommé");
         let cession = source
-            .find("if crate::audio::replaygain::any_zone_playing(&backend) {")
+            .find("if crate::audio::replaygain::une_zone_joue(&backend).await {")
             .expect("la cession à la lecture a disparu ou a été renommée");
 
         assert!(

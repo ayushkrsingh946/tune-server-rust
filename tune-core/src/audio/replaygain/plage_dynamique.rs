@@ -48,8 +48,7 @@ use crate::audio::thermal::ThermalGate;
 use crate::db::backend::DbBackend;
 
 use super::{
-    ANALYSIS_SLOT, PLAYBACK_BACKOFF_SECS, any_zone_playing, compter_les_candidats_dr,
-    rattraper_un_lot_de_dr,
+    ANALYSIS_SLOT, PLAYBACK_BACKOFF_SECS, compter_les_candidats_dr, rattraper_un_lot_de_dr,
 };
 
 /// Les délais du passage. Ceux de la cascade en production ; raccourcis par
@@ -348,7 +347,7 @@ impl PasseDr {
                 tokio::time::sleep(cadence.report_chaleur).await;
                 continue;
             }
-            if any_zone_playing(&backend) {
+            if super::une_zone_joue(&backend).await {
                 // #4681 — au relevé de `/system/background-tasks`.
                 crate::taches_de_fond::priorite::noter_cedee(
                     crate::taches_de_fond::Tache::PlageDynamique.id(),
@@ -385,7 +384,7 @@ impl PasseDr {
             if compter_les_candidats_dr(&backend) <= 0 {
                 break Fin::Terminee;
             }
-            if any_zone_playing(&backend)
+            if super::une_zone_joue(&backend).await
                 || crate::taches_de_fond::est_en_pause(crate::taches_de_fond::Tache::PlageDynamique)
             {
                 continue;
