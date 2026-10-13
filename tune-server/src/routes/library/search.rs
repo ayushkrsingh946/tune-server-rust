@@ -384,10 +384,11 @@ pub(super) async fn acoustic_search(
         })));
     }
 
-    let classees: Vec<_> = tune_core::library::genres_equivalents::croiser(&ranked, &etiquetees)
-        .into_iter()
-        .take(limit * 2)
-        .collect();
+    let classees: Vec<_> =
+        tune_core::library::genres_equivalents::croiser(&ranked, &etiquetees, limit)
+            .into_iter()
+            .take(limit * 2)
+            .collect();
     let scores: HashMap<i64, f32> = classees
         .iter()
         .filter_map(|p| p.similarite.map(|s| (p.id, s)))

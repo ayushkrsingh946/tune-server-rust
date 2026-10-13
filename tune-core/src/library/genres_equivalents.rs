@@ -270,28 +270,38 @@ pub struct PisteClassee {
     pub du_genre: bool,
 }
 
+/// Part de la page gardée purement acoustique quand la requête est un genre
+/// (décision de Bertrand du 13/10, #3836) : environ un quart, pour la
+/// découverte. Arrondi à l'entier INFÉRIEUR : `limit / 4`, donc au moins une
+/// piste dès que `limit >= 4`, aucune en dessous.
+pub fn part_acoustique(limit: usize) -> usize {
+    limit / 4
+}
+
 /// Croise le classement acoustique (cosinus décroissant) avec les pistes
-/// étiquetées du genre demandé :
+/// étiquetées du genre demandé, pour une page de `limit` pistes :
 ///
-/// 1. les pistes étiquetées ET analysées, dans l'ordre acoustique ;
-/// 2. les pistes étiquetées pas encore analysées (aucun son à comparer), par id ;
-/// 3. le reste du classement acoustique, inchangé.
+/// 1. en tête, les pistes étiquetées du genre : d'abord celles qui sont
+///    analysées, dans l'ordre acoustique, puis celles qui ne le sont pas
+///    encore (aucun son à comparer), par id — au plus `limit - part_acoustique(limit)` ;
+/// 2. puis les meilleures pistes HORS genre par le son, qui complètent la page
+///    (au moins `part_acoustique(limit)` si le classement en a assez) ;
+/// 3. au-delà de la page, le reste des pistes du genre, puis le reste du
+///    classement, inchangés.
 ///
 /// Sans piste étiquetée, le classement ressort tel quel.
-pub fn croiser(classement: &[(i64, f32)], etiquetees: &[i64]) -> Vec<PisteClassee> {
+pub fn croiser(classement: &[(i64, f32)], etiquetees: &[i64], limit: usize) -> Vec<PisteClassee> {
     let du_genre: HashSet<i64> = etiquetees.iter().copied().collect();
     let analysees: HashSet<i64> = classement.iter().map(|(id, _)| *id).collect();
-    let mut sortie = Vec::with_capacity(classement.len() + etiquetees.len());
-    sortie.extend(
-        classement
-            .iter()
-            .filter(|(id, _)| du_genre.contains(id))
-            .map(|&(id, s)| PisteClassee {
-                id,
-                similarite: Some(s),
-                du_genre: true,
-            }),
-    );
+    let mut genre: Vec<PisteClassee> = classement
+        .iter()
+        .filter(|(id, _)| du_genre.contains(id))
+        .map(|&(id, s)| PisteClassee {
+            id,
+            similarite: Some(s),
+            du_genre: true,
+        })
+        .collect();
     let mut sans_son: Vec<i64> = etiquetees
         .iter()
         .copied()
@@ -299,21 +309,32 @@ pub fn croiser(classement: &[(i64, f32)], etiquetees: &[i64]) -> Vec<PisteClasse
         .collect();
     sans_son.sort_unstable();
     sans_son.dedup();
-    sortie.extend(sans_son.into_iter().map(|id| PisteClassee {
+    genre.extend(sans_son.into_iter().map(|id| PisteClassee {
         id,
         similarite: None,
         du_genre: true,
     }));
-    sortie.extend(
-        classement
-            .iter()
-            .filter(|(id, _)| !du_genre.contains(id))
-            .map(|&(id, s)| PisteClassee {
-                id,
-                similarite: Some(s),
-                du_genre: false,
-            }),
-    );
+    let hors_genre: Vec<PisteClassee> = classement
+        .iter()
+        .filter(|(id, _)| !du_genre.contains(id))
+        .map(|&(id, s)| PisteClassee {
+            id,
+            similarite: Some(s),
+            du_genre: false,
+        })
+        .collect();
+    if genre.is_empty() {
+        return hors_genre;
+    }
+    let en_tete = limit
+        .saturating_sub(part_acoustique(limit))
+        .min(genre.len());
+    let decouverte = limit.saturating_sub(en_tete).min(hors_genre.len());
+    let mut sortie = Vec::with_capacity(genre.len() + hors_genre.len());
+    sortie.extend_from_slice(&genre[..en_tete]);
+    sortie.extend_from_slice(&hors_genre[..decouverte]);
+    sortie.extend_from_slice(&genre[en_tete..]);
+    sortie.extend_from_slice(&hors_genre[decouverte..]);
     sortie
 }
 
@@ -420,7 +441,8 @@ mod tests {
     #[test]
     fn croiser_met_le_genre_devant_sans_perdre_l_ordre_acoustique() {
         let classement = [(10, 0.9), (20, 0.8), (30, 0.7), (40, 0.6)];
-        let sortie = croiser(&classement, &[40, 20, 99]);
+        // Page large (limit 8 → 2 places acoustiques) : tout le genre tient en tête.
+        let sortie = croiser(&classement, &[40, 20, 99], 8);
         let ordre: Vec<(i64, bool)> = sortie.iter().map(|p| (p.id, p.du_genre)).collect();
         assert_eq!(
             ordre,
@@ -429,7 +451,40 @@ mod tests {
         assert_eq!(sortie[2].similarite, None, "piste étiquetée non analysée");
         assert_eq!(sortie[0].similarite, Some(0.8));
         // Sans piste étiquetée : le classement d'avant, à l'identique.
-        let inchange: Vec<i64> = croiser(&classement, &[]).iter().map(|p| p.id).collect();
+        let inchange: Vec<i64> = croiser(&classement, &[], 8).iter().map(|p| p.id).collect();
         assert_eq!(inchange, vec![10, 20, 30, 40]);
+    }
+
+    /// Décision de Bertrand (13/10) : une requête-genre met le genre en tête,
+    /// mais environ un quart de la page reste purement acoustique (découverte).
+    #[test]
+    fn un_quart_de_la_page_reste_acoustique_3836() {
+        assert_eq!(part_acoustique(3), 0);
+        assert_eq!(part_acoustique(4), 1);
+        assert_eq!(part_acoustique(20), 5);
+        // 12 pistes classées par le son (1 la plus proche) ; 8 du genre, plus
+        // que les 6 places de tête d'une page de 8.
+        let classement: Vec<(i64, f32)> = (1..=12).map(|i| (i, 1.0 - i as f32 / 100.0)).collect();
+        let etiquetees = [2, 3, 5, 6, 8, 9, 11, 12];
+        let sortie = croiser(&classement, &etiquetees, 8);
+        let ids: Vec<i64> = sortie.iter().map(|p| p.id).collect();
+        assert_eq!(
+            ids,
+            vec![2, 3, 5, 6, 8, 9, 1, 4, 11, 12, 7, 10],
+            "6 du genre en tête, 2 meilleures hors genre, puis le reste"
+        );
+        let page = &sortie[..8];
+        assert_eq!(
+            page.iter().filter(|p| !p.du_genre).count(),
+            2,
+            "un quart acoustique"
+        );
+        // Peu de pistes du genre : le son complète la page, comme avant.
+        let peu: Vec<i64> = croiser(&classement, &[5], 4)
+            .iter()
+            .take(4)
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(peu, vec![5, 1, 2, 3]);
     }
 }
