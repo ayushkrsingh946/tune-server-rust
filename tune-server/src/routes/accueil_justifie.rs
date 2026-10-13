@@ -15,6 +15,14 @@
 //! | `artiste_possede` | `artiste`, `albums`     | `/home/artist-releases` : `albums` albums de l'artiste dans la bibliothèque |
 //! | `autre_version`   | `titre`                 | `/home/other-versions` : une autre version de `titre`, écouté récemment |
 //! | `ajout_recent`    | `ajoute_le` (s, option) | `/home/new-in-library`, `/home/recently-added` : la date d'AJOUT |
+//! | `hasard`          | —                       | `/home/recommendations`, repli : tiré au hasard dans la bibliothèque (go du 13/10) |
+//! | `reprise`         | `ecoute_le` (s, option) | `/home/continue-listening` : la DERNIÈRE écoute de ce contexte |
+//! | `souvent_ecoute`  | `ecoutes`               | `/home`, section `top` : le nombre d'écoutes que compte l'historique |
+//! | `radio_favorite`  | —                       | `/home`, section `radios` : la station est en favori |
+//! | `radio_ecoutee`   | `ecoute_le` (s, option) | `/home`, section `radios` : écoutée récemment, hors favoris |
+//!
+//! `/home/top-mixes` porte `genre_frequent` au niveau du MIX : il est bâti
+//! sur un des genres les plus présents dans l'historique.
 //!
 //! Ce qu'on n'a PAS inventé, et pourquoi :
 //!
@@ -22,9 +30,10 @@
 //!   rangée ne choisit aujourd'hui un élément à partir des artistes ÉCOUTÉS.
 //!   Les nouveautés partent des favoris et de la bibliothèque, pas de
 //!   l'historique ; le dire serait mentir.
-//! - **Le repli au hasard** de `/home/recommendations` (`reason: "random"`) :
-//!   le hasard n'est pas une raison. Pas de `raison` — la règle du chantier :
-//!   une rangée qui ne peut pas justifier ses éléments n'en renvoie pas.
+//! - **Le repli au hasard** de `/home/recommendations` (`reason: "random"`)
+//!   ne disait rien jusqu'au 13/10. Go de Bertrand ce jour-là : il dit
+//!   désormais ce qu'il est — `hasard`, « tiré au hasard » —, ce qui est vrai,
+//!   et ne fait pas passer le hasard pour un choix.
 //!
 //! Le champ historique `reason` (`"random"` / `"genre_match"`) reste tel quel
 //! pour les clients déployés : il est lu comme une chaîne.
@@ -34,8 +43,10 @@
 //! Par profil (`X-Profile-Id`), en base (`suggestions_ecartees`, migration
 //! SQLite 125 / PG 089). Les rangées de RECOMMANDATION — recommandations,
 //! nouveautés de vos artistes, autres versions — ne proposent plus ce que le
-//! profil a écarté. Les rangées FACTUELLES (ajouts récents, reprendre
-//! l'écoute) ne filtrent pas : un album ajouté hier reste ajouté hier.
+//! profil a écarté. Depuis le go du 13/10, « Continuer l'écoute », les mix
+//! par genre et la page composée `/home` aussi (reprises, plus écoutés, à
+//! découvrir). Les AJOUTS RÉCENTS ne filtrent pas : un album ajouté hier
+//! reste ajouté hier.
 
 use axum::Json;
 use axum::extract::State;
@@ -83,6 +94,54 @@ pub(crate) fn raison_ajout_recent(ajoute_le: Option<f64>) -> Value {
     }
 }
 
+/// Tiré au hasard dans la bibliothèque : le repli des recommandations.
+pub(crate) fn raison_hasard() -> Value {
+    json!({"type": "hasard"})
+}
+
+/// Une date de `listen_history` / `radio_stations` (ISO-8601, `Z` ou non,
+/// `T` ou espace) en secondes depuis l'époque. `None` si illisible.
+pub(crate) fn secondes_de(date: &str) -> Option<i64> {
+    let d = date.trim();
+    if d.is_empty() {
+        return None;
+    }
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(d) {
+        return Some(t.timestamp());
+    }
+    let sans_z = d.trim_end_matches('Z');
+    ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"]
+        .iter()
+        .find_map(|f| chrono::NaiveDateTime::parse_from_str(sans_z, f).ok())
+        .map(|n| n.and_utc().timestamp())
+}
+
+/// Une reprise d'écoute : le contexte a été écouté pour la dernière fois à
+/// `ecoute_le`. Sans date lisible, la raison reste (« écouté récemment »).
+pub(crate) fn raison_reprise(ecoute_le: Option<&str>) -> Value {
+    match ecoute_le.and_then(secondes_de) {
+        Some(s) => json!({"type": "reprise", "ecoute_le": s}),
+        None => json!({"type": "reprise"}),
+    }
+}
+
+/// Un des titres les plus écoutés : `ecoutes` écoutes dans l'historique.
+pub(crate) fn raison_souvent_ecoute(ecoutes: i64) -> Option<Value> {
+    (ecoutes > 0).then(|| json!({"type": "souvent_ecoute", "ecoutes": ecoutes}))
+}
+
+/// Une radio de la rangée `radios` de `/home` : favorite, ou écoutée
+/// récemment.
+pub(crate) fn raison_radio(favorite: bool, derniere_ecoute: Option<&str>) -> Value {
+    if favorite {
+        return json!({"type": "radio_favorite"});
+    }
+    match derniere_ecoute.and_then(secondes_de) {
+        Some(s) => json!({"type": "radio_ecoutee", "ecoute_le": s}),
+        None => json!({"type": "radio_ecoutee"}),
+    }
+}
+
 // ── Le filtre ──────────────────────────────────────────────────────────────
 
 /// Ce que le profil qui regarde a écarté.
@@ -94,6 +153,38 @@ pub(crate) fn ecartees_du_profil(state: &AppState, profile: &ActiveProfile) -> E
 pub(crate) fn album_local_ecarte(e: &Ecartees, album: &Value) -> bool {
     album["id"].as_i64().is_some_and(|id| e.album_local(id))
         || album["artist_name"].as_str().is_some_and(|a| e.artiste(a))
+}
+
+/// Une entrée de « Continuer l'écoute » est-elle écartée ? Son album local,
+/// son artiste, ou l'objet de service qu'elle rouvre (album, playlist).
+pub(crate) fn reprise_ecartee(e: &Ecartees, item: &Value) -> bool {
+    if e.est_vide() {
+        return false;
+    }
+    if item["album_id"]
+        .as_i64()
+        .is_some_and(|id| e.album_local(id))
+        || item["artist_name"].as_str().is_some_and(|a| e.artiste(a))
+    {
+        return true;
+    }
+    let source = item["source"].as_str().unwrap_or_default();
+    let contexte = item["context_id"].as_str().unwrap_or_default();
+    match item["context_type"].as_str() {
+        Some("album") => e.album_de_service(source, contexte),
+        Some("playlist") => e.playlist_de_service(source, contexte),
+        _ => false,
+    }
+}
+
+/// Une piste proposée (mix, plus écoutés) est-elle écartée — son album
+/// local (`album_id`) ou son artiste (`artist_name`) ?
+pub(crate) fn piste_ecartee(e: &Ecartees, piste: &Value) -> bool {
+    !e.est_vide()
+        && (piste["album_id"]
+            .as_i64()
+            .is_some_and(|id| e.album_local(id))
+            || piste["artist_name"].as_str().is_some_and(|a| e.artiste(a)))
 }
 
 /// Épure les groupes d'« Autres versions » : versions locales et de service
@@ -198,7 +289,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn le_hasard_et_le_vide_ne_sont_pas_des_raisons() {
+    fn les_dates_de_l_historique_se_lisent_dans_leurs_trois_formes() {
+        let attendu = Some(1_760_270_400);
+        assert_eq!(secondes_de("2025-10-12T12:00:00Z"), attendu);
+        assert_eq!(secondes_de("2025-10-12T12:00:00"), attendu);
+        assert_eq!(secondes_de("2025-10-12 12:00:00"), attendu);
+        assert_eq!(secondes_de("hier"), None);
+        assert_eq!(
+            raison_reprise(Some("2025-10-12T12:00:00Z")),
+            json!({"type": "reprise", "ecoute_le": 1_760_270_400})
+        );
+        assert_eq!(raison_reprise(None), json!({"type": "reprise"}));
+        assert_eq!(raison_souvent_ecoute(0), None);
+        assert_eq!(
+            raison_radio(true, Some("2025-10-12T12:00:00Z")),
+            json!({"type": "radio_favorite"})
+        );
+    }
+
+    #[test]
+    fn une_reprise_s_ecarte_par_son_album_son_artiste_ou_son_objet_de_service() {
+        let mut e = Ecartees::default();
+        assert!(!reprise_ecartee(&e, &json!({"album_id": 4})));
+        e = ecartees_de(&[
+            ("album", "local", "4"),
+            ("playlist", "qobuz", "pl-1"),
+            ("artist", "nom", "miles davis"),
+        ]);
+        assert!(reprise_ecartee(&e, &json!({"album_id": 4})));
+        assert!(reprise_ecartee(&e, &json!({"artist_name": "Miles  Davis"})));
+        assert!(reprise_ecartee(
+            &e,
+            &json!({"context_type": "playlist", "source": "Qobuz", "context_id": "pl-1"})
+        ));
+        assert!(!reprise_ecartee(
+            &e,
+            &json!({"context_type": "album", "source": "qobuz", "context_id": "pl-1"})
+        ));
+        assert!(piste_ecartee(
+            &e,
+            &json!({"album_id": 4, "artist_name": "X"})
+        ));
+        assert!(!piste_ecartee(
+            &e,
+            &json!({"album_id": 5, "artist_name": "X"})
+        ));
+    }
+
+    fn ecartees_de(liste: &[(&str, &str, &str)]) -> Ecartees {
+        let mut e = Ecartees::default();
+        for (t, s, i) in liste {
+            e.ajouter(&SuggestionEcartee {
+                item_type: (*t).into(),
+                source: (*s).into(),
+                item_id: (*i).into(),
+                title: None,
+                subtitle: None,
+                cover_url: None,
+                created_at: None,
+            });
+        }
+        e
+    }
+
+    #[test]
+    fn le_vide_n_est_pas_une_raison() {
         assert_eq!(raison_genre_frequent("  "), None);
         assert_eq!(raison_artiste("Miles Davis", false, 0), None);
         assert_eq!(raison_artiste("", true, 3), None);

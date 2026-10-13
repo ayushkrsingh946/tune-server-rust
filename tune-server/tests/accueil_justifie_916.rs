@@ -16,6 +16,16 @@
 //!      rien rend 400 ;
 //!  (f) `/home/new-in-library` porte `raison: {type: ajout_recent, ajoute_le}`.
 //!
+//! Go du 13/10/2026 (les autres rangées) :
+//!
+//!  (g) le repli au hasard dit qu'il est le hasard : `raison: {type: hasard}` ;
+//!  (h) « Continuer l'écoute » porte `raison: {type: reprise, ecoute_le}` et
+//!      n'y remet plus ce que le profil a écarté — lui seul ;
+//!  (i) `/home/top-mixes` porte `raison: genre_frequent` par mix, et ses
+//!      pistes n'incluent plus un album écarté ;
+//!  (j) `/home` (page composée) parle la langue de l'interface et filtre
+//!      « À découvrir » et les reprises par profil.
+//!
 //! ⚠️ `tune-server` porte `autotests = false` — ce fichier n'est compilé que
 //! par sa cible `[[test]]` dans `Cargo.toml`.
 use axum::body::Body;
@@ -228,7 +238,7 @@ async fn une_designation_qui_ne_designe_rien_rend_400() {
 }
 
 #[tokio::test]
-async fn le_hasard_ne_porte_pas_de_raison() {
+async fn le_hasard_dit_qu_il_est_le_hasard() {
     let (app, state) = app_et_etat();
     // Aucun genre, aucune écoute : le repli au hasard.
     sql(
@@ -243,10 +253,7 @@ async fn le_hasard_ne_porte_pas_de_raison() {
     assert_eq!(st, StatusCode::OK, "{v}");
     let a = &v.as_array().expect("tableau")[0];
     assert_eq!(a["reason"], json!("random"), "{a}");
-    assert!(
-        a.get("raison").is_none(),
-        "le hasard n'est pas une raison : {a}"
-    );
+    assert_eq!(a["raison"], json!({"type": "hasard"}), "{a}");
 }
 
 #[tokio::test]
@@ -262,5 +269,214 @@ async fn les_nouveautes_de_la_bibliotheque_disent_leur_date_d_ajout() {
         premiers[0]["raison"],
         json!({"type": "ajout_recent", "ajoute_le": 1760000200}),
         "{v}"
+    );
+}
+
+async fn ecarter(app: &axum::Router, profil: &str, corps: Value) {
+    let (st, v) = appel(
+        app,
+        "POST",
+        "/api/v1/home/dismissed-suggestions",
+        profil,
+        Some(corps),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+/// La bibliothèque Jazz, avec un nombre de pistes par album (la reprise ne
+/// propose qu'un album NON fini) et deux écoutes datées : Kind of Blue
+/// (album 1) à midi, Sunday at the Village Vanguard (album 3) à dix heures.
+fn bibliotheque_jazz_ecoutee(state: &AppState) {
+    bibliotheque_jazz(state);
+    sql(state, "UPDATE albums SET track_count = 10");
+    sql(
+        state,
+        "UPDATE listen_history SET listened_at = '2026-10-12T12:00:00Z' WHERE album_id = 1",
+    );
+    sql(
+        state,
+        "INSERT INTO listen_history (track_id, album_id, title, artist_name, album_title, source, listened_at) \
+         VALUES (3, 3, 'Gloria''s Step', 'Bill Evans', 'Sunday at the Village Vanguard', 'local', \
+                 '2026-10-12T10:00:00Z')",
+    );
+}
+
+fn albums_de(v: &Value) -> Vec<i64> {
+    let mut ids: Vec<i64> = v
+        .as_array()
+        .expect("un tableau")
+        .iter()
+        .filter_map(|a| a["album_id"].as_i64().or(a["id"].as_i64()))
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test]
+async fn la_reprise_dit_quand_et_entend_pas_pour_moi() {
+    let (app, state) = app_et_etat();
+    bibliotheque_jazz_ecoutee(&state);
+    ProfileRepo::with_backend(state.backend.clone())
+        .create("voisin", Some("Le voisin"), None)
+        .expect("profil 2");
+
+    let (st, v) = appel(
+        &app,
+        "GET",
+        "/api/v1/home/continue-listening?limit=10",
+        "1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(albums_de(&v), vec![1, 3], "{v}");
+    let kob = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["album_id"] == json!(1))
+        .unwrap();
+    // 2026-10-12T12:00:00Z
+    assert_eq!(
+        kob["raison"],
+        json!({"type": "reprise", "ecoute_le": 1_791_806_400_i64}),
+        "{kob}"
+    );
+
+    ecarter(
+        &app,
+        "1",
+        json!({"item_type": "artist", "item_id": "Bill Evans"}),
+    )
+    .await;
+    let (_, v) = appel(
+        &app,
+        "GET",
+        "/api/v1/home/continue-listening?limit=10",
+        "1",
+        None,
+    )
+    .await;
+    assert_eq!(
+        albums_de(&v),
+        vec![1],
+        "Bill Evans écarté par le profil 1 : {v}"
+    );
+    let (_, v) = appel(
+        &app,
+        "GET",
+        "/api/v1/home/continue-listening?limit=10",
+        "2",
+        None,
+    )
+    .await;
+    assert_eq!(
+        albums_de(&v),
+        vec![1, 3],
+        "le profil 2 n'a rien écarté : {v}"
+    );
+}
+
+#[tokio::test]
+async fn les_mix_disent_leur_genre_et_laissent_l_album_ecarte() {
+    let (app, state) = app_et_etat();
+    bibliotheque_jazz(&state);
+    ProfileRepo::with_backend(state.backend.clone())
+        .create("voisin", Some("Le voisin"), None)
+        .expect("profil 2");
+    let (st, v) = appel(&app, "GET", "/api/v1/home/top-mixes", "1", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let mix = &v.as_array().expect("tableau")[0];
+    assert_eq!(
+        mix["raison"],
+        json!({"type": "genre_frequent", "genre": "Jazz"}),
+        "{mix}"
+    );
+    assert_eq!(albums_de(&mix["tracks"]), vec![1, 2, 3], "{mix}");
+
+    ecarter(
+        &app,
+        "1",
+        json!({"item_type": "album", "source": "local", "item_id": "2"}),
+    )
+    .await;
+    let (_, v) = appel(&app, "GET", "/api/v1/home/top-mixes", "1", None).await;
+    assert_eq!(albums_de(&v[0]["tracks"]), vec![1, 3], "{v}");
+    let (_, v) = appel(&app, "GET", "/api/v1/home/top-mixes", "2", None).await;
+    assert_eq!(albums_de(&v[0]["tracks"]), vec![1, 2, 3], "{v}");
+}
+
+#[tokio::test]
+async fn la_page_composee_parle_la_langue_et_filtre_par_profil() {
+    let (app, state) = app_et_etat();
+    bibliotheque_jazz(&state);
+    sql(&state, "UPDATE albums SET track_count = 10");
+    ProfileRepo::with_backend(state.backend.clone())
+        .create("voisin", Some("Le voisin"), None)
+        .expect("profil 2");
+    ecarter(
+        &app,
+        "1",
+        json!({"item_type": "album", "source": "local", "item_id": "2"}),
+    )
+    .await;
+
+    let req = |langue: &str, profil: &str| {
+        Request::builder()
+            .uri("/api/v1/home")
+            .header("X-Profile-Id", profil)
+            .header("Accept-Language", langue)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let lire = |r: axum::response::Response| async move {
+        let b = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<Value>(&b).unwrap()
+    };
+    let section = |v: &Value, id: &str| {
+        v["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == json!(id))
+            .cloned()
+            .unwrap_or_else(|| panic!("section {id} absente : {v}"))
+    };
+
+    let en = lire(app.clone().oneshot(req("en", "1")).await.unwrap()).await;
+    assert_eq!(
+        section(&en, "continue")["title"],
+        json!("Continue listening"),
+        "{en}"
+    );
+    assert_eq!(
+        section(&en, "discover")["title"],
+        json!("To discover"),
+        "{en}"
+    );
+    assert_eq!(
+        albums_de(&section(&en, "discover")["items"]),
+        vec![3],
+        "album 2 écarté : {en}"
+    );
+    assert_eq!(
+        section(&en, "continue")["items"][0]["raison"]["type"],
+        json!("reprise"),
+        "{en}"
+    );
+
+    let fr = lire(app.clone().oneshot(req("fr", "2")).await.unwrap()).await;
+    assert_eq!(
+        section(&fr, "continue")["title"],
+        json!("Continuer l'écoute"),
+        "{fr}"
+    );
+    assert_eq!(
+        albums_de(&section(&fr, "discover")["items"]),
+        vec![2, 3],
+        "profil 2 : {fr}"
     );
 }
