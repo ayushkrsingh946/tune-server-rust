@@ -103,7 +103,7 @@ pub(super) async fn album_instruments(
 
 /// Le transport Discogs du serveur : client HTTP partagé, limiteur partagé,
 /// jeton PERSONNEL d'abord. `Err` = panne (le jeton n'y figure jamais).
-async fn lire_discogs(
+pub(super) async fn lire_discogs(
     client: reqwest::Client,
     jeton: Option<String>,
     url: String,
@@ -235,15 +235,20 @@ pub(super) struct CorpsEstimation {
     redo: bool,
 }
 
-/// `POST /library/albums/{id}/bpm/estimate`
-pub(super) async fn album_bpm_estimate(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-    corps: Option<Json<CorpsEstimation>>,
-) -> Json<Value> {
-    let refaire = corps.map(|Json(c)| c.redo).unwrap_or(false);
+/// Estime les BPM d'un album : Wikidata (P1725), puis le signal décodé par
+/// Tune (Rust natif). Le chemin UNIQUE du geste sur la fiche et de la passe de
+/// lot (`POST /library/bpm-all`), pour qu'ils ne puissent pas diverger.
+///
+/// `ceder` : avant chaque décodage, attendre son tour (pause de
+/// l'enrichissement, puis cession à la lecture). La passe de lot seulement.
+pub(super) async fn estimer_les_bpm(
+    state: &AppState,
+    id: i64,
+    refaire: bool,
+    ceder: bool,
+) -> tempo::BilanBpm {
     let client = state.http_client.clone();
-    let bilan = tempo::estimer_l_album_par(
+    tempo::estimer_l_album_par(
         &state.backend,
         id,
         refaire,
@@ -257,9 +262,29 @@ pub(super) async fn album_bpm_estimate(
                 .await
             }
         },
-        |chemin| async move { tempo::mesurer_bpm_du_fichier(&chemin).await },
+        move |chemin| async move {
+            if ceder {
+                tune_core::taches_de_fond::attendre_son_tour(
+                    tune_core::taches_de_fond::Tache::Enrichissement,
+                )
+                .await;
+            }
+            tempo::mesurer_bpm_du_fichier(&chemin).await
+        },
     )
-    .await;
+    .await
+}
+
+/// `POST /library/albums/{id}/bpm/estimate`
+pub(super) async fn album_bpm_estimate(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    corps: Option<Json<CorpsEstimation>>,
+) -> Json<Value> {
+    let refaire = corps.map(|Json(c)| c.redo).unwrap_or(false);
+    // Le geste sur UNE fiche ne cède pas à la lecture : l'utilisateur l'a
+    // demandé maintenant. Seule la passe de lot cède.
+    let bilan = estimer_les_bpm(&state, id, refaire, false).await;
     let backend = state.backend.clone();
     let pistes = tokio::task::spawn_blocking(move || tempo::bpm_de_l_album(&backend, id))
         .await
