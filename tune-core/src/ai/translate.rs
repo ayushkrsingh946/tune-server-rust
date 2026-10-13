@@ -57,86 +57,17 @@ pub async fn translate_query(settings: &SettingsRepo, query: &str) -> Option<Str
     Some(t)
 }
 
-/// Noms de genre français (repliés : minuscules, sans accents, espaces
-/// simples, tirets en espaces) → graphie anglaise de la hiérarchie des genres
-/// (`library::genre_tree`). Seuls les noms dont la forme française DIFFÈRE
-/// sont listés ; un nom déjà anglais passe par `genre_tree::nom_canonique`.
+/// Le nom anglais canonique d'une requête qui est EXACTEMENT un nom de genre,
+/// dans une des langues de la table versionnée des genres équivalents
+/// (`library/genres_equivalents.json`, #3836), quelle que soit sa casse.
+/// `None` pour tout le reste.
 ///
 /// Correspondance de la requête ENTIÈRE, jamais d'un fragment : « jazz doux
 /// pour le soir » n'est pas un nom de genre et garde son chemin (clé IA ou
-/// requête brute). Un mot qui est aussi une humeur (« romantique ») n'y est
-/// pas : le remplacer par un genre changerait le sens de la recherche.
-const GENRES_EN_FRANCAIS: &[(&str, &str)] = &[
-    ("rock progressif", "Progressive Rock"),
-    ("rock progressive", "Progressive Rock"),
-    ("rock prog", "Progressive Rock"),
-    ("rock alternatif", "Alternative Rock"),
-    ("rock independant", "Indie Rock"),
-    ("rock inde", "Indie Rock"),
-    ("rock classique", "Classic Rock"),
-    ("rock psychedelique", "Psychedelic Rock"),
-    ("rock garage", "Garage Rock"),
-    ("post rock", "Post-Rock"),
-    ("metal progressif", "Progressive Metal"),
-    ("metal symphonique", "Symphonic Metal"),
-    ("jazz vocal", "Vocal Jazz"),
-    ("jazz latin", "Latin Jazz"),
-    ("jazz manouche", "Gypsy Jazz"),
-    ("musique electronique", "Electronic"),
-    ("electronique", "Electronic"),
-    ("musique classique", "Classical"),
-    ("classique", "Classical"),
-    ("musique baroque", "Baroque"),
-    ("musique contemporaine", "Contemporary Classical"),
-    ("opera", "Opera"),
-    ("musique de chambre", "Chamber Music"),
-    ("musique orchestrale", "Orchestral"),
-    ("musique chorale", "Choral"),
-    ("minimalisme", "Minimalism"),
-    ("musique du monde", "World"),
-    ("musiques du monde", "World"),
-    ("bande originale", "Soundtrack"),
-    ("musique de film", "Film Score"),
-    ("musique de jeu video", "Video Game"),
-    ("comedie musicale", "Musical"),
-    ("chanson francaise", "French Chanson"),
-    ("celtique", "Celtic"),
-    ("folk independant", "Indie Folk"),
-    ("pop independante", "Indie Pop"),
-    ("blues electrique", "Electric Blues"),
-    ("musique arabe", "Arabic"),
-    ("musique classique indienne", "Indian Classical"),
-    ("rai", "Raï"),
-];
-
-/// Replie une saisie pour la comparer au glossaire : minuscules, accents
-/// retirés, tirets et soulignés en espaces, espaces simples.
-fn replier(q: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    let sans_accents: String = q
-        .nfkd()
-        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
-        .collect();
-    sans_accents
-        .to_lowercase()
-        .replace(['-', '_'], " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Le nom anglais canonique d'une requête qui est EXACTEMENT un nom de genre,
-/// français ou anglais, quelle que soit sa casse. `None` pour tout le reste.
+/// requête brute). Un mot qui est aussi une humeur (« romantique ») n'est pas
+/// dans la table : le remplacer par un genre changerait le sens de la recherche.
 pub fn nom_de_genre_en_anglais(q: &str) -> Option<&'static str> {
-    if let Some(nom) = crate::library::genre_tree::nom_canonique(q) {
-        return Some(nom);
-    }
-    let replie = replier(q);
-    GENRES_EN_FRANCAIS
-        .iter()
-        .find(|(fr, _)| *fr == replie)
-        .map(|(_, en)| *en)
-        .or_else(|| crate::library::genre_tree::nom_canonique(&replie))
+    crate::library::genres_equivalents::canonique(q)
 }
 
 /// Les cles API que la traduction sait employer, dans l'ordre de preference :
