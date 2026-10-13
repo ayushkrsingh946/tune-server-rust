@@ -440,6 +440,22 @@ qu'il soit**.
   détail par usage et alerte à 80 %). La réponse porte `plafond`, comme les
   autres usages ; plafond atteint : `{reply, error: "plafond_atteint"}`,
   jamais 401.
+- **Coût exact de la question** (décision de Bertrand du 13/10/2026) : la
+  réponse porte `cout_eur`, la somme de ce qui a été compté à CHACUN de ses
+  tours (`Passerelle::discuter_compte` rend le coût du tour, au tarif daté et
+  au taux de l'assistant, celui-là même qui entre dans la consommation). Ce
+  n'est ni la dépense du mois ni une différence avant/après : un autre usage
+  lancé pendant la question n'y entre pas. Un refus en cours de question
+  (plafond atteint au 2ᵉ tour…) porte aussi `cout_eur` et `plafond` : les
+  tours déjà payés y restent. Le repli local et le chemin historique (binaire
+  sans le greffon) ne comptent rien et n'ont ni `cout_eur` ni `plafond`.
+
+```json
+{"reply": "…", "actions": [{"tool", "input", "result"}], "zone_id": 1,
+ "cout_eur": 0.0012,
+ "plafond": {"depense_eur", "plafond_eur", "part", "seuil_alerte", "alerte", "atteint"},
+ "error": "plafond_atteint" | "cle_refusee" | "erreur_fournisseur" | …}
+```
 - **Bibliothèque seule** : les outils sont ceux de `tune_core::ai::tools`,
   tous locaux (aucun service de streaming).
 
@@ -466,5 +482,14 @@ compatible OpenAI et Ollama sur 127.0.0.1 : traduction aller-retour, clé
 `Bearer`, comptage `requete`, alerte, refus au plafond sans requête), les
 essais de module de `dialogue`, et `tests_bornes` dans `routes/ai.rs`.
 
-Client web : aucun écran du client web n'appelle `/ai/query` ; rien n'y
-change.
+Essai du coût exact : `tune-server/tests/assistant_ia_cout_exact.rs` (route
+montée, faux fournisseur : deux questions de même coût, la seconde rend SON
+coût et non la dépense du mois ; refus au plafond au 2ᵉ tour, le 1ᵉʳ tour
+payé reste dans `cout_eur`).
+
+Client web : le panneau « Demander à l'assistant » (barre du haut, visible
+seulement si l'assistant est prêt) appelle `/ai/query` — tune-web-client#2182,
+`src/components/v2/DemanderAssistantIaV2.svelte`. Il affiche les liens lire /
+ajouter tirés de `actions`, le coût de la question (`cout_eur`) et l'état du
+plafond (`plafond`). Face à un serveur antérieur sans `cout_eur`, il n'affiche
+que la dépense du mois et le plafond.

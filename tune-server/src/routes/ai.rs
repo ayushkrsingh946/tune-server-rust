@@ -149,13 +149,21 @@ const MAX_JETONS_PAR_TOUR: u32 = 1024;
 
 impl Interlocuteur {
     /// Étape 3 : l'état du plafond de l'assistant (`plafond`, avec l'alerte à
-    /// 80 %) joint à la réponse, comme pour les autres usages.
-    fn avec_plafond(&self, mut v: Value) -> Value {
+    /// 80 %) joint à la réponse, comme pour les autres usages, et le coût
+    /// EXACT de la question (`cout_eur`) : la somme de ce qui a été compté à
+    /// chacun de ses tours, au tarif daté de l'assistant. Le chemin
+    /// historique ne compte rien et ne porte aucun des deux.
+    fn avec_plafond(&self, mut v: Value, cout_micro_eur: u64) -> Value {
         match self {
             #[cfg(not(feature = "assistant-ia"))]
-            Self::Historique(_) => {}
+            Self::Historique(_) => {
+                let _ = cout_micro_eur;
+            }
             #[cfg(feature = "assistant-ia")]
-            Self::Assistant(p) => v["plafond"] = p.etat_plafond(),
+            Self::Assistant(p) => {
+                v["plafond"] = p.etat_plafond();
+                v["cout_eur"] = json!(tune_assistant_ia::couts::micro_en_euros(cout_micro_eur));
+            }
         }
         v
     }
@@ -193,13 +201,17 @@ impl Interlocuteur {
         system: &str,
         messages: Vec<Message>,
         tools: &[tune_core::ai::client::Tool],
+        cout_micro_eur: &mut u64,
     ) -> Result<tune_core::ai::client::ApiResponse, Refus> {
         match self {
             #[cfg(not(feature = "assistant-ia"))]
-            Self::Historique(client) => client
-                .chat(system, messages, tools)
-                .await
-                .map_err(Refus::Erreur),
+            Self::Historique(client) => {
+                let _ = cout_micro_eur;
+                client
+                    .chat(system, messages, tools)
+                    .await
+                    .map_err(Refus::Erreur)
+            }
             #[cfg(feature = "assistant-ia")]
             Self::Assistant(p) => {
                 let illisible = || Refus::Assistant {
@@ -208,13 +220,16 @@ impl Interlocuteur {
                 };
                 let messages = serde_json::to_value(&messages).map_err(|_| illisible())?;
                 let outils = serde_json::to_value(tools).map_err(|_| illisible())?;
-                let v = p
-                    .discuter(system, &messages, &outils, MAX_JETONS_PAR_TOUR)
+                let (v, cout) = p
+                    .discuter_compte(system, &messages, &outils, MAX_JETONS_PAR_TOUR)
                     .await
                     .map_err(|e| Refus::Assistant {
                         code: e.code(),
                         message: e.message(),
                     })?;
+                // Compté AVANT la lecture : un tour payé dont la réponse est
+                // illisible reste dans le coût de la question.
+                *cout_micro_eur += cout;
                 serde_json::from_value(v).map_err(|_| illisible())
             }
         }
@@ -222,22 +237,32 @@ impl Interlocuteur {
 }
 
 /// La réponse d'un refus, ou l'erreur HTTP du chemin historique.
-fn sortie_de_refus(r: Refus, actions: &[Value], zone_id: i64) -> Result<Json<Value>, AppError> {
+fn sortie_de_refus(
+    client: &Interlocuteur,
+    r: Refus,
+    actions: &[Value],
+    zone_id: i64,
+    cout_micro_eur: u64,
+) -> Result<Json<Value>, AppError> {
     match r {
         #[cfg(not(feature = "assistant-ia"))]
         Refus::Erreur(e) => {
-            let _ = (actions, zone_id);
+            let _ = (client, actions, zone_id, cout_micro_eur);
             Err(AppError::internal(format!("Claude API error: {e}")))
         }
         #[cfg(feature = "assistant-ia")]
         Refus::Assistant { code, message } => {
             info!(code, "ai_query_refusee_par_l_assistant");
-            Ok(Json(json!({
-                "reply": message,
-                "error": code,
-                "actions": actions,
-                "zone_id": zone_id,
-            })))
+            // Les tours déjà payés de la question restent dans son coût.
+            Ok(Json(client.avec_plafond(
+                json!({
+                    "reply": message,
+                    "error": code,
+                    "actions": actions,
+                    "zone_id": zone_id,
+                }),
+                cout_micro_eur,
+            )))
         }
     }
 }
@@ -274,11 +299,17 @@ async fn ai_query(
 
     let mut actions: Vec<Value> = Vec::new();
     let mut envoyes = 0usize;
+    let mut cout_micro_eur = 0u64;
 
     for round in 0..MAX_TOOL_ROUNDS {
-        let response = match client.chat(&system, messages.clone(), &tools).await {
+        let response = match client
+            .chat(&system, messages.clone(), &tools, &mut cout_micro_eur)
+            .await
+        {
             Ok(r) => r,
-            Err(r) => return sortie_de_refus(r, &actions, executor.zone_id()),
+            Err(r) => {
+                return sortie_de_refus(&client, r, &actions, executor.zone_id(), cout_micro_eur);
+            }
         };
 
         let tool_uses: Vec<_> = response
@@ -295,11 +326,14 @@ async fn ai_query(
                 actions = actions.len(),
                 "ai_done"
             );
-            return Ok(Json(client.avec_plafond(json!({
-                "reply": reply,
-                "actions": actions,
-                "zone_id": executor.zone_id(),
-            }))));
+            return Ok(Json(client.avec_plafond(
+                json!({
+                    "reply": reply,
+                    "actions": actions,
+                    "zone_id": executor.zone_id(),
+                }),
+                cout_micro_eur,
+            )));
         }
 
         let assistant_blocks: Vec<ContentBlock> = response.content.clone();
@@ -330,17 +364,23 @@ async fn ai_query(
         }
     }
 
-    let final_response = match client.chat(&system, messages, &[]).await {
+    let final_response = match client
+        .chat(&system, messages, &[], &mut cout_micro_eur)
+        .await
+    {
         Ok(r) => r,
-        Err(r) => return sortie_de_refus(r, &actions, executor.zone_id()),
+        Err(r) => return sortie_de_refus(&client, r, &actions, executor.zone_id(), cout_micro_eur),
     };
 
     let reply = extract_text(&final_response.content);
-    Ok(Json(client.avec_plafond(json!({
-        "reply": reply,
-        "actions": actions,
-        "zone_id": executor.zone_id(),
-    }))))
+    Ok(Json(client.avec_plafond(
+        json!({
+            "reply": reply,
+            "actions": actions,
+            "zone_id": executor.zone_id(),
+        }),
+        cout_micro_eur,
+    )))
 }
 
 // ---------------------------------------------------------------------------
