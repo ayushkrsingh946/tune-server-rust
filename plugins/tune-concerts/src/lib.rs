@@ -42,8 +42,8 @@
 //!
 //! Le périmètre de `/upcoming` est celui que le NUAGE a appliqué : il le garde
 //! par instance (`concert_locations`) et l'applique lui-même à la lecture. Le
-//! greffon n'envoie donc que l'identité de l'instance, et remonte à l'écran
-//! le périmètre rendu — sans lui, l'écran affiche « 3 concerts » sans pouvoir
+//! greffon envoie l'identité de l'instance et le lieu du profil, puis remonte
+//! à l'écran le périmètre rendu — sans lui, l'écran affiche « 3 concerts » sans pouvoir
 //! dire « à moins de 100 km de Dijon », ni proposer d'élargir.
 //!
 //! Trois crans, jamais un filtre binaire (arbitrage du 29/08) : rayon de 50,
@@ -640,7 +640,14 @@ async fn concerts_a_venir(
     if let Some(propre) = etat.localisation_propre(profil) {
         let applique = etat.localisation_du_nuage();
         if !applique.as_ref().is_some_and(|a| meme_lieu(a, &propre)) {
-            renvoyer_localisation(&etat, &client, &instance_id, profil, &propre).await;
+            if let Err(echec) =
+                renvoyer_localisation(&etat, &client, &instance_id, profil, &propre).await
+            {
+                return match echec {
+                    EchecLocalisation::Refusee => localisation_invalide(None),
+                    EchecLocalisation::Nuage(e) => refus_du_nuage(&e, false),
+                };
+            }
         }
     }
     let lieu = etat.localisation(profil);
@@ -762,33 +769,35 @@ fn a_garder(rendu: &Value, demande: &Value) -> Value {
 /// Renvoie au nuage la localisation PROPRE d'un profil, qui n'est pas celle
 /// qu'il applique (tune-web-client#1755). Appelée sous le verrou du nuage.
 ///
-/// Un échec n'empêche pas la lecture : elle part quand même, et le nuage dit
-/// dans sa réponse le lieu qu'il a appliqué (`city`, `scope`) — l'écran
-/// l'affiche, rien n'est caché.
+/// Un échec arrête la lecture : le nuage pourrait sinon servir les concerts
+/// du profil précédent. Le refus et son éventuel délai sont rendus au client.
 async fn renvoyer_localisation(
     etat: &EtatConcerts,
     client: &reqwest::Client,
     instance_id: &str,
     profil: Option<i64>,
     propre: &Value,
-) {
+) -> Result<(), EchecLocalisation> {
     let demande = match valider_localisation(propre) {
         Ok(d) => d,
         Err(champ) => {
             warn!(profil = ?profil, champ, "concerts_localisation_du_profil_illisible");
-            return;
+            return Err(EchecLocalisation::Refusee);
         }
     };
     match enregistrer_localisation_vers(&etat.racine, client, instance_id, &demande).await {
         Ok(rendu) => {
             etat.garder_localisation(profil, &a_garder(&rendu, &demande));
             info!(profil = ?profil, "concerts_localisation_du_profil_renvoyee");
+            Ok(())
         }
         Err(EchecLocalisation::Refusee) => {
             warn!(profil = ?profil, "concerts_localisation_du_profil_refusee");
+            Err(EchecLocalisation::Refusee)
         }
         Err(EchecLocalisation::Nuage(e)) => {
             warn!(profil = ?profil, error = %e, "concerts_localisation_du_profil_non_renvoyee");
+            Err(EchecLocalisation::Nuage(e))
         }
     }
 }
