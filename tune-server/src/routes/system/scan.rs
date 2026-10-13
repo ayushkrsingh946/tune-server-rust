@@ -1713,6 +1713,8 @@ async fn spawn_library_scan_avec_lecteur(
             Some(p) => vec![p.clone()],
             None => music_dirs.clone(),
         };
+        // #6167 — ce que couvre le total : toute la bibliothèque, ou un dossier.
+        let mut portee = PorteeDuScan::new(targeted.is_none(), scan_dirs.clone());
 
         tracing::info!(
             dirs = ?scan_dirs,
@@ -1730,11 +1732,17 @@ async fn spawn_library_scan_avec_lecteur(
         // Stop from t=0. `total: 0` marks it indeterminate until discovery ends.
         event_bus.emit(
             "library.scan.started",
-            json!({ "music_dirs": &music_dirs, "phase": "indexing", "total": 0 }),
+            portee.avec(
+                json!({ "music_dirs": &music_dirs, "phase": "indexing", "total": 0 }),
+                None,
+            ),
         );
         event_bus.emit(
             "library.scan.progress",
-            json!({ "phase": "indexing", "scanned": 0i64, "added": 0i64, "total": 0i64 }),
+            portee.avec(
+                json!({ "phase": "indexing", "scanned": 0i64, "added": 0i64, "total": 0i64 }),
+                None,
+            ),
         );
 
         let exclude_patterns = crate::auto_scan::scan_exclude_patterns(&db);
@@ -1770,15 +1778,19 @@ async fn spawn_library_scan_avec_lecteur(
             &exclude_patterns,
             tune_core::scanner::walker::CADENCE_PROGRESSION_PARCOURS,
             &mut |p| {
+                let dossier = Some(p.dossier_courant);
                 event_bus.emit(
                     "library.scan.progress",
-                    json!({
-                        "phase": "indexing",
-                        "scanned": p.fichiers_vus as i64,
-                        "added": 0i64,
-                        "total": 0i64,
-                        "current_dir": p.dossier_courant,
-                    }),
+                    portee.avec(
+                        json!({
+                            "phase": "indexing",
+                            "scanned": p.fichiers_vus as i64,
+                            "added": 0i64,
+                            "total": 0i64,
+                            "current_dir": dossier,
+                        }),
+                        dossier,
+                    ),
                 );
             },
             &scan_cancel_requested,
@@ -1859,6 +1871,8 @@ async fn spawn_library_scan_avec_lecteur(
                 .collect()
         };
         let total_discovered = files.len();
+        portee.compter(&files);
+        let portee = &portee;
 
         let discovered_paths: std::collections::HashSet<String> = files
             .iter()
@@ -2011,16 +2025,20 @@ async fn spawn_library_scan_avec_lecteur(
         let prefiltre_verifies = std::sync::atomic::AtomicUsize::new(0);
         let prefiltre_derniere_annonce = std::sync::Mutex::new(std::time::Instant::now());
         let annoncer_le_prefiltre = |verifies: usize, dossier: Option<String>| {
+            let ou = dossier.as_deref();
             event_bus.emit(
                 "library.scan.progress",
-                json!({
-                    "phase": "indexing",
-                    "stage": "verification",
-                    "scanned": verifies as i64,
-                    "added": 0i64,
-                    "total": total_discovered as i64,
-                    "current_dir": dossier,
-                }),
+                portee.avec(
+                    json!({
+                        "phase": "indexing",
+                        "stage": "verification",
+                        "scanned": verifies as i64,
+                        "added": 0i64,
+                        "total": total_discovered as i64,
+                        "current_dir": ou,
+                    }),
+                    ou,
+                ),
             );
         };
         annoncer_le_prefiltre(0, files.first().and_then(|p| dossier_de(p)));
@@ -2076,12 +2094,15 @@ async fn spawn_library_scan_avec_lecteur(
 
         event_bus.emit(
             "library.scan.started",
-            json!({
-                "music_dirs": &music_dirs,
-                "total": total_discovered,
-                "to_scan": files_to_scan.len(),
-                "unchanged": pre_skipped,
-            }),
+            portee.avec(
+                json!({
+                    "music_dirs": &music_dirs,
+                    "total": total_discovered,
+                    "to_scan": files_to_scan.len(),
+                    "unchanged": pre_skipped,
+                }),
+                None,
+            ),
         );
 
         // Emit an immediate progress event so the panel shows "0 / total" and a
@@ -2090,18 +2111,22 @@ async fn spawn_library_scan_avec_lecteur(
         // many seconds and reads as "stuck / doing nothing" (bug #1129). The
         // per-batch emit below only fires once `processed > 0`, so without this
         // the very start of a scan has no counter at all.
+        let premier_dossier = files_to_scan.first().and_then(|p| dossier_de(p));
         event_bus.emit(
             "library.scan.progress",
-            json!({
-                "phase": "files",
-                "scanned": pre_skipped,
-                "added": 0i64,
-                "total": total_discovered as i64,
-                "inserted": 0i64,
-                "updated": 0i64,
-                "skipped": pre_skipped,
-                "current_dir": files_to_scan.first().and_then(|p| dossier_de(p)),
-            }),
+            portee.avec(
+                json!({
+                    "phase": "files",
+                    "scanned": pre_skipped,
+                    "added": 0i64,
+                    "total": total_discovered as i64,
+                    "inserted": 0i64,
+                    "updated": 0i64,
+                    "skipped": pre_skipped,
+                    "current_dir": premier_dossier,
+                }),
+                premier_dossier.as_deref(),
+            ),
         );
 
         // --- Batched scan + import ---
@@ -2571,19 +2596,22 @@ async fn spawn_library_scan_avec_lecteur(
 
                     event_bus.emit(
                         "library.scan.progress",
-                        json!({
-                            "phase": "files",
-                            "scanned": processed,
-                            "added": inserted,
-                            "total": total,
-                            "batch": batch_idx,
-                            "inserted": inserted,
-                            "updated": updated,
-                            "skipped": skipped,
-                            "tracks_per_second": (tracks_per_second * 10.0).round() / 10.0,
-                            "eta_seconds": eta_seconds,
-                            "current_dir": dossier_du_lot,
-                        }),
+                        portee.avec(
+                            json!({
+                                "phase": "files",
+                                "scanned": processed,
+                                "added": inserted,
+                                "total": total,
+                                "batch": batch_idx,
+                                "inserted": inserted,
+                                "updated": updated,
+                                "skipped": skipped,
+                                "tracks_per_second": (tracks_per_second * 10.0).round() / 10.0,
+                                "eta_seconds": eta_seconds,
+                                "current_dir": dossier_du_lot,
+                            }),
+                            dossier_du_lot.as_deref(),
+                        ),
                     );
                 }
 
@@ -6012,6 +6040,87 @@ fn dossier_de(path: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 #[path = "progression_scan_manuel_tests_6019.rs"]
 mod progression_scan_manuel_tests_6019;
+
+/// #6167 (Tades, fil 2231 : « 54 % mais de quelle bibliothèque parmi les 4 ? »)
+/// — la PORTÉE d'un scan, portée par chaque `library.scan.progress`.
+///
+/// Le pourcentage couvre tous les emplacements réunis, et rien ne le disait.
+/// Les annonces du scan manuel (parcours, vérification, lots) portent désormais
+/// (pas celles de `stage: extended_metadata`, émises par `lecture_bornee`, que
+/// le client complète avec la dernière portée connue) :
+/// - `scope` : `"library"` (toute la bibliothèque) ou `"folder"` (scan ciblé) ;
+/// - `locations_total` : le nombre d'emplacements couverts ;
+/// - quand le dossier en cours est connu, `location_index` (rang 1-based dans
+///   l'ordre des réglages), `location` (la racine) et, une fois le parcours
+///   fini, `location_files` (fichiers repérés sous cette racine).
+///
+/// Champs AJOUTÉS : un client qui les ignore lit les mêmes annonces qu'avant.
+pub(crate) struct PorteeDuScan {
+    bibliotheque: bool,
+    racines: Vec<String>,
+    fichiers_par_racine: Vec<Option<usize>>,
+}
+
+impl PorteeDuScan {
+    pub(crate) fn new(bibliotheque: bool, racines: Vec<String>) -> Self {
+        let n = racines.len();
+        Self {
+            bibliotheque,
+            racines,
+            fichiers_par_racine: vec![None; n],
+        }
+    }
+
+    /// Le rang (0-based) de la racine qui contient `chemin` : la plus longue,
+    /// si deux racines s'emboîtent.
+    pub(crate) fn rang(&self, chemin: &str) -> Option<usize> {
+        self.racines
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| sous_le_dossier(chemin, r))
+            .max_by_key(|(_, r)| r.len())
+            .map(|(i, _)| i)
+    }
+
+    /// Compte, une fois le parcours fini, les fichiers repérés par racine.
+    pub(crate) fn compter(&mut self, fichiers: &[std::path::PathBuf]) {
+        let mut comptes = vec![0usize; self.racines.len()];
+        for f in fichiers {
+            if let Some(i) = self.rang(&f.to_string_lossy()) {
+                comptes[i] += 1;
+            }
+        }
+        self.fichiers_par_racine = comptes.into_iter().map(Some).collect();
+    }
+
+    /// `annonce` complétée des champs de portée ; `dossier` : le dossier en
+    /// cours, s'il est connu.
+    pub(crate) fn avec(&self, mut annonce: Value, dossier: Option<&str>) -> Value {
+        if let Some(o) = annonce.as_object_mut() {
+            o.insert(
+                "scope".into(),
+                json!(if self.bibliotheque {
+                    "library"
+                } else {
+                    "folder"
+                }),
+            );
+            o.insert("locations_total".into(), json!(self.racines.len()));
+            if let Some(i) = dossier.and_then(|d| self.rang(d)) {
+                o.insert("location_index".into(), json!(i + 1));
+                o.insert("location".into(), json!(self.racines[i]));
+                if let Some(n) = self.fichiers_par_racine[i] {
+                    o.insert("location_files".into(), json!(n));
+                }
+            }
+        }
+        annonce
+    }
+}
+
+#[cfg(test)]
+#[path = "portee_scan_tests_6167.rs"]
+mod portee_scan_tests_6167;
 
 #[cfg(test)]
 mod vidage_sauvegarde_5973 {
