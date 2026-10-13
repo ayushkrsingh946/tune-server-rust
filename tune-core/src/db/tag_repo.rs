@@ -117,13 +117,29 @@ fn verifier_item_id(item_id: i64) -> Result<(), String> {
 pub mod sql {
     use super::SqlDialect;
 
+    /// L'ordre de TOUTES les listes d'etiquettes (web#2166, #6257) : la
+    /// position choisie par l'utilisateur, puis le nom. Le nom departage les
+    /// egalites — une base qui aurait recu la colonne sans la migration 126
+    /// (passe finale, `ENSURE_COLUMNS`) a toutes ses positions a 0 et reste
+    /// donc rangee par nom, comme avant.
     pub fn list_all() -> &'static str {
-        "SELECT id, name, color FROM tags ORDER BY name"
+        "SELECT id, name, color FROM tags ORDER BY position, name"
     }
 
+    /// Une etiquette neuve prend la DERNIERE place : elle s'ajoute au bout de
+    /// l'ordre choisi au lieu de s'intercaler par son nom.
     pub fn create_tag<D: SqlDialect>(d: &D) -> String {
         format!(
-            "INSERT INTO tags (name, color) VALUES ({}, {})",
+            "INSERT INTO tags (name, color, position) VALUES ({}, {}, \
+             (SELECT COALESCE(MAX(position), -1) + 1 FROM tags))",
+            d.placeholder(1),
+            d.placeholder(2)
+        )
+    }
+
+    pub fn update_position<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "UPDATE tags SET position = {} WHERE id = {}",
             d.placeholder(1),
             d.placeholder(2)
         )
@@ -212,7 +228,7 @@ pub mod sql {
 
     pub fn tags_for_item<D: SqlDialect>(d: &D) -> String {
         format!(
-            "SELECT t.id, t.name, t.color FROM tags t JOIN item_tags it ON t.id = it.tag_id WHERE it.item_type = {} AND it.item_id = {} ORDER BY t.name",
+            "SELECT t.id, t.name, t.color FROM tags t JOIN item_tags it ON t.id = it.tag_id WHERE it.item_type = {} AND it.item_id = {} ORDER BY t.position, t.name",
             d.placeholder(1),
             d.placeholder(2)
         )
@@ -227,7 +243,7 @@ pub mod sql {
 
     pub fn search_by_name<D: SqlDialect>(d: &D) -> String {
         format!(
-            "SELECT id, name, color FROM tags WHERE name LIKE {} ORDER BY name LIMIT 20",
+            "SELECT id, name, color FROM tags WHERE name LIKE {} ORDER BY position, name LIMIT 20",
             d.placeholder(1)
         )
     }
@@ -244,7 +260,7 @@ pub mod sql {
         "SELECT t.id, t.name, t.color, \
          (SELECT COUNT(*) FROM item_tags it WHERE it.tag_id = t.id) \
          + (SELECT COUNT(*) FROM streaming_item_tags s WHERE s.tag_id = t.id) as item_count \
-         FROM tags t ORDER BY t.name"
+         FROM tags t ORDER BY t.position, t.name"
     }
 
     pub fn count_per_tag_by_type<D: SqlDialect>(d: &D) -> String {
@@ -252,7 +268,7 @@ pub mod sql {
             "SELECT t.id, t.name, t.color, \
              (SELECT COUNT(*) FROM item_tags it WHERE it.tag_id = t.id AND it.item_type = {}) \
              + (SELECT COUNT(*) FROM streaming_item_tags s WHERE s.tag_id = t.id AND s.item_type = {}) as item_count \
-             FROM tags t ORDER BY t.name",
+             FROM tags t ORDER BY t.position, t.name",
             d.placeholder(1),
             d.placeholder(2)
         )
@@ -332,7 +348,7 @@ pub mod sql {
         format!(
             "SELECT t.id, t.name, t.color FROM tags t \
              JOIN streaming_item_tags s ON t.id = s.tag_id \
-             WHERE s.item_type = {} AND s.source = {} AND s.source_id = {} ORDER BY t.name",
+             WHERE s.item_type = {} AND s.source = {} AND s.source_id = {} ORDER BY t.position, t.name",
             d.placeholder(1),
             d.placeholder(2),
             d.placeholder(3),
@@ -474,6 +490,28 @@ impl TagRepo {
         let params: [&dyn ToSqlValue; 1] = [&id];
         self.db.execute(&sql, &params)?;
         Ok(())
+    }
+
+    /// Enregistre l'ordre choisi par l'utilisateur (web#2166, #6257).
+    ///
+    /// `ids` est l'ordre VOULU, du premier au dernier. Il est complete par
+    /// [`ordre_complet`] : un identifiant inconnu est ignore, un doublon ne
+    /// compte qu'une fois, et une etiquette absente de la liste (creee par un
+    /// autre ecran entre-temps) garde son rang relatif, APRES celles qui sont
+    /// nommees. Les positions sont reecrites de 0 a n-1 dans une seule
+    /// transaction : l'ordre ne peut pas rester a moitie enregistre.
+    pub fn reorder(&self, ids: &[i64]) -> Result<(), String> {
+        let actuelles: Vec<i64> = self.list()?.into_iter().filter_map(|t| t.id).collect();
+        let ordre = ordre_complet(&actuelles, ids);
+        let sql = self.dialect_sql(sql::update_position, sql::update_position);
+        self.db.write_tx(&mut |tx| {
+            for (rang, id) in ordre.iter().enumerate() {
+                let rang = rang as i64;
+                let params: [&dyn ToSqlValue; 2] = [&rang, id];
+                tx.execute(&sql, &params)?;
+            }
+            Ok(())
+        })
     }
 
     pub fn all_items_by_tag(&self, tag_id: i64) -> Result<Vec<(String, i64)>, String> {
@@ -767,6 +805,24 @@ impl TagRepo {
     }
 }
 
+/// L'ordre complet a enregistrer (web#2166, #6257) : d'abord les
+/// identifiants `demandes` qui existent, dans leur ordre et sans doublon, puis
+/// les `actuelles` qui n'y figurent pas, dans leur ordre actuel.
+pub fn ordre_complet(actuelles: &[i64], demandes: &[i64]) -> Vec<i64> {
+    let mut ordre: Vec<i64> = Vec::with_capacity(actuelles.len());
+    for id in demandes {
+        if actuelles.contains(id) && !ordre.contains(id) {
+            ordre.push(*id);
+        }
+    }
+    for id in actuelles {
+        if !ordre.contains(id) {
+            ordre.push(*id);
+        }
+    }
+    ordre
+}
+
 fn row_to_streaming_tag_item(cols: &Vec<SqlValue>) -> StreamingTagItem {
     StreamingTagItem {
         item_type: cols.first().and_then(|v| v.as_string()).unwrap_or_default(),
@@ -935,13 +991,16 @@ mod tests {
     fn sql_builders_dialect_placeholders() {
         let s = SqliteDialect;
         let p = PostgresDialect;
-        assert!(sql::create_tag(&s).contains("VALUES (?, ?)"));
-        assert!(sql::create_tag(&p).contains("VALUES ($1, $2)"));
+        assert!(sql::create_tag(&s).contains("VALUES (?, ?, (SELECT"));
+        assert!(sql::create_tag(&p).contains("VALUES ($1, $2, (SELECT"));
         assert!(sql::tag_item(&p).ends_with("ON CONFLICT (tag_id, item_type, item_id) DO NOTHING"));
     }
 
+    /// Depuis #6257, la liste suit `position` : une etiquette neuve prend la
+    /// DERNIERE place au lieu de s'intercaler par son nom (le rangement par
+    /// nom de l'existant est fait une fois par la migration 126).
     #[test]
-    fn tag_list_sorted() {
+    fn tag_list_suit_la_position() {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
         migrations::run_migrations(&db).unwrap();
@@ -953,8 +1012,8 @@ mod tests {
 
         let tags = repo.list().unwrap();
         assert_eq!(tags.len(), 3);
-        assert_eq!(tags[0].name, "Alpha");
-        assert_eq!(tags[2].name, "Zebra");
+        assert_eq!(tags[0].name, "Zebra");
+        assert_eq!(tags[2].name, "Middle");
     }
 
     /// Le défaut du chantier : un `item_type` mal orthographié entrait sans un
@@ -1318,6 +1377,70 @@ mod tests {
             repo.tags_for_streaming_item("album", "qobuz", "12345")
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    // --- #6257 (web#2166) : l'ordre des etiquettes ---
+
+    fn noms(tags: &[Tag]) -> Vec<String> {
+        tags.iter().map(|t| t.name.clone()).collect()
+    }
+
+    fn repo_neuf() -> TagRepo {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        migrations::run_migrations(&db).unwrap();
+        TagRepo::new(db)
+    }
+
+    #[test]
+    fn ordre_complet_ignore_l_inconnu_et_le_doublon_et_garde_l_oublie_6257() {
+        // 9 n'existe pas, 3 est nomme deux fois, 2 n'est pas nomme.
+        assert_eq!(
+            ordre_complet(&[1, 2, 3, 4], &[3, 9, 1, 3, 4]),
+            vec![3, 1, 4, 2]
+        );
+        assert_eq!(ordre_complet(&[1, 2], &[]), vec![1, 2]);
+        assert!(ordre_complet(&[], &[5]).is_empty());
+    }
+
+    /// L'ordre enregistre est celui de TOUTES les listes : `list`, `search`,
+    /// `list_with_counts` (avec et sans type) et `tags_for_item`. Une
+    /// etiquette neuve prend la derniere place.
+    #[test]
+    fn l_ordre_enregistre_est_celui_de_toutes_les_listes_6257() {
+        let repo = repo_neuf();
+        let a = repo.create("Ambient", None).unwrap();
+        let b = repo.create("Blues", None).unwrap();
+        let c = repo.create("Cool jazz", None).unwrap();
+        for id in [a, b, c] {
+            repo.tag_item(id, "album", 7).unwrap();
+        }
+
+        repo.reorder(&[c, a]).unwrap();
+        let attendu = vec!["Cool jazz", "Ambient", "Blues"];
+        assert_eq!(noms(&repo.list().unwrap()), attendu, "list");
+        assert_eq!(noms(&repo.search("").unwrap()), attendu, "search");
+        assert_eq!(
+            noms(&repo.tags_for_item("album", 7).unwrap()),
+            attendu,
+            "tags_for_item"
+        );
+        let compte = |t: Option<&str>| -> Vec<String> {
+            repo.list_with_counts(t)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.tag.name)
+                .collect()
+        };
+        assert_eq!(compte(None), attendu, "list_with_counts");
+        assert_eq!(compte(Some("album")), attendu, "list_with_counts(album)");
+
+        // Une neuve va au BOUT, pas a sa place alphabetique.
+        repo.create("Afrobeat", None).unwrap();
+        assert_eq!(
+            noms(&repo.list().unwrap()),
+            vec!["Cool jazz", "Ambient", "Blues", "Afrobeat"]
         );
     }
 }

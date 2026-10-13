@@ -1470,6 +1470,14 @@ name = "pg_etiquette_collection_5026"
 path = "tests/pg_etiquette_collection_5026.rs"
 required-features = ["postgres"]
 
+# #6257 — l'ordre des étiquettes sur PostgreSQL : la 090 pose `tags.position`
+# en BIGINT, `PUT /tags/order` l'écrit, les listes le suivent.
+# `autotests = false` : sans cette cible, jamais compilé.
+[[test]]
+name = "pg_ordre_etiquettes_6257"
+path = "tests/pg_ordre_etiquettes_6257.rs"
+required-features = ["postgres"]
+
 # #6121 — la règle « Artiste de l'album » (collections et playlists) sur
 # PostgreSQL : les deux aperçus par le vrai routeur.
 [[test]]

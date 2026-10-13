@@ -786,6 +786,10 @@ CREATE TABLE IF NOT EXISTS item_tags (
 -- CREATE IF NOT EXISTS ci-dessus ne la corrige pas. Même raison que
 -- `streaming_favorites.first_seen_at` plus haut.
 ALTER TABLE item_tags ADD COLUMN IF NOT EXISTS created_at TEXT;
+-- Ordre des etiquettes choisi par l'utilisateur (#6257, PG 090 / SQLite 126).
+-- TEXT pour la copie ; la 090, rejouee juste apres, la convertit en BIGINT et
+-- garde l'ordre copie. En ALTER pour la meme raison qu'au-dessus.
+ALTER TABLE tags ADD COLUMN IF NOT EXISTS position TEXT;
 -- Marque « déjà tenté, rien trouvé » de l'identification en lot (#4991,
 -- PG 080 / SQLite 116). En ALTER pour la même raison qu'au-dessus.
 ALTER TABLE albums ADD COLUMN IF NOT EXISTS identification_tentee_le TEXT;
