@@ -57,6 +57,9 @@ use serde::Serialize;
 
 pub mod politique;
 
+/// Le calcul de fond sur des fils à lui, en basse priorité (étape 3).
+pub mod calcul_de_fond;
+
 /// Pause marquée par défaut entre deux éléments d'une passe freinée, tant
 /// qu'une zone joue — réglable : [`politique::Politique::pause_between_items_ms`].
 ///
@@ -296,6 +299,9 @@ pub struct ReleveDePriorite {
     pub policy: politique::Politique,
     /// Ce que les freins ont fait depuis le démarrage.
     pub brakes: politique::ReleveDesFreins,
+    /// Les fils du calcul de fond : armés, ce qu'ils ont obtenu du système,
+    /// combien vivent (chantier « priorité lecture », étape 3).
+    pub background_compute: calcul_de_fond::ReleveDuCalcul,
 }
 
 /// Le relevé, sans la moindre requête : l'écran le sonde en boucle.
@@ -315,6 +321,7 @@ pub fn releve() -> ReleveDePriorite {
         pause_between_items_ms: politique::politique().pause_between_items_ms,
         policy: politique::politique(),
         brakes: politique::releve_des_freins(),
+        background_compute: calcul_de_fond::releve(),
     }
 }
 

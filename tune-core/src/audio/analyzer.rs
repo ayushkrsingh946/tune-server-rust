@@ -617,7 +617,7 @@ pub async fn mesurer_intensite_plage_et_empreinte(file_path: &str) -> MesureEtEm
         };
     }
     let path = file_path.to_string();
-    let tete = tokio::task::spawn_blocking(move || {
+    let tete = crate::taches_de_fond::priorite::calcul_de_fond::calcul_de_fond(move || {
         // #4681 — E/S basses si une zone joue (segment déjà parti).
         let _basse = crate::taches_de_fond::priorite::politique::baisser_pendant_la_lecture();
         let natif = super::decode::decode_natif(
@@ -770,7 +770,7 @@ async fn mesurer_a_partir_de(
     premier: Option<super::decode::DecodedAudio>,
 ) -> Option<(f64, f64, f64, Option<u32>)> {
     let mesure = parcourir_les_segments(file_path, premier, MesureEnCours::default()).await?;
-    tokio::task::spawn_blocking(move || mesure.finir())
+    crate::taches_de_fond::priorite::calcul_de_fond::calcul_de_fond(move || mesure.finir())
         .await
         .ok()?
 }
@@ -826,22 +826,26 @@ async fn parcourir_les_segments(
         }
         let path = file_path.to_string();
         let deja_decode = premier.take();
-        let (rendue, segment) = tokio::task::spawn_blocking(move || {
-            // #4681 — E/S basses si une zone joue (segment déjà parti).
-            let _basse = crate::taches_de_fond::priorite::politique::baisser_pendant_la_lecture();
-            let decoded = match deja_decode {
-                Some(d) => d,
-                None => match super::decode::decode_to_pcm(&path, None, Some(2), seek, SEG_SECONDS)
-                {
-                    Ok(d) => d,
-                    Err(_) => return (mesure, Segment::Echec),
-                },
-            };
-            let segment = mesure.nourrir(decoded, SEG_SECONDS);
-            (mesure, segment)
-        })
-        .await
-        .ok()?;
+        let (rendue, segment) =
+            crate::taches_de_fond::priorite::calcul_de_fond::calcul_de_fond(move || {
+                // #4681 — E/S basses si une zone joue (segment déjà parti).
+                let _basse =
+                    crate::taches_de_fond::priorite::politique::baisser_pendant_la_lecture();
+                let decoded = match deja_decode {
+                    Some(d) => d,
+                    None => {
+                        match super::decode::decode_to_pcm(&path, None, Some(2), seek, SEG_SECONDS)
+                        {
+                            Ok(d) => d,
+                            Err(_) => return (mesure, Segment::Echec),
+                        }
+                    }
+                };
+                let segment = mesure.nourrir(decoded, SEG_SECONDS);
+                (mesure, segment)
+            })
+            .await
+            .ok()?;
         mesure = rendue;
         match segment {
             Segment::Echec => return None,

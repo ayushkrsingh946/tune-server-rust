@@ -207,16 +207,18 @@ pub async fn rattraper_un_lot(backend: &Arc<dyn DbBackend>) -> usize {
         largeur,
         rows.iter(),
         || {
-            // Gardes relues AVANT CHAQUE fichier, comme la passe nominale.
-            if est_en_pause(Tache::ReplayGain) {
-                info!("true_peak_rattrapage_pause_utilisateur — arret a la frontiere de piste");
-                return false;
-            }
-            if priorite::lecture_en_cours() || any_zone_playing(backend) {
-                debug!("true_peak_rattrapage_cede_a_la_lecture");
-                return false;
-            }
-            true
+            super::garde_hors_executeur(backend, |backend| {
+                // Gardes relues AVANT CHAQUE fichier, comme la passe nominale.
+                if est_en_pause(Tache::ReplayGain) {
+                    info!("true_peak_rattrapage_pause_utilisateur — arret a la frontiere de piste");
+                    return false;
+                }
+                if priorite::lecture_en_cours() || any_zone_playing(backend) {
+                    debug!("true_peak_rattrapage_cede_a_la_lecture");
+                    return false;
+                }
+                true
+            })
         },
         |r| rattraper_une_piste(backend, r),
         |suite| match suite {

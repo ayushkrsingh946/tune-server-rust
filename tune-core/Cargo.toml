@@ -522,6 +522,9 @@ windows = { version = "0.62", features = [
     # #5410 — la température des zones thermiques (compteurs PDH « Thermal
     # Zone Information »), pour la garde thermique des analyses.
     "Win32_System_Performance",
+    # #4681 (chantier « priorité lecture », étape 3) — THREAD_MODE_BACKGROUND
+    # des fils du calcul de fond et de `PrioriteBasse`.
+    "Win32_System_Threading",
 ] }
 
 # #2219 — témoin de `resolve_streaming_url` par sa porte publique, avant que

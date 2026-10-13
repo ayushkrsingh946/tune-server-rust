@@ -94,6 +94,103 @@ fn etat_de(state: &AppState, tache: Tache) -> Etat {
     }
 }
 
+/// Ce qu'une tâche fait MAINTENANT, pour l'écran « Ce qui tourne »
+/// (chantier « priorité lecture », étape 4, #4681).
+///
+/// | `activity` | `reason` | Quand |
+/// |---|---|---|
+/// | `paused` | `user_pause` | l'utilisateur l'a suspendue |
+/// | `yielded` | `playback` | une passe qui DÉCODE a tout cédé à une zone qui joue ; elle reprend seule à l'arrêt |
+/// | `throttled` | `playback` | une passe qui ne décode pas avance au ralenti pendant la lecture (une pause entre deux éléments) |
+/// | `working` | `null` | elle travaille à pleine cadence |
+/// | `idle` | `null` | rien à faire, ou passe désarmée |
+///
+/// Lu sur les mêmes signaux que `state` et `throttled_for_playback` :
+/// aucun nouveau calcul, aucune requête.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Activite {
+    EnPause,
+    Cedee,
+    Ralentie,
+    AuTravail,
+    AuRepos,
+}
+
+impl Activite {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Activite::EnPause => "paused",
+            Activite::Cedee => "yielded",
+            Activite::Ralentie => "throttled",
+            Activite::AuTravail => "working",
+            Activite::AuRepos => "idle",
+        }
+    }
+
+    pub(crate) fn raison(self) -> Option<&'static str> {
+        match self {
+            Activite::EnPause => Some("user_pause"),
+            Activite::Cedee | Activite::Ralentie => Some("playback"),
+            Activite::AuTravail | Activite::AuRepos => None,
+        }
+    }
+}
+
+/// Les passes qui DÉCODENT cèdent tout à la lecture ; les autres ralentissent.
+pub(crate) fn cede_tout(tache: Tache) -> bool {
+    matches!(
+        tache,
+        Tache::ReplayGain | Tache::Empreintes | Tache::PlageDynamique | Tache::Acoustique
+    )
+}
+
+/// L'activité d'une tâche, à partir de son état et du relevé de priorité.
+pub(crate) fn activite_de(
+    etat: Etat,
+    tache: Tache,
+    priorite: &tune_core::taches_de_fond::priorite::ReleveDePriorite,
+) -> Activite {
+    if etat == Etat::EnPause {
+        return Activite::EnPause;
+    }
+    // La fenêtre « a cédé » ne vaut que tant qu'une zone joue : à l'arrêt, la
+    // passe repart (au plus 30 s après pour celles qui décodent).
+    if priorite.playback_active && priorite.throttled.contains(&tache.id()) {
+        return if cede_tout(tache) {
+            Activite::Cedee
+        } else {
+            Activite::Ralentie
+        };
+    }
+    match etat {
+        Etat::EnCours => Activite::AuTravail,
+        _ => Activite::AuRepos,
+    }
+}
+
+fn activite(
+    state: &AppState,
+    tache: Tache,
+    priorite: &tune_core::taches_de_fond::priorite::ReleveDePriorite,
+) -> Activite {
+    activite_de(etat_de(state, tache), tache, priorite)
+}
+
+fn activite_du_scan(priorite: &tune_core::taches_de_fond::priorite::ReleveDePriorite) -> Activite {
+    if !tune_core::scanner::activite::scan_bibliotheque_en_cours() {
+        return Activite::AuRepos;
+    }
+    if priorite.playback_active
+        && priorite
+            .throttled
+            .contains(&tune_core::taches_de_fond::priorite::ID_SCAN)
+    {
+        Activite::Ralentie
+    } else {
+        Activite::AuTravail
+    }
+}
+
 /// Un traitement de la cascade travaille-t-il, selon le rang qui décode ?
 ///
 /// #5519 / tune-web-client#1828 — le signal était l'avancement ReplayGain
@@ -150,6 +247,10 @@ pub(crate) fn instantane(state: &AppState) -> Value {
                 // arrêtée jusqu'à l'arrêt de la lecture pour les passes qui
                 // décodent.
                 "throttled_for_playback": priorite.throttled.contains(&tache.id()),
+                // Chantier « priorité lecture », étape 4 — ce que l'écran
+                // « Ce qui tourne » affiche, et pourquoi, sans rien déduire.
+                "activity": activite(state, tache, &priorite).code(),
+                "reason": activite(state, tache, &priorite).raison(),
             })
         })
         .collect();
@@ -166,6 +267,11 @@ pub(crate) fn instantane(state: &AppState) -> Value {
             "throttled_for_playback": priorite
                 .throttled
                 .contains(&tune_core::taches_de_fond::priorite::ID_SCAN),
+            // Étape 4 : le même vocabulaire que les cartes. Le scan ne cède
+            // pas tout : il RALENTIT (moins de fichiers à la fois, une pause
+            // entre deux paquets).
+            "activity": activite_du_scan(&priorite).code(),
+            "reason": activite_du_scan(&priorite).raison(),
         },
         "playback_priority": priorite,
         // #5169 — la place de la plage dynamique parmi les passes qui
@@ -440,5 +546,93 @@ mod tests_5169 {
         );
         assert!(v["dynamic_range_sidecar"].is_object(), "{v}");
         tune_core::taches_de_fond::ordre::oublier_pour_les_essais();
+    }
+}
+
+#[cfg(test)]
+mod tests_ce_qui_tourne_4681 {
+    use super::*;
+
+    fn releve(
+        joue: bool,
+        cedees: &[&'static str],
+    ) -> tune_core::taches_de_fond::priorite::ReleveDePriorite {
+        let mut r = tune_core::taches_de_fond::priorite::releve();
+        r.playback_active = joue;
+        r.throttled = cedees.to_vec();
+        r
+    }
+
+    /// Chantier « priorité lecture », étape 4 : chaque carte dit ce qu'elle
+    /// fait et pourquoi. Une passe qui décode CÈDE, les autres RALENTISSENT ;
+    /// la pause de l'utilisateur prime ; une cession notée ne vaut plus une
+    /// fois la lecture arrêtée.
+    #[test]
+    fn l_activite_dit_ce_que_fait_chaque_tache_et_pourquoi() {
+        let joue = releve(true, &["replaygain", "enrichment", "acoustic"]);
+        let a = |etat, tache| activite_de(etat, tache, &joue);
+
+        assert_eq!(a(Etat::EnCours, Tache::ReplayGain), Activite::Cedee);
+        assert_eq!(a(Etat::AuRepos, Tache::Acoustique), Activite::Cedee);
+        assert_eq!(a(Etat::EnCours, Tache::Enrichissement), Activite::Ralentie);
+        assert_eq!(a(Etat::EnCours, Tache::ImagesArtistes), Activite::AuTravail);
+        assert_eq!(a(Etat::AuRepos, Tache::Empreintes), Activite::AuRepos);
+        assert_eq!(a(Etat::EnPause, Tache::ReplayGain), Activite::EnPause);
+
+        // La lecture s'est arrêtée : la fenêtre de cession ne compte plus.
+        let arretee = releve(false, &["replaygain", "enrichment"]);
+        assert_eq!(
+            activite_de(Etat::EnCours, Tache::ReplayGain, &arretee),
+            Activite::AuTravail
+        );
+        assert_eq!(
+            activite_de(Etat::EnCours, Tache::Enrichissement, &arretee),
+            Activite::AuTravail
+        );
+
+        assert_eq!(Activite::EnPause.raison(), Some("user_pause"));
+        assert_eq!(Activite::Cedee.raison(), Some("playback"));
+        assert_eq!(Activite::Ralentie.raison(), Some("playback"));
+        assert_eq!(Activite::AuTravail.raison(), None);
+        assert_eq!(
+            [
+                Activite::EnPause,
+                Activite::Cedee,
+                Activite::Ralentie,
+                Activite::AuTravail,
+                Activite::AuRepos
+            ]
+            .map(Activite::code),
+            ["paused", "yielded", "throttled", "working", "idle"]
+        );
+    }
+
+    /// L'instantané porte `activity`, `reason` sur chaque carte et sur le scan,
+    /// et `playback_priority.background_compute` : la forme que lit l'écran.
+    #[tokio::test]
+    async fn l_instantane_porte_l_activite_et_le_calcul_de_fond() {
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let v = instantane(&state);
+        for carte in v["pausable"].as_array().unwrap() {
+            assert!(carte["activity"].is_string(), "{carte}");
+            assert!(carte.get("reason").is_some(), "{carte}");
+        }
+        assert!(v["scan"]["activity"].is_string());
+        let calcul = &v["playback_priority"]["background_compute"];
+        for cle in [
+            "low_priority_pool",
+            "armed",
+            "cpu",
+            "io",
+            "threads",
+            "idle_threads",
+            "jobs_done",
+        ] {
+            assert!(calcul.get(cle).is_some(), "{cle} manque : {calcul}");
+        }
+        assert_eq!(
+            v["playback_priority"]["policy"]["background_compute_low_priority"],
+            json!(true)
+        );
     }
 }

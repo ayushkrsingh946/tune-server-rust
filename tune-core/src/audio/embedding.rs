@@ -687,7 +687,9 @@ pub async fn analyze_embedding_batch<E: Inference>(
         let p = sur_disque.clone();
         let decoded = tokio::time::timeout(
             std::time::Duration::from_secs(DECODE_TIMEOUT_SECS),
-            tokio::task::spawn_blocking(move || {
+            // Chantier « priorité lecture », étape 3 : sur les fils du calcul
+            // de fond, en basse priorité processeur et disque.
+            crate::taches_de_fond::priorite::calcul_de_fond::calcul_de_fond(move || {
                 crate::audio::decode::decode_to_pcm(&p, Some(48_000), Some(1), debut_s, duree_s)
             }),
         )
@@ -739,18 +741,33 @@ pub async fn analyze_embedding_batch<E: Inference>(
         // vecteur et du témoin (qui attendent le verrou d'écriture unique de
         // la base). Un seul aller sur le vivier bloquant, jamais sur un
         // ouvrier de l'exécuteur.
+        //
+        // Chantier « priorité lecture », étape 3 : le CALCUL (fenêtre et
+        // inférence) part sur les fils du calcul de fond, en basse priorité ;
+        // les ÉCRITURES restent sur le pool bloquant ordinaire, à priorité
+        // normale (un fil baissé qui tiendrait le verrou d'écriture unique
+        // ferait attendre la lecture). Une inférence interrompue (panique)
+        // vaut un échec d'inférence : la piste reçoit son témoin, comme avant.
         let emb = Arc::clone(embedder);
+        let calcul = match decoded {
+            Some(d) => Some(
+                crate::taches_de_fond::priorite::calcul_de_fond::calcul_de_fond(move || {
+                    let wav =
+                        prepare_clap_window(&d.samples_i32, d.channels, d.bit_depth, d.sample_rate);
+                    emb.lock().unwrap_or_else(|e| e.into_inner()).inferer(&wav)
+                })
+                .await,
+            ),
+            None => None,
+        };
         let b = backend.clone();
         let repo_bloquant = TrackMetadataRepo::with_backend(backend.clone());
         let ecrit = tokio::task::spawn_blocking(move || {
-            if let Some(d) = decoded {
-                let wav =
-                    prepare_clap_window(&d.samples_i32, d.channels, d.bit_depth, d.sample_rate);
-                let resultat = emb.lock().unwrap_or_else(|e| e.into_inner()).inferer(&wav);
-                match resultat {
-                    Ok(v) => ecrire_empreinte(&b, track_id, &v, now),
-                    Err(e) => warn!(track_id, error = %e, "audio_embed_infer_failed"),
-                }
+            match calcul {
+                Some(Ok(Ok(v))) => ecrire_empreinte(&b, track_id, &v, now),
+                Some(Ok(Err(e))) => warn!(track_id, error = %e, "audio_embed_infer_failed"),
+                Some(Err(e)) => warn!(track_id, error = %e, "audio_embed_infer_interrupted"),
+                None => {}
             }
             // Pas de témoin sur une inférence interrompue par l'arrêt : la
             // piste n'a rien d'illisible, elle sera reprise au démarrage.
