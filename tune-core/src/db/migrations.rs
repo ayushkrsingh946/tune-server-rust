@@ -2490,10 +2490,12 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
     // etiquette n'avait qu'un id, un nom et une couleur ; toutes les listes
     // sortaient par nom.
     //
-    // Les etiquettes existantes sont rangees PAR NOM (0 a n-1) : a la mise a
-    // jour, rien ne bouge a l'ecran. Le rangement n'a lieu que si toutes les
-    // positions sont encore egales, pour ne jamais ecraser un ordre deja
-    // choisi.
+    // Decision de Bertrand (13/10) : tant que l'utilisateur n'a rien
+    // reordonne, l'ordre reste ALPHABETIQUE et une etiquette neuve s'y range ;
+    // des qu'un ordre a ete choisi, une neuve va en fin de liste. La position
+    // 0 veut dire « jamais placee » : la migration laisse donc tout a 0 (la
+    // liste reste rangee par nom, rien ne bouge a l'ecran), et seul
+    // `PUT /tags/order` ecrit des positions, de 1 a n.
     //
     // Numerotee 126 / PG 090 : la 125 / PG 089 (#6179) est la derniere sur
     // `batch/bugs-rc5-20261012` et sur toutes les branches `chantier/*` le
@@ -2510,31 +2512,14 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
     },
 ];
 
-/// Migration 126 (#6257) : `tags.position`, puis les etiquettes existantes
-/// rangees par nom — seulement si aucun ordre n'a encore ete choisi (toutes
-/// les positions egales). Le test se fait AVANT l'UPDATE, et non dans son
-/// `WHERE` : sous SQLite, une sous-requete d'UPDATE peut voir les lignes deja
-/// reecrites par ce meme UPDATE.
-fn tags_rangees_par_nom(db: &SqliteDb) -> Result<(), String> {
+/// Migration 126 (#6257) : `tags.position`, 0 pour toutes les etiquettes
+/// existantes (« jamais placee ») — la liste reste alphabetique tant que
+/// l'utilisateur n'a rien reordonne. Un ordre deja choisi (positions >= 1,
+/// copiees par une bascule ou migration rejouee) n'est jamais touche.
+fn tags_position(db: &SqliteDb) -> Result<(), String> {
     add_column_if_missing(db, "tags", "position", "INTEGER NOT NULL DEFAULT 0");
-    let conn = db.connection().lock().unwrap();
-    let distinctes: i64 = conn
-        .query_row("SELECT COUNT(DISTINCT position) FROM tags", [], |r| {
-            r.get(0)
-        })
-        .map_err(|e| format!("migration 126 : {e}"))?;
-    if distinctes <= 1 {
-        conn.execute(SQL_TAGS_RANGEES_PAR_NOM, [])
-            .map_err(|e| format!("migration 126 : {e}"))?;
-    }
     Ok(())
 }
-
-/// Le rang d'une etiquette = le nombre d'etiquettes dont le nom la precede.
-/// `name` est UNIQUE : les rangs vont de 0 a n-1, sans trou ni doublon, et
-/// suivent exactement l'ancien `ORDER BY name`.
-const SQL_TAGS_RANGEES_PAR_NOM: &str =
-    "UPDATE tags SET position = (SELECT COUNT(*) FROM tags t2 WHERE t2.name < tags.name)";
 
 /// SQL de la migration 125 (#6179) — voir son entree dans `MIGRATIONS`.
 ///
@@ -3850,7 +3835,7 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
         }
         if migration.version == 126 {
             // #6257 — l'ordre des etiquettes. Erreur RENDUE, comme a la 125.
-            tags_rangees_par_nom(db)?;
+            tags_position(db)?;
         }
         if migration.version == 12 {
             upgrade_fts5_tables(db);
@@ -5253,7 +5238,7 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         include_str!("../../migrations/postgres/089_playlist_tracks_orphelines.sql"),
     ),
     // Jumelle de la SQLite 126 (#6257) : `tags.position`, l'ordre des
-    // etiquettes choisi par l'utilisateur ; l'existant range par nom.
+    // etiquettes choisi par l'utilisateur ; l'existant reste a 0 (par nom).
     (
         90,
         "tags_position",
@@ -7277,17 +7262,19 @@ mod tests {
         );
     }
 
-    /// #6257 — la migration 126 pose `tags.position` et range les etiquettes
-    /// EXISTANTES par nom (l'ecran ne bouge pas a la mise a jour) ; rejouee,
-    /// elle n'ecrase pas un ordre deja choisi. La jumelle PG 090 existe, est
+    /// #6257 — la migration 126 pose `tags.position` a 0 pour les etiquettes
+    /// EXISTANTES (« jamais placees ») : la liste reste alphabetique, rien ne
+    /// bouge a l'ecran (decision de Bertrand du 13/10) ; rejouee, elle
+    /// n'ecrase pas un ordre deja choisi. La jumelle PG 090 existe, est
     /// enregistree, marque le bon numero, convertit une colonne TEXT de
-    /// bascule, et le schema de bascule comme `ENSURE_COLUMNS` la portent.
+    /// bascule, ne range rien, et le schema de bascule comme `ENSURE_COLUMNS`
+    /// portent la colonne.
     #[test]
-    fn la_migration_126_range_les_etiquettes_par_nom_6257() {
+    fn la_migration_126_laisse_les_etiquettes_alphabetiques_6257() {
         let ordre = |db: &SqliteDb| -> Vec<(String, i64)> {
             let conn = db.connection().lock().unwrap();
             let mut stmt = conn
-                .prepare("SELECT name, position FROM tags ORDER BY position, id")
+                .prepare("SELECT name, position FROM tags ORDER BY position, name")
                 .unwrap();
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
                 .unwrap()
@@ -7314,18 +7301,18 @@ mod tests {
             ordre(&montee),
             vec![
                 ("Blues".to_string(), 0),
-                ("Jazz".to_string(), 1),
-                ("Rock".to_string(), 2)
+                ("Jazz".to_string(), 0),
+                ("Rock".to_string(), 0)
             ],
-            "les etiquettes existantes doivent etre rangees par nom, de 0 a n-1"
+            "les etiquettes existantes doivent rester « jamais placees » (0), donc par nom"
         );
 
         // Un ordre choisi, puis la 126 rejouee : il reste tel quel.
         montee
             .execute_batch(
-                "UPDATE tags SET position = 0 WHERE name = 'Rock';
-                 UPDATE tags SET position = 1 WHERE name = 'Blues';
-                 UPDATE tags SET position = 2 WHERE name = 'Jazz';
+                "UPDATE tags SET position = 1 WHERE name = 'Rock';
+                 UPDATE tags SET position = 2 WHERE name = 'Blues';
+                 UPDATE tags SET position = 3 WHERE name = 'Jazz';
                  DELETE FROM _migrations WHERE version >= 126;",
             )
             .unwrap();
@@ -7350,9 +7337,9 @@ mod tests {
         assert!(
             sql_pg.contains("ADD COLUMN IF NOT EXISTS position BIGINT NOT NULL DEFAULT 0")
                 && sql_pg.contains("TYPE BIGINT USING")
-                && sql_pg.contains("WHERE (SELECT COUNT(DISTINCT position) FROM tags) <= 1"),
+                && !sql_pg.contains("UPDATE tags SET position = (SELECT"),
             "la jumelle PG ne pose pas `tags.position` en BIGINT, ne convertit pas la \
-             colonne TEXT d'une bascule, ou range sans garde"
+             colonne TEXT d'une bascule, ou range encore les etiquettes"
         );
         assert!(
             include_str!("migrations.rs").contains(&format!("postgres/{fichier}")),

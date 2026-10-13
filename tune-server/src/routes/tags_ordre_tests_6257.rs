@@ -103,3 +103,40 @@ async fn l_ordre_enregistre_est_rendu_par_toutes_les_listes() {
     .await;
     assert_eq!(st, StatusCode::NO_CONTENT);
 }
+
+/// Décision de Bertrand (13/10) : tant que rien n'a été réordonné, la liste
+/// reste alphabétique et une étiquette neuve s'y range par son nom ; après un
+/// `PUT /tags/order`, une neuve va en fin de liste.
+#[tokio::test]
+async fn une_neuve_se_range_par_nom_tant_qu_aucun_ordre_n_est_choisi() {
+    let (_dossier, etat) = etat("neuve");
+    let app = crate::routes::router(etat.clone());
+
+    let mut ids = Vec::new();
+    for nom in ["Rock", "Blues", "Jazz", "Ambient"] {
+        let (st, v) = envoi(&app, "POST", "/api/v1/tags", json!({ "name": nom })).await;
+        assert_eq!(st, StatusCode::CREATED, "{v}");
+        ids.push(v["id"].as_i64().unwrap());
+    }
+    assert_eq!(
+        noms(&app, "/api/v1/tags").await,
+        vec!["Ambient", "Blues", "Jazz", "Rock"],
+        "sans ordre choisi, la liste doit rester alphabétique"
+    );
+
+    let (st, v) = envoi(
+        &app,
+        "PUT",
+        "/api/v1/tags/order",
+        json!({ "ids": [ids[0], ids[1], ids[2], ids[3]] }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    let (st, v) = envoi(&app, "POST", "/api/v1/tags", json!({ "name": "Afrobeat" })).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    assert_eq!(
+        noms(&app, "/api/v1/tags").await,
+        vec!["Rock", "Blues", "Jazz", "Ambient", "Afrobeat"],
+        "après un ordre choisi, une neuve doit aller en fin de liste"
+    );
+}

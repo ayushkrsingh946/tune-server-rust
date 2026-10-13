@@ -100,8 +100,16 @@ async fn pg_6257_l_ordre_des_etiquettes_est_enregistre_et_suivi() {
         "la 090 doit poser `tags.position` en BIGINT"
     );
 
+    // Décision de Bertrand (13/10) : sans ordre choisi, la liste reste
+    // alphabétique. Les tables sont partagées : on remet TOUTES les positions
+    // à 0 (« jamais placée ») pour partir de cet état.
+    state
+        .backend
+        .execute("UPDATE tags SET position = 0", &[])
+        .expect("remise à 0 des positions");
+
     let mut ids = Vec::new();
-    for suffixe in ["a", "b", "c"] {
+    for suffixe in ["c", "a", "b"] {
         let nom = format!("{MARQUE} {suffixe}");
         let v = appel(&state, "POST", "/api/v1/tags", Some(json!({ "name": nom }))).await;
         ids.push(v["id"].as_i64().expect("id de l'étiquette créée"));
@@ -116,7 +124,18 @@ async fn pg_6257_l_ordre_des_etiquettes_est_enregistre_et_suivi() {
         .await;
     }
 
-    let (a, b, c) = (ids[0], ids[1], ids[2]);
+    let tous = appel(&state, "GET", "/api/v1/tags", None).await;
+    assert_eq!(
+        les_notres(&tous),
+        vec![
+            format!("{MARQUE} a"),
+            format!("{MARQUE} b"),
+            format!("{MARQUE} c"),
+        ],
+        "sans ordre choisi, une neuve doit se ranger par son nom (#6257)"
+    );
+
+    let (c, a, b) = (ids[0], ids[1], ids[2]);
     appel(
         &state,
         "PUT",
@@ -143,5 +162,25 @@ async fn pg_6257_l_ordre_des_etiquettes_est_enregistre_et_suivi() {
         );
     }
 
+    // Un ordre a été choisi : une neuve va en fin de liste, même si son nom
+    // la placerait en tête.
+    appel(
+        &state,
+        "POST",
+        "/api/v1/tags",
+        Some(json!({ "name": format!("{MARQUE} 0") })),
+    )
+    .await;
+    let tous = appel(&state, "GET", "/api/v1/tags", None).await;
+    assert_eq!(
+        les_notres(&tous).last().map(String::as_str),
+        Some(format!("{MARQUE} 0").as_str()),
+        "après un ordre choisi, une neuve doit aller en fin de liste (#6257)"
+    );
+
+    state
+        .backend
+        .execute("UPDATE tags SET position = 0", &[])
+        .expect("remise à 0 des positions");
     menage(&state);
 }

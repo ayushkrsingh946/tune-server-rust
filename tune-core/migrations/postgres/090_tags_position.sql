@@ -12,11 +12,10 @@
 --   elle est CONVERTIE ici. Une valeur qui n'est pas un entier devient 0
 --   (le nom departage), plutot que de bloquer la conversion.
 --
--- Les etiquettes existantes sont ensuite rangees PAR NOM (0 a n-1), mais
--- seulement si toutes les positions sont encore egales : un ordre deja choisi
--- (copie par une bascule, ou migration rejouee) n'est jamais ecrase. Sous
--- PostgreSQL, les sous-requetes d'un UPDATE voient l'etat d'AVANT l'UPDATE :
--- la garde peut donc vivre dans son WHERE.
+-- Les etiquettes existantes restent a 0, « jamais placees » : la liste reste
+-- ALPHABETIQUE tant que l'utilisateur n'a rien reordonne (decision de
+-- Bertrand du 13/10). Seul `PUT /tags/order` ecrit des positions (1 a n) ;
+-- un ordre deja choisi (copie par une bascule) n'est jamais touche.
 --
 -- Idempotent : sans effet une fois la colonne en BIGINT et l'ordre pose.
 
@@ -44,9 +43,6 @@ END $ordre_des_etiquettes$;
 UPDATE tags SET position = 0 WHERE position IS NULL;
 ALTER TABLE tags ALTER COLUMN position SET DEFAULT 0;
 ALTER TABLE tags ALTER COLUMN position SET NOT NULL;
-
-UPDATE tags SET position = (SELECT COUNT(*) FROM tags t2 WHERE t2.name < tags.name)
- WHERE (SELECT COUNT(DISTINCT position) FROM tags) <= 1;
 
 INSERT INTO schema_version (version, name) VALUES (90, 'tags_position')
     ON CONFLICT (version) DO NOTHING;

@@ -118,20 +118,21 @@ pub mod sql {
     use super::SqlDialect;
 
     /// L'ordre de TOUTES les listes d'etiquettes (web#2166, #6257) : la
-    /// position choisie par l'utilisateur, puis le nom. Le nom departage les
-    /// egalites — une base qui aurait recu la colonne sans la migration 126
-    /// (passe finale, `ENSURE_COLUMNS`) a toutes ses positions a 0 et reste
-    /// donc rangee par nom, comme avant.
+    /// position choisie par l'utilisateur, puis le nom. Position 0 = « jamais
+    /// placee » : tant que l'utilisateur n'a rien reordonne, toutes sont a 0
+    /// et la liste reste ALPHABETIQUE (decision de Bertrand du 13/10).
     pub fn list_all() -> &'static str {
         "SELECT id, name, color FROM tags ORDER BY position, name"
     }
 
-    /// Une etiquette neuve prend la DERNIERE place : elle s'ajoute au bout de
-    /// l'ordre choisi au lieu de s'intercaler par son nom.
+    /// La place d'une etiquette neuve (decision de Bertrand du 13/10) :
+    /// - aucun ordre choisi (toutes les positions a 0) : 0, elle se range
+    ///   donc par son nom, comme les autres ;
+    /// - un ordre choisi (`PUT /tags/order` ecrit 1 a n) : la DERNIERE place.
     pub fn create_tag<D: SqlDialect>(d: &D) -> String {
         format!(
             "INSERT INTO tags (name, color, position) VALUES ({}, {}, \
-             (SELECT COALESCE(MAX(position), -1) + 1 FROM tags))",
+             (SELECT CASE WHEN MAX(position) > 0 THEN MAX(position) + 1 ELSE 0 END FROM tags))",
             d.placeholder(1),
             d.placeholder(2)
         )
@@ -498,15 +499,18 @@ impl TagRepo {
     /// [`ordre_complet`] : un identifiant inconnu est ignore, un doublon ne
     /// compte qu'une fois, et une etiquette absente de la liste (creee par un
     /// autre ecran entre-temps) garde son rang relatif, APRES celles qui sont
-    /// nommees. Les positions sont reecrites de 0 a n-1 dans une seule
-    /// transaction : l'ordre ne peut pas rester a moitie enregistre.
+    /// nommees. Les positions sont reecrites de 1 a n dans une seule
+    /// transaction : l'ordre ne peut pas rester a moitie enregistre. Elles
+    /// partent de 1, jamais de 0 : 0 veut dire « jamais placee », et c'est ce
+    /// qui distingue une liste encore alphabetique d'un ordre choisi (voir
+    /// [`sql::create_tag`]).
     pub fn reorder(&self, ids: &[i64]) -> Result<(), String> {
         let actuelles: Vec<i64> = self.list()?.into_iter().filter_map(|t| t.id).collect();
         let ordre = ordre_complet(&actuelles, ids);
         let sql = self.dialect_sql(sql::update_position, sql::update_position);
         self.db.write_tx(&mut |tx| {
             for (rang, id) in ordre.iter().enumerate() {
-                let rang = rang as i64;
+                let rang = rang as i64 + 1;
                 let params: [&dyn ToSqlValue; 2] = [&rang, id];
                 tx.execute(&sql, &params)?;
             }
@@ -996,11 +1000,10 @@ mod tests {
         assert!(sql::tag_item(&p).ends_with("ON CONFLICT (tag_id, item_type, item_id) DO NOTHING"));
     }
 
-    /// Depuis #6257, la liste suit `position` : une etiquette neuve prend la
-    /// DERNIERE place au lieu de s'intercaler par son nom (le rangement par
-    /// nom de l'existant est fait une fois par la migration 126).
+    /// Tant que rien n'a ete reordonne (#6257, decision du 13/10), la liste
+    /// reste alphabetique : une etiquette neuve s'y range par son nom.
     #[test]
-    fn tag_list_suit_la_position() {
+    fn tag_list_sorted() {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
         migrations::run_migrations(&db).unwrap();
@@ -1012,8 +1015,8 @@ mod tests {
 
         let tags = repo.list().unwrap();
         assert_eq!(tags.len(), 3);
-        assert_eq!(tags[0].name, "Zebra");
-        assert_eq!(tags[2].name, "Middle");
+        assert_eq!(tags[0].name, "Alpha");
+        assert_eq!(tags[2].name, "Zebra");
     }
 
     /// Le défaut du chantier : un `item_type` mal orthographié entrait sans un
@@ -1436,11 +1439,46 @@ mod tests {
         assert_eq!(compte(None), attendu, "list_with_counts");
         assert_eq!(compte(Some("album")), attendu, "list_with_counts(album)");
 
-        // Une neuve va au BOUT, pas a sa place alphabetique.
+        // Un ordre a ete choisi : une neuve va au BOUT, pas a sa place
+        // alphabetique.
         repo.create("Afrobeat", None).unwrap();
         assert_eq!(
             noms(&repo.list().unwrap()),
             vec!["Cool jazz", "Ambient", "Blues", "Afrobeat"]
         );
+    }
+
+    /// Decision de Bertrand (13/10) : tant que l'utilisateur n'a rien
+    /// reordonne, une etiquette neuve se range par son NOM ; des qu'un ordre a
+    /// ete choisi, meme d'une seule etiquette, elle va en fin de liste.
+    #[test]
+    fn une_neuve_se_range_par_nom_tant_qu_aucun_ordre_n_est_choisi_6257() {
+        let repo = repo_neuf();
+        repo.create("Rock", None).unwrap();
+        repo.create("Blues", None).unwrap();
+        repo.create("Jazz", None).unwrap();
+        assert_eq!(noms(&repo.list().unwrap()), vec!["Blues", "Jazz", "Rock"]);
+        repo.create("Ambient", None).unwrap();
+        assert_eq!(
+            noms(&repo.list().unwrap()),
+            vec!["Ambient", "Blues", "Jazz", "Rock"],
+            "sans ordre choisi, une neuve doit se ranger par son nom"
+        );
+
+        // Un ordre choisi, identique a l'alphabetique : il compte quand meme.
+        repo.reorder(&[]).unwrap();
+        repo.create("Afrobeat", None).unwrap();
+        assert_eq!(
+            noms(&repo.list().unwrap()),
+            vec!["Ambient", "Blues", "Jazz", "Rock", "Afrobeat"],
+            "apres un ordre choisi, une neuve doit aller en fin de liste"
+        );
+
+        // Une seule etiquette placee suffit a marquer l'ordre choisi.
+        let seul = repo_neuf();
+        let b = seul.create("Blues", None).unwrap();
+        seul.reorder(&[b]).unwrap();
+        seul.create("Ambient", None).unwrap();
+        assert_eq!(noms(&seul.list().unwrap()), vec!["Blues", "Ambient"]);
     }
 }
