@@ -1034,6 +1034,8 @@ mod volume_pure_5695;
 #[cfg(test)]
 mod volume_pure_5695_tests;
 
+/// #6233 — radio sur sortie locale : le contrat de signal relu à chaque tour.
+mod contrat_radio_locale_6233;
 /// #5662 — un renderer à 100 % ignoré par l'adoption est signalé au journal.
 mod volume_100_ignore_5662;
 /// #6008 — l'adoption du volume du renderer est dite au journal.
