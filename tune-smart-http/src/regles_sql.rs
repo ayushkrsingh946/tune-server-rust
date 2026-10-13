@@ -414,8 +414,25 @@ pub(crate) fn normaliser_op(brut: &str) -> &str {
         "<" | "lt" => "<",
         "is_empty" | "empty" | "is_null" => "is_null",
         "is_not_empty" | "not_empty" | "is_not_null" => "is_not_null",
+        // #6250 — « ne contient pas ». `not_contains` est la graphie du vieux
+        // moteur de tune-core (`Operator::NotContains`).
+        "not_contains" | "does_not_contain" | "not_like" => NE_CONTIENT_PAS,
         autre => autre,
     }
+}
+
+/// #6250 — l'opérateur « ne contient pas », dans sa graphie canonique.
+pub(crate) const NE_CONTIENT_PAS: &str = "not_contains";
+
+/// #6250 — « ne contient pas » : le complément EXACT de « contient ».
+///
+/// 🔴 Une valeur ABSENTE ne contient rien, donc elle « ne contient pas » :
+/// une piste sans genre passe « genre ne contient pas Rock ». Sans le
+/// `IS NULL`, `NOT (NULL LIKE …)` vaut NULL en SQL et la piste disparaissait
+/// des DEUX listes — ni « contient », ni « ne contient pas ». La chaîne vide
+/// n'a pas besoin de cas : `'' LIKE '%x%'` est faux.
+pub(crate) fn ne_contient_pas(sql: &str, contient: &str) -> String {
+    format!("({sql} IS NULL OR NOT ({contient}))")
 }
 
 /// La condition SQL d'une règle, ou `None` si elle n'a pas de sens.
@@ -478,6 +495,10 @@ pub(crate) fn condition(col: Colonne, op: &str, valeur: &str) -> Option<String> 
         ">" => format!("{sql} > {}", entier()),
         "<=" => format!("{sql} <= {}", entier()),
         "<" => format!("{sql} < {}", entier()),
+        // #6250 — « ne contient pas » : le complément de « contient », sur le
+        // texte comme sur la forme textuelle d'un nombre. Les deux moteurs le
+        // perdaient : FAUX ici, règle ignorée aux collections.
+        NE_CONTIENT_PAS => ne_contient_pas(sql, &condition(col, "contains", valeur)?),
         _ => return None,
     })
 }

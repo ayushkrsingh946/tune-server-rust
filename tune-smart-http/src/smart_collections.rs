@@ -668,6 +668,16 @@ async fn delete_collection(
     Json(json!({"deleted": true, "id": id}))
 }
 
+/// #6250 — un critère de collection dont la colonne ne dépend que de
+/// l'ALBUM (`al`, ou `ar` joint sur `al.artist_id`) : sa valeur est la même
+/// sur toutes les lignes album × piste. Les autres lisent la PISTE (`t`).
+fn critere_d_album(field: &str) -> bool {
+    matches!(
+        field,
+        "artist" | "artist_name" | "album" | "album_title" | "title" | "label" | "cover_path"
+    )
+}
+
 // #5547 — la lecture d'une date de règle vit dans `regles_sql`, pour que les
 // playlists la lisent comme les collections.
 use crate::regles_sql::horodatage_sql as resolve_timestamp_sql;
@@ -710,6 +720,8 @@ pub fn build_album_query(
             // tune-core seed/editor spelling — same semantics as is_null.
             "is_empty" | "empty" => "is_null",
             "is_not_empty" | "not_empty" => "is_not_null",
+            // #6250 — « ne contient pas », mêmes graphies que les playlists.
+            "not_contains" | "does_not_contain" | "not_like" => crate::regles_sql::NE_CONTIENT_PAS,
             other => other,
         };
         let value_raw = rule.get("value");
@@ -1013,11 +1025,51 @@ pub fn build_album_query(
         );
         let int_val = || value.parse::<i64>().unwrap_or(0);
 
+        // #6271 — un MOTIF (`LIKE`) sur la colonne. Un nombre se compare par
+        // sa forme TEXTUELLE, comme dans les playlists (#1008) : `LOWER()` d'un
+        // entier passe sur SQLite mais PostgreSQL le refuse (`function
+        // lower(integer) does not exist`) et l'aperçu tombait.
+        let motif = |m: &str| {
+            if is_text {
+                format!("LOWER({col}) LIKE LOWER('{m}'){esc_clause}")
+            } else {
+                format!("CAST({col} AS TEXT) LIKE '{m}'{esc_clause}")
+            }
+        };
+
         let cond = match op {
             "=" if is_text => format!("LOWER({col}) = LOWER('{esc}')"),
             "!=" if is_text => format!("LOWER({col}) != LOWER('{esc}')"),
-            "contains" => format!("LOWER({col}) LIKE LOWER('%{esc_like}%'){esc_clause}"),
-            "starts_with" => format!("LOWER({col}) LIKE LOWER('{esc_like}%'){esc_clause}"),
+            "contains" => motif(&format!("%{esc_like}%")),
+            // #6250 — « ne contient pas » : le complément EXACT de « contient »,
+            // qui retient un album dès qu'UNE ligne (album × piste) contient.
+            // Une valeur absente « ne contient pas » (`regles_sql::ne_contient_pas`).
+            //
+            // - Critère d'ALBUM (`ar.name`, `al.*`) : la valeur est la même sur
+            //   toutes les lignes de l'album, la négation se pose sur la ligne.
+            // - Critère de PISTE (genre, compositeur, répertoire…) : nier la
+            //   ligne retiendrait l'album dès qu'UNE piste ne contient pas — un
+            //   album Jazz avec un bonus Rock passerait « genre ne contient pas
+            //   Rock ». L'album passe si AUCUNE de ses pistes ne contient. `t`
+            //   désigne, dans la sous-requête, la piste de l'album ; `al` et
+            //   `ar` restent ceux de la requête.
+            //
+            // Cette règle-ci était ignorée (`_ => continue`) : la collection
+            // rendait toute la bibliothèque.
+            crate::regles_sql::NE_CONTIENT_PAS => {
+                let contient = motif(&format!("%{esc_like}%"));
+                if critere_d_album(field) {
+                    crate::regles_sql::ne_contient_pas(col, &contient)
+                } else {
+                    format!(
+                        "NOT EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = al.id AND {contient})"
+                    )
+                }
+            }
+            "starts_with" => motif(&format!("{esc_like}%")),
+            // #6271 — « finit par » : les playlists le traduisaient, ici la
+            // règle tombait dans `_ => continue` et la collection rendait TOUT.
+            "ends_with" => motif(&format!("%{esc_like}")),
             "is_null" => format!("({col} IS NULL OR {col} = '')"),
             "is_not_null" => format!("({col} IS NOT NULL AND {col} != '')"),
             "=" => format!("{col} = {}", int_val()),
