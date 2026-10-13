@@ -20,6 +20,10 @@ struct AnneauSimule {
     file: RefCell<VecDeque<f32>>,
     capacite: usize,
     periode_lue: std::cell::Cell<usize>,
+    latence_b: std::cell::Cell<Option<f64>>,
+    avance_a: std::cell::Cell<f64>,
+    maintenant: std::cell::Cell<f64>,
+    derniere_lecture: std::cell::Cell<Option<f64>>,
 }
 
 impl AnneauSimule {
@@ -28,6 +32,10 @@ impl AnneauSimule {
             file: RefCell::new(VecDeque::with_capacity(capacite)),
             capacite,
             periode_lue: std::cell::Cell::new(0),
+            latence_b: std::cell::Cell::new(None),
+            avance_a: std::cell::Cell::new(0.0),
+            maintenant: std::cell::Cell::new(0.0),
+            derniere_lecture: std::cell::Cell::new(None),
         }
     }
 }
@@ -45,15 +53,35 @@ impl AnneauSecondaire for AnneauSimule {
     fn periode_du_lecteur(&self) -> usize {
         self.periode_lue.get()
     }
+    fn latence_du_lecteur_s(&self) -> Option<f64> {
+        self.latence_b.get()
+    }
+    fn depuis_la_derniere_lecture_s(&self) -> Option<f64> {
+        self.derniere_lecture
+            .get()
+            .map(|t| self.maintenant.get() - t)
+    }
+    fn publier_l_avance_de_a(&self, avance_s: f64) {
+        self.avance_a.set(avance_s);
+    }
 }
 
 /// Un périphérique simulé : cadence nominale, écart de son quartz en ppm,
-/// taille de période.
+/// taille de période, latence matérielle (du rappel au convertisseur), et si
+/// son pilote la donne dans les horodatages du rappel.
 #[derive(Clone, Copy)]
 struct Peripherique {
     cadence: u32,
     ppm: f64,
     periode: usize,
+    latence_s: f64,
+    horodate: bool,
+}
+
+impl Peripherique {
+    fn latence_annoncee(&self) -> Option<f64> {
+        self.horodate.then_some(self.latence_s)
+    }
 }
 
 impl Peripherique {
@@ -72,11 +100,25 @@ struct Bilan {
 
 /// Fait tourner A et B `duree_s` secondes de temps simulé.
 fn simuler(a: Peripherique, b: Peripherique, canaux: usize, duree_s: f64) -> Bilan {
+    simuler_avec_decalage(a, b, canaux, duree_s, 0.0)
+}
+
+/// Même banc, avec le décalage manuel `sync_delay_ms` (B − A) en secondes.
+///
+/// L'écart est mesuré à la SORTIE des convertisseurs : la trame qu'un rappel
+/// livre à `t` s'entend à `t + latence` de son périphérique.
+fn simuler_avec_decalage(
+    a: Peripherique,
+    b: Peripherique,
+    canaux: usize,
+    duree_s: f64,
+    manuel_s: f64,
+) -> Bilan {
     let consigne = CONSIGNE_PAR_DEFAUT_S;
     let mut rec = Recopieur::nouveau(canaux, a.cadence, b.cadence, consigne);
+    rec.regler_le_decalage_manuel(manuel_s);
     let retard_a = (consigne * f64::from(a.cadence)).round();
     let consigne_b = rec.consigne();
-    let seuil_b = consigne_b.seuil_de_depart(b.periode * canaux);
     let anneau = AnneauSimule::nouveau((consigne * f64::from(b.cadence)) as usize * canaux * 4);
 
     // Repères (trame produite, position d'entrée, pas) au début de chaque
@@ -109,10 +151,14 @@ fn simuler(a: Peripherique, b: Peripherique, canaux: usize, duree_s: f64) -> Bil
             }
             source += a.periode as u64;
             let (k, x) = rec.repere();
-            rec.recopier(&mut periode_a, &anneau);
+            anneau.maintenant.set(ta);
+            rec.recopier(&mut periode_a, &anneau, a.latence_annoncee());
             reperes.push((k, x, 1.0 / rec.rapport()));
             na += 1;
         } else {
+            anneau.latence_b.set(b.latence_annoncee());
+            let compensation = anneau.avance_a.get() - b.latence_annoncee().unwrap_or(0.0);
+            let seuil_b = consigne_b.seuil_de_depart(b.periode * canaux, compensation);
             if !b_demarre && anneau.en_attente() >= seuil_b {
                 b_demarre = true;
             }
@@ -122,11 +168,14 @@ fn simuler(a: Peripherique, b: Peripherique, canaux: usize, duree_s: f64) -> Bil
                 let i = reperes.partition_point(|r| r.0 <= k).saturating_sub(1);
                 let (k0, x0, pas) = reperes[i];
                 let pos_b = x0 + (k - k0) as f64 * pas;
-                let pos_a = ra * tb - retard_a;
+                // Ce que A fait entendre à l'instant où cette trame de B sort
+                // de son convertisseur.
+                let pos_a = ra * (tb + b.latence_s - a.latence_s) - retard_a;
                 if tb > 0.5 {
                     ecarts_ms.push((tb, (pos_a - pos_b) / f64::from(a.cadence) * 1000.0));
                 }
                 anneau.periode_lue.set(lu_b.len());
+                anneau.derniere_lecture.set(Some(tb));
                 let mut f = anneau.file.borrow_mut();
                 let n = lu_b.len().min(f.len());
                 for s in lu_b.iter_mut().take(n) {
@@ -164,11 +213,15 @@ fn deux_horloges_differentes_restent_synchrones_dix_minutes() {
         cadence: 48_000,
         ppm: 100.0,
         periode: 480,
+        latence_s: 0.0,
+        horodate: true,
     };
     let b = Peripherique {
         cadence: 48_000,
         ppm: -80.0,
         periode: 512,
+        latence_s: 0.0,
+        horodate: true,
     };
     let bilan = simuler(a, b, 1, 600.0);
     let pire = pire_ecart(&bilan, 20.0);
@@ -210,11 +263,15 @@ fn cadences_differentes_et_derive_forte_en_stereo() {
         cadence: 44_100,
         ppm: -250.0,
         periode: 441,
+        latence_s: 0.0,
+        horodate: true,
     };
     let b = Peripherique {
         cadence: 48_000,
         ppm: 250.0,
         periode: 1024,
+        latence_s: 0.0,
+        horodate: true,
     };
     let bilan = simuler(a, b, 2, 240.0);
     let pire = pire_ecart(&bilan, 20.0);
@@ -261,7 +318,7 @@ fn le_signal_recopie_est_a_la_position_annoncee() {
         }
         source += 480;
         let (k, x) = rec.repere();
-        rec.recopier(&mut periode, &anneau);
+        rec.recopier(&mut periode, &anneau, None);
         reperes.push((k, x, 1.0 / rec.rapport()));
     }
     // Consigne nulle : le régulateur voit un anneau qui se remplit et pousse
@@ -295,7 +352,7 @@ fn la_ligne_a_retard_de_a_est_exacte() {
     let mut joue = Vec::new();
     for p in 0..4 {
         let mut periode: Vec<f32> = (0..64).map(|i| (p * 64 + i + 1) as f32).collect();
-        rec.recopier(&mut periode, &anneau);
+        rec.recopier(&mut periode, &anneau, None);
         joue.extend(periode);
     }
     assert!(joue[..96].iter().all(|s| *s == 0.0));
@@ -316,4 +373,110 @@ fn la_valeur_du_reglage_donne_le_nom_du_peripherique() {
     assert_eq!(nom_de_peripherique("local:"), None);
     assert_eq!(nom_de_peripherique(""), None);
     assert_eq!(cle_de_zone(7), "zone_7_sortie_double");
+}
+
+/// #6132 étape 2 — deux cartes de latences matérielles différentes (A : 5 ms,
+/// B : 25 ms), horodatées par leur pilote : la compensation automatique
+/// nourrit B 20 ms plus tôt, et ce qui sort des deux convertisseurs reste
+/// aligné. Sans elle, B s'entendrait 20 ms après A pendant toute l'écoute.
+#[test]
+fn la_latence_de_chaque_carte_est_compensee_par_les_horodatages() {
+    let a = Peripherique {
+        cadence: 48_000,
+        ppm: 60.0,
+        periode: 480,
+        latence_s: 0.005,
+        horodate: true,
+    };
+    let b = Peripherique {
+        cadence: 48_000,
+        ppm: -40.0,
+        periode: 512,
+        latence_s: 0.025,
+        horodate: true,
+    };
+    let bilan = simuler(a, b, 2, 180.0);
+    let pire = pire_ecart(&bilan, 20.0);
+    eprintln!(
+        "sortie_double latences 5/25 ms horodatées, 180 s : pire écart de 20 s à 180 s = {pire:.3} ms, \
+         compensation = {:.3} ms, latences lues A = {:?} ms, B = {:?} ms, famines B = {}",
+        bilan.releve.compensation_ms,
+        bilan.releve.latence_a_ms,
+        bilan.releve.latence_b_ms,
+        bilan.famines_b
+    );
+    assert!(
+        pire < 0.5,
+        "latences matérielles non compensées : écart entendu {pire:.3} ms (attendu < 0,5 ms)"
+    );
+    assert!((bilan.releve.compensation_ms + 20.0).abs() < 0.1);
+    assert_eq!(bilan.famines_b, 0);
+}
+
+/// Le réglage de secours : pilote sans horodatage, mêmes latences. Le
+/// décalage manuel `sync_delay_ms` (B − A = −20 ms : A retardé de 20 ms) fait
+/// le même travail.
+#[test]
+fn sans_horodatage_le_decalage_manuel_compense() {
+    let a = Peripherique {
+        cadence: 48_000,
+        ppm: 0.0,
+        periode: 480,
+        latence_s: 0.005,
+        horodate: false,
+    };
+    let b = Peripherique {
+        cadence: 48_000,
+        ppm: 100.0,
+        periode: 480,
+        latence_s: 0.025,
+        horodate: false,
+    };
+    let sans = simuler_avec_decalage(a, b, 1, 60.0, 0.0);
+    let avec = simuler_avec_decalage(a, b, 1, 60.0, -0.020);
+    let (e_sans, e_avec) = (pire_ecart(&sans, 20.0), pire_ecart(&avec, 20.0));
+    eprintln!(
+        "sortie_double sans horodatage, 60 s : écart sans réglage = {e_sans:.3} ms, \
+         avec sync_delay −20 ms = {e_avec:.3} ms"
+    );
+    assert!(
+        e_sans > 19.0,
+        "le banc doit voir l'écart matériel : {e_sans:.3} ms"
+    );
+    assert!(
+        e_avec < 0.5,
+        "le décalage manuel ne compense pas : {e_avec:.3} ms"
+    );
+    assert_eq!(avec.releve.latence_a_ms, None);
+}
+
+/// Deux cartes aux périodes ÉGALES (10 ms, le cas WASAPI partagé courant) et
+/// aux quartz presque égaux (+10 ppm) : leurs rappels gardent la même phase
+/// pendant des minutes. Mesuré à l'instant où A passe, le remplissage de B
+/// dépendait de cette phase, et l'écart se calait jusqu'à 5 ms à côté.
+#[test]
+fn periodes_egales_et_phase_figee_restent_alignees() {
+    let a = Peripherique {
+        cadence: 48_000,
+        ppm: 0.0,
+        periode: 480,
+        latence_s: 0.010,
+        horodate: true,
+    };
+    let b = Peripherique {
+        cadence: 48_000,
+        ppm: 10.0,
+        periode: 480,
+        latence_s: 0.010,
+        horodate: true,
+    };
+    let bilan = simuler(a, b, 2, 300.0);
+    let pire = pire_ecart(&bilan, 20.0);
+    eprintln!(
+        "sortie_double périodes égales, +10 ppm, 300 s : pire écart de 20 s à 300 s = {pire:.3} ms"
+    );
+    assert!(
+        pire < 0.5,
+        "écart calé sur la phase des rappels : {pire:.3} ms"
+    );
 }
