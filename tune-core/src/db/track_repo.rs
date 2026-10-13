@@ -4,9 +4,7 @@ use std::sync::Arc;
 use super::backend::{DbBackend, SqlValue, ToSqlValue};
 use super::engine::{Engine, PostgresDialect, SqlDialect, SqliteDialect};
 pub use super::facet_filter::TrackFilter;
-use super::facet_filter::{
-    Placeholders, any_of, banned_tracks_excluded, favorite_condition, hidden_tracks_excluded,
-};
+use super::facet_filter::{Placeholders, banned_tracks_excluded, hidden_tracks_excluded};
 use super::home_queries::{DATE_D_AJOUT, JOINTURE_PREMIERE_VUE};
 use super::models::Track;
 use super::sqlite::SqliteDb;
@@ -2546,25 +2544,19 @@ impl TrackRepo {
         // plusieurs genres sélectionnés, les deux tests s'étendent ensemble —
         // et les valeurs sont empilées dans l'ordre où les marqueurs sortent :
         // d'abord les N du `IN`, puis les N motifs `LIKE`.
-        if !f.genres.is_empty() {
-            let n = f.genres.len();
-            let in_part = ph
-                .in_list_ci("t.genre", n)
-                .expect("liste non vide déjà vérifiée");
-            // ⚠️ Insensible à la casse des DEUX côtés, comme le `in_list_ci`
-            // ci-dessus : un `LIKE` nu l'est en SQLite, mais PAS en
-            // PostgreSQL. Jumeau strict du rail (`facets::build_conditions`),
-            // qui a reçu la même correction (#1821).
-            let like_part = ph
-                .or_like_ci("t.genres", n)
-                .expect("liste non vide déjà vérifiée");
-            conditions.push(format!("({in_part} OR {like_part})"));
-            for g in &f.genres {
-                owned_params.push(SqlValue::Text(g.clone()));
-            }
-            for g in &f.genres {
-                owned_params.push(SqlValue::Text(format!("%\"{g}\"%")));
-            }
+        //
+        // #2108 : chaque facette « combinable » passe par
+        // `facet_filter::combiner`, qui rend le SQL d'avant en « Ou » (défaut)
+        // et un prédicat par valeur, joints par `AND`, en « Et ». Les blocs
+        // sont ceux du rail (`facets::build_facet_conditions`) : écrits une
+        // fois, dans `facet_filter`.
+        use crate::db::facet_filter::{
+            bloc_contient, bloc_favoris, bloc_genres, bloc_instruments, bloc_listes,
+            bloc_metadonnee, bloc_sans_etiquette, combiner,
+        };
+        if let Some((c, p)) = combiner(ph, &f.genres, f.est_en_et("genre"), bloc_genres) {
+            conditions.push(c);
+            owned_params.extend(p);
         }
 
         if let Some(c) = ph.in_list("t.year", f.years.len()) {
@@ -2602,27 +2594,36 @@ impl TrackRepo {
             }
         }
 
-        if let Some(c) = ph.or_like_ci("t.label", f.labels.len()) {
+        if let Some((c, p)) = combiner(
+            ph,
+            &f.labels,
+            f.est_en_et("label"),
+            bloc_contient("t.label"),
+        ) {
             conditions.push(c);
-            for v in &f.labels {
-                owned_params.push(SqlValue::Text(format!("%{v}%")));
-            }
+            owned_params.extend(p);
         }
 
-        if let Some(c) = ph.or_like_ci("t.composer", f.composers.len()) {
+        if let Some((c, p)) = combiner(
+            ph,
+            &f.composers,
+            f.est_en_et("composer"),
+            bloc_contient("t.composer"),
+        ) {
             conditions.push(c);
-            for v in &f.composers {
-                owned_params.push(SqlValue::Text(format!("%{v}%")));
-            }
+            owned_params.extend(p);
         }
 
         // CRD-6 : l'instrument est un crédit, pas une colonne de `tracks` ;
         // le prédicat jumeau des facettes vit dans `facet_filter`.
-        if let Some(c) = ph.in_list_ci("tc.instrument", f.instruments.len()) {
-            conditions.push(crate::db::facet_filter::instrument_exists(engine, &c));
-            for v in &f.instruments {
-                owned_params.push(SqlValue::Text(v.clone()));
-            }
+        if let Some((c, p)) = combiner(
+            ph,
+            &f.instruments,
+            f.est_en_et("instrument"),
+            bloc_instruments(engine),
+        ) {
+            conditions.push(c);
+            owned_params.extend(p);
         }
 
         // The artist name lives on the joined `artists` table (tracks stores
@@ -2640,19 +2641,14 @@ impl TrackRepo {
 
         // Extended-tag filters via the open `track_metadata` k/v store. The key
         // is a fixed literal; only the values are bound parameters.
-        for (values, key) in [
-            (&f.countries, "release_country"),
-            (&f.moods, "mood"),
-            (&f.source_medias, "source_media"),
+        for (values, key, param) in [
+            (&f.countries, "release_country", "country"),
+            (&f.moods, "mood", "mood"),
+            (&f.source_medias, "source_media", "source_media"),
         ] {
-            if let Some(c) = ph.in_list("tm.value", values.len()) {
-                conditions.push(format!(
-                    "EXISTS (SELECT 1 FROM track_metadata tm \
-                     WHERE tm.track_id = t.id AND tm.key = '{key}' AND {c})"
-                ));
-                for v in values {
-                    owned_params.push(SqlValue::Text(v.clone()));
-                }
+            if let Some((c, p)) = combiner(ph, values, f.est_en_et(param), bloc_metadonnee(key)) {
+                conditions.push(c);
+                owned_params.extend(p);
             }
         }
 
@@ -2740,38 +2736,24 @@ impl TrackRepo {
 
         // Favoris du profil 1 : la piste elle-même, ou son album. Vocabulaire
         // FERMÉ — le SQL est un littéral, jamais l'entrée de la requête.
-        if let Some(c) = any_of(
-            f.favorites
-                .iter()
-                .filter_map(|k| favorite_condition(k))
-                .map(str::to_string)
-                .collect(),
-        ) {
+        if let Some((c, _)) = combiner(ph, &f.favorites, f.est_en_et("favorite"), bloc_favoris) {
             conditions.push(c);
         }
 
-        if let Some(c) = ph.in_list_ci("pl.name", f.playlists.len()) {
-            conditions.push(format!(
-                "EXISTS (SELECT 1 FROM playlist_tracks pt JOIN playlists pl ON pl.id = pt.playlist_id \
-                 WHERE pt.track_id = t.id AND {c})"
-            ));
-            for v in &f.playlists {
-                owned_params.push(SqlValue::Text(v.clone()));
-            }
+        if let Some((c, p)) = combiner(ph, &f.playlists, f.est_en_et("playlist"), bloc_listes) {
+            conditions.push(c);
+            owned_params.extend(p);
         }
 
         // Étiquette manquante : liste FERMÉE, le SQL ne dépend jamais de
         // l'entrée brute. « Manquant » = NULL ou chaîne vide (un tag effacé
         // laisse souvent une chaîne vide, et l'utilisateur ne fait pas la
         // différence).
-        if let Some(c) = any_of(
-            f.untagged
-                .iter()
-                .filter_map(|k| {
-                    crate::db::facet_filter::untagged_condition_for_engine(k, self.db.engine())
-                        .map(str::to_string)
-                })
-                .collect(),
+        if let Some((c, _)) = combiner(
+            ph,
+            &f.untagged,
+            f.est_en_et("untagged"),
+            bloc_sans_etiquette(engine),
         ) {
             conditions.push(c);
         }
@@ -6916,5 +6898,81 @@ pub(crate) mod tests_b209_ordre_dans_l_album {
         );
         assert_eq!(valeur(2, "track_number"), Some(1), "un vrai numéro reste");
         assert_eq!(valeur(1, "disc_number"), Some(1));
+    }
+}
+
+/// #2108 — l'opérateur « Et » entre les valeurs d'une même facette, sur la
+/// liste filtrée : compositeurs (facette « contient ») et genres (colonne OU
+/// tableau JSON, deux marqueurs par valeur).
+#[cfg(test)]
+mod tests_facettes_en_et_2108 {
+    use crate::db::facet_filter::TrackFilter;
+    use crate::db::models::Track;
+    use crate::db::sqlite::SqliteDb;
+    use crate::db::track_repo::TrackRepo;
+
+    #[test]
+    fn les_valeurs_d_une_facette_se_combinent_en_et_sur_demande() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        let repo = TrackRepo::new(db.clone());
+        let piste = |titre: &str, compositeur: &str, genre: &str, genres: &str| {
+            let mut t = Track::new(titre.into());
+            t.composer = Some(compositeur.into());
+            t.genre = Some(genre.into());
+            t.genres = Some(genres.into());
+            t.file_path = Some(format!("/m/{titre}.flac"));
+            repo.create(&t).unwrap()
+        };
+        piste(
+            "Deux",
+            "J.S. Bach; A. Vivaldi",
+            "Baroque",
+            r#"["Baroque","Concerto"]"#,
+        );
+        piste("Bach", "J.S. Bach", "Baroque", r#"["Baroque"]"#);
+        piste("Vivaldi", "A. Vivaldi", "Concerto", r#"["Concerto"]"#);
+
+        let titres = |f: TrackFilter| -> Vec<String> {
+            let (pistes, total) = repo.list_filtered(&f, 50, 0).unwrap();
+            let mut t: Vec<String> = pistes.into_iter().map(|p| p.title).collect();
+            t.sort();
+            assert_eq!(total as usize, t.len(), "le total suit la liste");
+            t
+        };
+        let compositeurs = vec!["Bach".to_string(), "Vivaldi".to_string()];
+        let genres = vec!["Baroque".to_string(), "Concerto".to_string()];
+
+        assert_eq!(
+            titres(TrackFilter {
+                composers: compositeurs.clone(),
+                ..Default::default()
+            }),
+            ["Bach", "Deux", "Vivaldi"],
+            "défaut : « Ou »"
+        );
+        assert_eq!(
+            titres(TrackFilter {
+                composers: compositeurs,
+                en_et: vec!["composer".into()],
+                ..Default::default()
+            }),
+            ["Deux"]
+        );
+        assert_eq!(
+            titres(TrackFilter {
+                genres: genres.clone(),
+                ..Default::default()
+            }),
+            ["Bach", "Deux", "Vivaldi"]
+        );
+        assert_eq!(
+            titres(TrackFilter {
+                genres,
+                en_et: vec!["genre".into()],
+                ..Default::default()
+            }),
+            ["Deux"]
+        );
     }
 }

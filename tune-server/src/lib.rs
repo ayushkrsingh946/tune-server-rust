@@ -88,5 +88,9 @@ pub use bootstrap::run;
 mod premium_audio_plugins;
 
 mod audio_job_journal;
+
+/// #5870 — bascule d'office des zones Tune OS de `alsa:default` vers le DAC.
+#[cfg_attr(not(feature = "local-audio"), allow(dead_code))]
+mod bascule_tune_os_5870;
 mod catalogue_greffons_audio;
 mod native_audio;

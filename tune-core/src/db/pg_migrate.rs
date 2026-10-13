@@ -482,7 +482,14 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
     album TEXT,
     album_source_id TEXT,
     duration_ms TEXT,
-    cover_url TEXT
+    cover_url TEXT,
+    -- #6179 : la ligne introuvable garde l'identite de sa piste (PG 089,
+    -- SQLite 125). La 089 convertit `missing_since`.
+    file_path TEXT,
+    audio_hash TEXT,
+    audio_fingerprint TEXT,
+    mbid TEXT,
+    missing_since TEXT
 );
 
 CREATE SEQUENCE IF NOT EXISTS zones_id_seq;

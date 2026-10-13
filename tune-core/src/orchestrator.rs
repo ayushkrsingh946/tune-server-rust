@@ -1185,6 +1185,11 @@ pub struct PlaybackOrchestrator {
     /// niveaux de la piste suivante démarrent à l'avance gapless, voir
     /// [`Self::advance_queue_metadata`]. Verrou std : accès courts.
     levels_prewarm: std::sync::Mutex<std::collections::HashSet<i64>>,
+    /// #5050 (fil 2236) — zones posées en pause par un transfert, sans que
+    /// rien n'ait été envoyé à leur appareil : leur reprise rétablit la piste
+    /// à la position (voir `transfert_en_pause_5050`). Verrou std : accès
+    /// courts.
+    transferts_en_pause: std::sync::Mutex<std::collections::HashSet<i64>>,
     /// Anti-rebond du redémarrage de flux déclenché par un changement
     /// d'égaliseur sur un chemin NON local (#1710, lot 2).
     ///
@@ -1698,6 +1703,7 @@ impl PlaybackOrchestrator {
             dlna_lpcm_accepte: Mutex::new(HashMap::new()),
             dlna_canaux_max: Mutex::new(HashMap::new()),
             levels_prewarm: std::sync::Mutex::new(std::collections::HashSet::new()),
+            transferts_en_pause: std::sync::Mutex::new(std::collections::HashSet::new()),
             eq_replay_gen: std::sync::Mutex::new(std::collections::HashMap::new()),
             eq_replay_last: std::sync::Mutex::new(std::collections::HashMap::new()),
             traitement_des_flux: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1806,6 +1812,10 @@ mod crossfeed_bibliotheque_reseau;
 // #5071 — témoins de bout en bout de la compensation de niveau réseau.
 #[cfg(test)]
 mod compensation_reseau_5071_tests;
+
+// #4354 — repli à 176,4 kHz d'un DSD décimé qui manque son pré-tampon.
+#[cfg(test)]
+mod repli_dsd_4354_tests;
 
 // #5871 — la préparation DSP ne fait plus la queue derrière l'écrivain.
 #[cfg(test)]
@@ -2004,6 +2014,10 @@ mod dsd_upnp_politique_de_zone_tests;
 #[cfg(test)]
 mod double_dsp_dsf_aac_sortie_locale_tests;
 
+/// #6221 — un DST vers un renderer qui annonce le DSD part en DSF natif
+/// fabriqué à la volée ; sans DSD annoncé, en PCM comme avant.
+#[cfg(test)]
+mod dst_en_dsf_6221_tests;
 /// #4378 — un DSDIFF compressé DST ne part jamais brut vers un renderer
 /// réseau, même en DSD « natif » : il passe par le décodeur.
 #[cfg(test)]
@@ -2154,10 +2168,13 @@ mod seek_de_reprise_caduc_5476;
 /// renderer qui n'est pas à la position de la pause.
 #[cfg(test)]
 mod seek_de_reprise_conditionnel_5050;
+// #5050 (fil 2236) — transfert depuis une zone en pause : la cible est posée
+// en pause sans rien recevoir.
 /// #6130 — quitter une radio sur une sortie DLNA : `Stop`, attente du départ
 /// du consommateur radio, puis `SetAVTransportURI`.
 #[cfg(test)]
 mod sortie_de_radio_dlna_6130_tests;
+mod transfert_en_pause_5050;
 
 /// La profondeur ANNONCÉE au renderer et celle réellement ÉCRITE dans le flux
 /// doivent être le même nombre (#1437).

@@ -11,6 +11,9 @@ pub mod asio_exclusive;
 // #6133 — silence ASIO avant libération ; sans Windows+asio, seul le banc s'en sert.
 pub mod bluos;
 pub mod bridge;
+/// #6171 — les canaux de la carte qu'une zone ASIO utilise. Hors `cfg` : la
+/// route HTTP le lit partout, la correspondance se teste sous Linux.
+pub mod canaux_de_carte_6171;
 #[cfg(test)]
 mod capabilities_test;
 /// #5643 — les cadences DSD natives déclarées par chaque pilote ASIO, sondées
@@ -35,6 +38,8 @@ pub mod dlna_repli_set_uri;
 mod dlna_repli_set_uri_tests;
 #[cfg(test)]
 mod dlna_test;
+#[cfg(test)]
+mod dlna_volume_apres_uri_tests_6008;
 pub mod hqplayer;
 pub mod identite_de_sortie;
 #[cfg(feature = "local-audio")]

@@ -47,7 +47,7 @@ mod reidentify;
 mod reports;
 // tune-web-client#1875 — ouvrir le dossier d'un album dans le gestionnaire de
 // fichiers de CETTE machine.
-mod reveler;
+pub(crate) mod reveler;
 mod search;
 // `pub(crate)` : `/system/stats` (routes/system/config.rs) affiche les mêmes
 // compteurs que `/library/stats` sur un autre écran et doit les ventiler par

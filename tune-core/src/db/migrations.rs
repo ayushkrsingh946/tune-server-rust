@@ -2453,7 +2453,127 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "tracks_rating",
         up: "",
     },
+    // #6179 (FabienM, fil 2236) — une piste supprimee ou re-identifiee par un
+    // scan ne sort plus EN SILENCE des playlists locales.
+    //
+    // `playlist_tracks.track_id` etait en `ON DELETE CASCADE` : la purge
+    // post-scan d'un chemin disparu, le surveillant (fichier modifie =
+    // supprime puis reinsere), « Vider la bibliotheque », la fusion de
+    // doublons effacaient la ligne de playlist, definitivement. Les favoris,
+    // eux, sont reconcilies (`favorites_reconcile.rs`) ; les playlists non.
+    //
+    // Recree la table (SQLite ne sait changer ni une clef etrangere ni un
+    // CHECK en place) avec :
+    // * `ON DELETE SET NULL` au lieu de `CASCADE` ;
+    // * une troisieme forme au CHECK, la ligne INTROUVABLE (ni `track_id` ni
+    //   `source`) ;
+    // * cinq colonnes d'identite (`file_path`, `audio_hash`,
+    //   `audio_fingerprint`, `mbid`, `missing_since`), remplies par le
+    //   declencheur `playlist_tracks_garde_l_orpheline`, que la passe finale
+    //   pose a chaque demarrage (`playlist_tracks_orphelines.sql`).
+    //
+    // Toutes les lignes et tous les `id` sont recopies, les index reposes ;
+    // les declencheurs UPnP (#4201) tombes avec l'ancienne table sont reposes
+    // par la passe finale, comme a la 109. Idempotente : une table qui porte
+    // deja `missing_since` (base neuve, nee du CORE_SCHEMA) n'est pas touchee.
+    //
+    // Numerotee 125 / PG 089 : la 124 / PG 088 (#6123) est la derniere sur
+    // `batch/bugs-rc5-20261012` le 12/10, et aucune PR ouverte ne touche aux
+    // migrations. Jumelle PostgreSQL : 089.
+    Migration {
+        version: 125,
+        name: "playlist_tracks_orphelines",
+        up: "",
+    },
 ];
+
+/// SQL de la migration 125 (#6179) — voir son entree dans `MIGRATIONS`.
+///
+/// La table neuve porte EXACTEMENT la definition du CORE_SCHEMA
+/// (`sqlite.rs`) : une base migree et une base neuve doivent etre la meme
+/// base. Le test `migration_125_rend_la_table_du_schema_neuf` les compare.
+const SQL_PLAYLIST_TRACKS_ORPHELINES: &str = "
+BEGIN;
+CREATE TABLE playlist_tracks_6179 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    source TEXT,
+    source_id TEXT,
+    title TEXT,
+    artist TEXT,
+    album TEXT,
+    album_source_id TEXT,
+    duration_ms INTEGER,
+    cover_url TEXT,
+    file_path TEXT,
+    audio_hash TEXT,
+    audio_fingerprint TEXT,
+    mbid TEXT,
+    missing_since INTEGER,
+    CHECK ((track_id IS NOT NULL AND source IS NULL AND source_id IS NULL)
+        OR (track_id IS NULL AND source IS NOT NULL AND source_id IS NOT NULL)
+        OR (track_id IS NULL AND source IS NULL AND source_id IS NULL))
+);
+INSERT INTO playlist_tracks_6179 (id, playlist_id, track_id, position, source, source_id,
+        title, artist, album, album_source_id, duration_ms, cover_url)
+    SELECT id, playlist_id, track_id, position, source, source_id,
+        title, artist, album, album_source_id, duration_ms, cover_url
+    FROM playlist_tracks;
+DROP TABLE playlist_tracks;
+ALTER TABLE playlist_tracks_6179 RENAME TO playlist_tracks;
+CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_id ON playlist_tracks(playlist_id);
+CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);
+COMMIT;
+";
+
+/// Le declencheur de #6179, rejoue par la passe finale a chaque demarrage.
+pub(crate) const SQL_DECLENCHEUR_PLAYLISTS_ORPHELINES: &str =
+    include_str!("../../migrations/playlist_tracks_orphelines.sql");
+
+/// Migration 125 (#6179) : recree `playlist_tracks` pour qu'une ligne locale
+/// survive a la suppression de sa piste. Voir l'entree 125 de `MIGRATIONS`.
+///
+/// Meme discipline que la 109 : une erreur est RENDUE, la transaction est
+/// annulee, l'ancienne table reste intacte et la version n'est pas
+/// enregistree — le prochain demarrage reessaie.
+///
+/// Le declencheur sur `tracks` qui ECRIT dans `playlist_tracks` est retire
+/// avant la reconstruction : un `ALTER TABLE … RENAME` relit tout le schema,
+/// et un declencheur qui vise une table momentanement absente le ferait
+/// echouer. La passe finale le repose aussitot apres.
+fn playlist_tracks_garde_les_orphelines(db: &SqliteDb) -> Result<(), String> {
+    if has_column(db, "playlist_tracks", "missing_since") {
+        return Ok(());
+    }
+    let conn = db.connection().lock().unwrap();
+    let existe: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'playlist_tracks'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("migration 125 : {e}"))?;
+    if existe == 0 {
+        // Rien a recopier : le CORE_SCHEMA posera la table neuve.
+        return Ok(());
+    }
+    conn.execute_batch("DROP TRIGGER IF EXISTS playlist_tracks_garde_l_orpheline;")
+        .map_err(|e| format!("migration 125 : {e}"))?;
+    // `PRAGMA foreign_keys` n'a AUCUN effet dans une transaction : il se pose
+    // avant le BEGIN et se repose apres le COMMIT (ou le ROLLBACK).
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|e| format!("migration 125 : {e}"))?;
+    let resultat = conn.execute_batch(SQL_PLAYLIST_TRACKS_ORPHELINES);
+    if resultat.is_err() && !conn.is_autocommit() {
+        conn.execute_batch("ROLLBACK;").ok();
+    }
+    let retablies = conn.execute_batch("PRAGMA foreign_keys = ON;");
+    resultat.map_err(|e| format!("migration 125 (playlist_tracks) : {e}"))?;
+    retablies.map_err(|e| format!("migration 125 (foreign_keys) : {e}"))?;
+    Ok(())
+}
 
 /// SQL de la migration 121 (#2713) — voir son entrée dans `MIGRATIONS`. Le
 /// même texte que la jumelle PG 085, à la transaction près.
@@ -2600,6 +2720,11 @@ fn playlist_tracks_accepte_les_titres_de_service(db: &SqliteDb) -> Result<(), St
         // Rien a recopier : le CORE_SCHEMA posera la table neuve.
         return Ok(());
     }
+    // #6179 — meme precaution qu'a la 125 : le declencheur sur `tracks` qui
+    // ecrit dans `playlist_tracks` ne doit pas viser une table absente pendant
+    // le `RENAME`. La passe finale le repose.
+    conn.execute_batch("DROP TRIGGER IF EXISTS playlist_tracks_garde_l_orpheline;")
+        .map_err(|e| format!("migration 109 : {e}"))?;
     // `PRAGMA foreign_keys` n'a AUCUN effet dans une transaction : il se pose
     // avant le BEGIN et se repose apres le COMMIT (ou le ROLLBACK).
     conn.execute_batch("PRAGMA foreign_keys = OFF;")
@@ -3669,6 +3794,11 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
             // prochain demarrage (voir la fonction).
             playlist_tracks_accepte_les_titres_de_service(db)?;
         }
+        if migration.version == 125 {
+            // #6179 — les lignes de playlist survivent a leur piste. Erreur
+            // RENDUE, comme a la 109.
+            playlist_tracks_garde_les_orphelines(db)?;
+        }
         if migration.version == 12 {
             upgrade_fts5_tables(db);
         }
@@ -4343,6 +4473,11 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
 
     db.execute_batch(include_str!("../../migrations/upnp_library_sync.sql"))?;
     db.execute_batch(include_str!("../../migrations/upnp_catalog_revision.sql"))?;
+    // #6179 — le declencheur qui garde une ligne de playlist quand sa piste
+    // part. Rejoue a chaque demarrage (`IF NOT EXISTS`), apres la 125 qui le
+    // retire le temps de recreer la table. Erreur RENDUE : sans lui, une
+    // suppression de piste laisserait des lignes introuvables SANS identite.
+    db.execute_batch(SQL_DECLENCHEUR_PLAYLISTS_ORPHELINES)?;
 
     // v0.9 — unify play_queue + streaming_queue into queue_items. Idempotent and
     // reads streaming_queue (just ensured above), so it is safe on fresh DBs and
@@ -5100,6 +5235,14 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         "tracks_rating",
         include_str!("../../migrations/postgres/088_tracks_rating.sql"),
     ),
+    // Jumelle de la SQLite 125 (#6179) : une ligne de playlist survit à sa
+    // piste (ligne introuvable, clé étrangère en SET NULL). Le déclencheur
+    // est rejoué par la passe finale (`playlist_tracks_orphelines.sql`).
+    (
+        89,
+        "playlist_tracks_orphelines",
+        include_str!("../../migrations/postgres/089_playlist_tracks_orphelines.sql"),
+    ),
 ];
 
 /// Run all pending PostgreSQL migrations against the pool.
@@ -5295,6 +5438,15 @@ pub async fn run_pg_migrations(pool: &sqlx::PgPool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| format!("pg upnp revision: {e}"))?;
+
+    // #6179 — même passe que la SQLite : le déclencheur qui garde une ligne de
+    // playlist quand sa piste part, reposé à chaque démarrage.
+    sqlx::raw_sql(include_str!(
+        "../../migrations/postgres/playlist_tracks_orphelines.sql"
+    ))
+    .execute(pool)
+    .await
+    .map_err(|e| format!("pg playlist_tracks orphelines: {e}"))?;
 
     // Meme index que la passe finale SQLite (#4924), meme raison de ne pas le
     // numeroter. Place APRES les scripts : sur une base neuve, `tracks` n'existe
@@ -8291,7 +8443,9 @@ mod tests {
         // Pose `queue_items.artist_ref`, que l'écriture de la file NOMME.
         // 88 : `tracks_rating` (#6123), jumelle de la SQLite 124. Pose
         // `tracks.rating`, que l'INSERT et l'UPDATE des pistes NOMMENT.
-        assert_eq!(pg_latest_version(), 88, "latest PG migration must be 88");
+        // 89 : `playlist_tracks_orphelines` (#6179), jumelle de la SQLite 125.
+        // Pose les colonnes de la ligne introuvable, que `get_entries` NOMME.
+        assert_eq!(pg_latest_version(), 89, "latest PG migration must be 89");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),
@@ -9137,6 +9291,232 @@ mod schema_unique_tests {
     }
 }
 
+/// #6179 — migration 125 : une ligne de playlist survit à sa piste.
+#[cfg(test)]
+mod tests_playlist_orphelines_6179 {
+    use super::*;
+
+    /// La table telle que la 109 l'a laissée (v0.9.165 → rc4).
+    const TABLE_109: &str = "
+        DROP TABLE playlist_tracks;
+        CREATE TABLE playlist_tracks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+            track_id INTEGER REFERENCES tracks(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL DEFAULT 0,
+            source TEXT,
+            source_id TEXT,
+            title TEXT,
+            artist TEXT,
+            album TEXT,
+            album_source_id TEXT,
+            duration_ms INTEGER,
+            cover_url TEXT,
+            CHECK ((track_id IS NOT NULL AND source IS NULL AND source_id IS NULL)
+                OR (track_id IS NULL AND source IS NOT NULL AND source_id IS NOT NULL))
+        );
+        CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist_id ON playlist_tracks(playlist_id);
+        CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);";
+
+    fn colonnes(db: &SqliteDb) -> Vec<(String, String, i64, Option<String>, i64)> {
+        let conn = db.connection().lock().unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(playlist_tracks)").unwrap();
+        stmt.query_map([], |r| {
+            Ok((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    type Ligne = (i64, i64, Option<i64>, i64, Option<String>, Option<String>);
+
+    fn lignes(db: &SqliteDb) -> Vec<Ligne> {
+        let conn = db.connection().lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, playlist_id, track_id, position, source, title \
+                 FROM playlist_tracks ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    /// Une base sortie de la 109 — lignes locales, un titre de service, un
+    /// doublon, un trou de position — passe la 125 sans perdre une ligne, en
+    /// ressort avec la table d'une base neuve, et avec le déclencheur.
+    #[test]
+    fn migration_125_garde_les_lignes_et_rend_la_table_du_schema_neuf() {
+        let neuve = SqliteDb::open_in_memory().unwrap();
+        neuve.init_schema().unwrap();
+        run_migrations(&neuve).unwrap();
+        let attendues = colonnes(&neuve);
+
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        run_migrations(&db).unwrap();
+        {
+            let conn = db.connection().lock().unwrap();
+            conn.execute_batch("DROP TRIGGER IF EXISTS playlist_tracks_garde_l_orpheline;")
+                .unwrap();
+            conn.execute_batch(TABLE_109).unwrap();
+            conn.execute_batch(
+                "INSERT INTO tracks (id, title, file_path) VALUES (10, 'A', '/m/a'), (11, 'B', '/m/b');
+                 INSERT INTO playlists (id, name) VALUES (1, 'Une');
+                 INSERT INTO playlist_tracks (id, playlist_id, track_id, position) VALUES
+                     (5, 1, 10, 0), (6, 1, 11, 1), (7, 1, 10, 3);
+                 INSERT INTO playlist_tracks (id, playlist_id, position, source, source_id, title)
+                     VALUES (8, 1, 2, 'qobuz', 'q-1', 'Sinfonia');",
+            )
+            .unwrap();
+            // Contre-épreuve : la table de la 109 EFFACE la ligne quand sa
+            // piste part — c'est le défaut de #6179.
+            conn.execute("DELETE FROM tracks WHERE id = 11", [])
+                .unwrap();
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM playlist_tracks WHERE id = 6",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                n, 0,
+                "contre-épreuve : la cascade de la 109 efface la ligne"
+            );
+            conn.execute(
+                "INSERT INTO tracks (id, title, file_path) VALUES (11, 'B', '/m/b')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO playlist_tracks (id, playlist_id, track_id, position) VALUES (6, 1, 11, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM _migrations WHERE version >= 125", [])
+                .unwrap();
+        }
+        let avant = lignes(&db);
+
+        run_migrations(&db).unwrap();
+        assert_eq!(current_version(&db).unwrap(), latest_version());
+        assert_eq!(lignes(&db), avant, "aucune ligne perdue ni modifiée");
+        assert_eq!(
+            colonnes(&db),
+            attendues,
+            "une base migrée doit porter la table d'une base neuve"
+        );
+
+        let conn = db.connection().lock().unwrap();
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "les clés étrangères sont rétablies après la copie");
+        let declencheurs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' \
+                 AND name = 'playlist_tracks_garde_l_orpheline'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(declencheurs, 1, "la passe finale repose le déclencheur");
+        // La piste part : la ligne RESTE, à son rang, avec son titre.
+        conn.execute("DELETE FROM tracks WHERE id = 11", [])
+            .unwrap();
+        let (piste, position, titre, chemin): (Option<i64>, i64, Option<String>, Option<String>) =
+            conn.query_row(
+                "SELECT track_id, position, title, file_path FROM playlist_tracks WHERE id = 6",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("la ligne doit survivre à sa piste après la 125");
+        assert_eq!((piste, position), (None, 1));
+        assert_eq!(titre.as_deref(), Some("B"));
+        assert_eq!(chemin.as_deref(), Some("/m/b"));
+        // Le CHECK refuse toujours une ligne à la fois locale et de service.
+        assert!(
+            conn.execute(
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position, source, source_id) \
+                 VALUES (1, 10, 6, 'qobuz', '1')",
+                [],
+            )
+            .is_err()
+        );
+        // Et la clé étrangère d'une ligne locale tient toujours.
+        assert!(
+            conn.execute(
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (1, 999, 8)",
+                [],
+            )
+            .is_err()
+        );
+    }
+
+    /// Sans le déclencheur (base restaurée, déclencheur tombé), `SET NULL`
+    /// garde quand même la ligne : la clé étrangère ne peut plus l'effacer.
+    #[test]
+    fn sans_declencheur_la_cle_etrangere_garde_quand_meme_la_ligne() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        run_migrations(&db).unwrap();
+        let conn = db.connection().lock().unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER playlist_tracks_garde_l_orpheline;
+             INSERT INTO tracks (id, title, file_path) VALUES (10, 'A', '/m/a');
+             INSERT INTO playlists (id, name) VALUES (1, 'Une');
+             INSERT INTO playlist_tracks (id, playlist_id, track_id, position) VALUES (5, 1, 10, 0);
+             DELETE FROM tracks WHERE id = 10;",
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_tracks WHERE id = 5 AND track_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// Sur une base neuve, la 125 ne touche rien.
+    #[test]
+    fn migration_125_est_sans_effet_sur_une_table_deja_neuve() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        run_migrations(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO playlists (id, name) VALUES (1, 'Une');
+             INSERT INTO playlist_tracks (id, playlist_id, position, title, missing_since)
+                 VALUES (3, 1, 0, 'Perdue', 1);",
+        )
+        .unwrap();
+        playlist_tracks_garde_les_orphelines(&db).unwrap();
+        let conn = db.connection().lock().unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlist_tracks WHERE id = 3",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "rejouer la 125 ne recrée pas la table");
+    }
+}
+
 /// #4889 — migration 109 : `playlist_tracks` accepte un titre de service.
 #[cfg(test)]
 mod tests_playlist_titres_de_service_4889 {
@@ -9279,14 +9659,14 @@ mod tests_playlist_titres_de_service_4889 {
             .is_err(),
             "une ligne ne porte pas À LA FOIS une piste locale et un titre de service"
         );
-        assert!(
-            conn.execute(
-                "INSERT INTO playlist_tracks (playlist_id, position) VALUES (1, 7)",
-                [],
-            )
-            .is_err(),
-            "une ligne vide n'a rien à faire dans une playlist"
-        );
+        // #6179 — une ligne sans piste ni titre de service est désormais la
+        // ligne INTROUVABLE (migration 125, jouée juste après la 109 ici) :
+        // elle entre. Son témoin est `tests_playlist_orphelines_6179`.
+        conn.execute(
+            "INSERT INTO playlist_tracks (playlist_id, position, title) VALUES (1, 7, 'Partie')",
+            [],
+        )
+        .expect("la ligne introuvable de #6179 entre après la 125");
         // …et la clé étrangère des lignes locales tient toujours.
         assert!(
             conn.execute(
