@@ -15,6 +15,11 @@
 //! | priorité d'E/S basse (Linux, macOS)       | `low_io_priority`          | vrai   |
 //! | tout ce qui précède                       | `enabled`                  | vrai   |
 //!
+//! Et un réglage qui n'est PAS un frein, donc hors de `enabled` :
+//! `playback_watch_off_executor` (vrai) — la veille de lecture des analyses
+//! pose sa question à la base hors des fils de l'exécuteur
+//! (`audio::replaygain::zone_qui_joue`, chantier « priorité lecture »).
+//!
 //! Le scan lisait jusqu'à 32 fichiers à la fois PENDANT la lecture, entre ses
 //! pauses de lot ; le pool de lecture SQLite n'a que trois connexions, et une
 //! passe de fond pouvait les tenir toutes pendant que la file ou l'état d'une
@@ -75,6 +80,12 @@ pub struct Politique {
     /// Priorité d'E/S basse pour les lectures de fichiers de fond, là où le
     /// système le permet sans privilège ET de façon réversible.
     pub low_io_priority: bool,
+    /// La veille de lecture des passes qui décodent (et leurs gardes de tour)
+    /// interroge la base sur le pool bloquant, jamais sur un fil de
+    /// l'exécuteur. `false` rend l'ancien comportement. Indépendant de
+    /// [`Self::enabled`] : ce n'est pas un frein, et désarmer les freins ne
+    /// doit pas ramener un gel de l'exécuteur.
+    pub playback_watch_off_executor: bool,
 }
 
 /// Les valeurs par défaut.
@@ -86,6 +97,7 @@ pub const DEFAUT: Politique = Politique {
     sqlite_reserved_readers: 1,
     writer_yield_max_ms: 100,
     low_io_priority: true,
+    playback_watch_off_executor: true,
 };
 
 impl Default for Politique {
@@ -181,6 +193,7 @@ pub fn regler(p: Politique) {
             sqlite_reserved_readers = p.sqlite_reserved_readers,
             writer_yield_max_ms = p.writer_yield_max_ms,
             low_io_priority = p.low_io_priority,
+            playback_watch_off_executor = p.playback_watch_off_executor,
             "politique_de_lecture_reglee"
         );
     }
@@ -564,6 +577,19 @@ mod tests {
         // Le texte que la boucle du PATCH range en base se relit.
         let texte = serde_json::Value::String(r#"{"enabled":false}"#.into());
         assert!(!Politique::depuis_json(&texte).unwrap().enabled);
+        // La veille hors de l'exécuteur est armée par défaut, se coupe seule,
+        // et une valeur rangée AVANT ce champ la garde armée.
+        assert!(DEFAUT.playback_watch_off_executor);
+        let p = Politique::depuis_json(&serde_json::json!({"playback_watch_off_executor": false}))
+            .unwrap();
+        assert!(!p.playback_watch_off_executor);
+        assert!(p.enabled, "couper la veille ne touche pas aux freins");
+        let ancienne = serde_json::Value::String(r#"{"scan_width":3}"#.into());
+        assert!(
+            Politique::depuis_json(&ancienne)
+                .unwrap()
+                .playback_watch_off_executor
+        );
         for mauvais in [
             serde_json::json!({"scan_width": 0}),
             serde_json::json!({"scan_width": 33}),
