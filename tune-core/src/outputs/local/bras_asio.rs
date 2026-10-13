@@ -733,7 +733,8 @@ pub(super) fn jouer_via_asio(entrees: EntreesAsio) {
                     &crossfeed,
                     &pure_bypass,
                     &mono_downmix,
-                ),
+                )
+                .avec_l_adaptation_des_canaux(&reaffectation, &disposition),
                 recu: Vec::new(),
                 contrat: contrat(),
                 reliquat_force_brut: None,
