@@ -38,6 +38,7 @@ pub mod appel;
 pub mod cache;
 pub mod coffre;
 pub mod couts;
+pub mod dialogue;
 pub mod fournisseur;
 pub mod migration;
 pub mod passerelle;

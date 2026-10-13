@@ -230,8 +230,9 @@ modifié depuis n'est pas écrasé (`modifie_depuis`). `GET /albums/{id}/histori
 **Étape 2** — livrée, voir § 10.
 
 **Étape 3** (« continue », Bertrand, 13/10/2026)
-- recherche conversationnelle dans la bibliothèque, radio « dans l'esprit
-  de… » — **en attente d'une décision de produit**, voir § 11.3 ;
+- recherche conversationnelle dans la bibliothèque — décision du 13/10/2026 :
+  **extension de l'existant**, livrée, § 11.5 ; radio « dans l'esprit
+  de… » : pas pour l'instant ;
 - suivi de consommation détaillé par usage, alerte à 80 % du plafond —
   livré, § 11.1 ;
 - relevé des tarifs automatisé ou daté à l'écran, avant le changement de prix
@@ -400,16 +401,11 @@ la table) ou à mettre Tune à jour.
 
 ### 11.3 Laissé à Bertrand
 
-- **Recherche conversationnelle, radio « dans l'esprit de… »** : le
-  document n'en fixe ni la forme ni le périmètre. À trancher : un nouvel
-  écran de dialogue ou l'extension de l'ancien `/ai/query` (déjà un dialogue
-  à outils, Anthropic seulement) ; la graine d'une radio (artiste, album,
-  piste, phrase) ; bibliothèque seule ou services de streaming aussi ; lien
-  avec la lecture automatique existante ; ce que le modèle reçoit de la
-  bibliothèque (taille de la consigne, donc coût).
-- **Après le 01/01/2027** : la table Gemini du binaire est fausse. Continuer
-  à compter à l'ancien tarif en prévenant (ce qui est fait), ou refuser
-  `tarif_inconnu` tant que l'utilisateur n'a pas saisi les nouveaux prix ?
+- **Recherche conversationnelle** : tranché le 13/10/2026 — extension de
+  l'ancien `/ai/query` à tous les fournisseurs, bibliothèque seule (§ 11.5).
+  **Radio « dans l'esprit de… »** : pas pour l'instant.
+- **Après le 01/01/2027** : tranché le 13/10/2026 — compter à l'ancien tarif
+  et prévenir (ce qui est fait).
 - **Relevé automatisé des tarifs** : aucun fournisseur n'expose ses prix par
   une API ; un relevé automatique voudrait dire lire leur page HTML, ou un
   fichier publié par Tune. Non fait.
@@ -419,3 +415,56 @@ la table) ou à mettre Tune à jour.
 `plugins/tune-assistant-ia/tests/etape3.rs` (faux fournisseur) et les essais
 de module de `couts` et `reglages` ; côté web,
 `src/lib/__tests__/assistantIaEtape3.test.ts`.
+
+### 11.5 Le dialogue de l'ancien assistant, pour tous les fournisseurs
+
+Décision de Bertrand du 13/10/2026 : « extension de l'existant ». L'ancien
+`POST /ai/query` (dialogue à outils : chercher dans la bibliothèque, jouer
+un album ou une piste, file d'attente, pause, volume, zones) n'exigeait
+qu'Anthropic ; il part désormais chez le fournisseur de l'assistant **quel
+qu'il soit**.
+
+- `Passerelle::discuter` : l'hôte écrit toujours le dialogue dans la forme de
+  l'API Messages ; `tune_assistant_ia::dialogue` le traduit — compatible
+  OpenAI et Gemini : `POST {base}/chat/completions`, outils
+  `type: function`, appels dans `tool_calls` (arguments en texte JSON),
+  résultats en messages `role: tool` + `tool_call_id` ; Ollama :
+  `POST {base}/api/chat`, mêmes outils, arguments en objet, résultats
+  rattachés par `tool_name`, identifiants d'appel fabriqués (`appel_N`). La
+  réponse revient en blocs `text` / `tool_use`. Arguments illisibles : `{}`.
+- `Passerelle::dialogue_pret` remplace `anthropic_pret` côté hôte : tout
+  fournisseur prêt (clé qui s'ouvre, tarif connu). Sinon, repli local comme
+  avant.
+- Chaque tour passe par le même chemin (`Passerelle::tour`) : clé du coffre,
+  plafond sous LE verrou, comptage pour l'usage `requete` (§ 11.1, donc
+  détail par usage et alerte à 80 %). La réponse porte `plafond`, comme les
+  autres usages ; plafond atteint : `{reply, error: "plafond_atteint"}`,
+  jamais 401.
+- **Bibliothèque seule** : les outils sont ceux de `tune_core::ai::tools`,
+  tous locaux (aucun service de streaming).
+
+**Ce qui part au modèle, borné** (`tune-server/src/routes/ai.rs`) — c'est ce
+qui fixe le coût d'une question :
+
+| borne | valeur |
+|---|---|
+| un résultat d'outil | 6 000 caractères (≈ 1 500 jetons), tronqué au-delà |
+| `search_library` | 10 artistes, 10 albums, 10 pistes (inchangé) |
+| les résultats d'une question | 24 000 caractères en tout (≈ 6 000 jetons) ; au-delà l'outil s'exécute mais le modèle reçoit `limite_de_bibliotheque` |
+| les tours | 5 tours d'outils + 1 tour final (inchangé) |
+| la sortie | 1 024 jetons par tour (Anthropic ; les points d'accès compatibles n'acceptent pas tous ce champ) |
+
+Pire cas d'une question : 6 appels ; à chacun la consigne et les outils
+(≈ 1 000 jetons) plus les résultats déjà reçus (≤ 6 000 jetons), soit
+≈ 40 000 jetons d'entrée et ≈ 6 000 de sortie — de l'ordre de 0,007 $ avec
+Claude Haiku 5.5, 0,03 $ avec Gemini 3.5 Flash-Lite, aux tarifs du § 4. Une
+question ordinaire (une recherche, un lancement) en coûte une petite
+fraction : 2 ou 3 appels de 1 000 à 3 000 jetons.
+
+Essais : `plugins/tune-assistant-ia/tests/dialogue.rs` (faux serveurs
+compatible OpenAI et Ollama sur 127.0.0.1 : traduction aller-retour, clé
+`Bearer`, comptage `requete`, alerte, refus au plafond sans requête), les
+essais de module de `dialogue`, et `tests_bornes` dans `routes/ai.rs`.
+
+Client web : aucun écran du client web n'appelle `/ai/query` ; rien n'y
+change.
