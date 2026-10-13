@@ -57,6 +57,9 @@ pub async fn spawn_background_tasks(state: &AppState, config: &TuneConfig) {
     // dans `credits.rs` tient cette ligne : l'ordonnanceur de scan a été du
     // code mort pendant des mois pour une ligne comme celle-ci.
     crate::routes::library::credits::spawn_passe_automatique_credits(state);
+    // #4805 (13/10/2026) — la passe de nuit des albums refusés par
+    // MusicBrainz. Éteinte par défaut ; un test de câblage garde la ligne.
+    crate::routes::library::identification_lot::nuit::spawn_passe_de_nuit(state);
     spawn_community_sync(state);
     spawn_replaygain_analysis(state);
     spawn_lyrics_catchup(state);
