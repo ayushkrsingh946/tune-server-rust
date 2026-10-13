@@ -574,6 +574,10 @@ where
             "/{service}/genres/{genre_id}/albums",
             get(service_genre_albums),
         )
+        .route(
+            "/{service}/genres/{genre_id}/search",
+            get(service_genre_search),
+        )
         .route("/{service}/favorites/{fav_type}", get(service_favorites))
         .route(
             "/{service}/favorites/{fav_type}/{item_id}",
@@ -953,6 +957,31 @@ async fn service_genre_albums(
             .get_genre_section(&genre_id, section, limit)
             .await),
     }
+}
+
+#[derive(Deserialize)]
+struct GenreSearchQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+/// #6231 — chercher dans le catalogue du service, restreint à un genre
+/// (`tune_core::streaming::RechercheDansUnGenre`). 501 pour un service qui ne
+/// dit pas le genre de ses albums : l'écran le DIT, au lieu de filtrer en
+/// silence les seules nouveautés.
+async fn service_genre_search(
+    State(state): State<StreamingHttpState>,
+    Path((service, genre_id)): Path<(String, String)>,
+    Query(q): Query<GenreSearchQuery>,
+) -> Response {
+    let query = q.q.trim().to_string();
+    if query.is_empty() {
+        return (StatusCode::BAD_REQUEST, "q is required").into_response();
+    }
+    let limit = q.limit.unwrap_or(50);
+    with_svc!(&state, &service, |svc| svc
+        .search_genre_albums(&genre_id, &query, limit)
+        .await)
 }
 
 async fn service_featured_sections(
@@ -3093,6 +3122,40 @@ mod temoin_statut_du_refus_i859 {
             .await
             .expect("corps lisible");
         String::from_utf8_lossy(&octets).into_owned()
+    }
+
+    /// #6231 — la recherche dans un genre existe, et un service qui ne dit pas
+    /// le genre de ses albums répond 501 (défaut du trait), que l'écran affiche.
+    #[tokio::test]
+    async fn recherche_dans_un_genre_6231_route_501_et_400() {
+        use tower::ServiceExt;
+        let (state, name) = etat("genre-6231", Humeur::Refuse);
+        let app = Router::new().nest("/api/v1/streaming", router().with_state(state));
+        let appel = |chemin: String| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .uri(chemin)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let r = appel(format!("/api/v1/streaming/{name}/genres/80/search?q=roxy")).await;
+        assert_eq!(
+            r.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "#6231 : sans recherche par genre, 501 et non 404 ni une liste vide"
+        );
+        let r = appel(format!("/api/v1/streaming/{name}/genres/80/search?q=%20")).await;
+        assert_eq!(
+            r.status(),
+            StatusCode::BAD_REQUEST,
+            "#6231 : saisie vide refusée"
+        );
     }
 
     #[derive(Clone, Default)]
