@@ -107,20 +107,41 @@ compter pour les deux artistes.
   OU un artiste relié. `!=` : ni l'un ni l'autre. « Vide » / « non vide » :
   inchangés.
 
+## Livré dans la troisième étape
+
+- **Un seul chemin de découpage** pour tous ceux qui écrivent une piste :
+  `track_artist_repo::liens_du_credit` (avec `exceptions_du_reglage`,
+  `resoudre_par_la_base`, `remplacer_par_id`). Le scan par lots s'en sert
+  désormais aussi.
+- **Le surveillant de fichiers** (`reimporter_fichier_surveillant`) relie la
+  piste une fois rangée ; un artiste tenu à la main la laisse vide.
+- **Les feuilles CUE** (`ecrire_album_avec`) : le `PERFORMER` de la tranche,
+  sinon celui de l'album, par identifiant (une tranche n'a pas de chemin).
+- **Les imports** Roon, Plex, JRiver et les téléversements
+  (`ecrire_les_pistes`) : sans MBID.
+- **Plusieurs MBID** : `TrackMetadata::musicbrainz_artist_ids` garde toutes
+  les valeurs de `MUSICBRAINZ_ARTISTID` (`get_strings`, jointes par « ; »)
+  quand il y en a plusieurs. `musicbrainz_artist_id` reste la première. Dans
+  ce cas, la ligne qui porte le crédit ENTIER (artiste de piste, artiste
+  d'album qui en hérite) ne reçoit plus le premier MBID
+  (`mbid_de_l_artiste_entier`) : « The Beatles & Genesis » se faisait sinon
+  prendre pour The Beatles.
+- **L'affichage**, serveur :
+  - `GET /library/artists/{id}/tracks` rend aussi les pistes où l'artiste
+    est relié, marquées `"relie": true` (`TrackRepo::list_by_artist_et_relies`) ;
+  - `GET /library/tracks/{id}` rend `artists: [{id, name}]` quand la piste
+    en a plusieurs.
+- **L'affichage**, web (tune-web-client, branche `chantier/artistes-multiples`) :
+  - la fiche d'un artiste de la bibliothèque a une section « Apparaît aussi
+    sur » ;
+  - la lecture en cours montre un lien par artiste du crédit.
+
 ## Reste à faire
 
 1. ~~Les règles « Artiste »~~ : livré (deuxième étape).
-2. **Le surveillant de fichiers** (`auto_scan.rs`,
-   `build_track_from_metadata_opts`) : ce chemin, qui traite un fichier à la
-   fois, ne remplit pas encore la liaison. Il faut aussi brancher l'import CUE
-   (`scanner/cue_bibliotheque.rs`) et les imports (`routes/system/import.rs`).
-3. **Plusieurs MBID.** lofty ne rend que la première valeur de
-   `MUSICBRAINZ_ARTISTID` (`metadata/mod.rs`, `get_string`). Il faut lire
-   toutes les valeurs (`get_strings`) pour que l'appariement du point 5 serve
-   aux fichiers taggés par Picard.
-4. **L'affichage** : la page d'un artiste doit lister les pistes où il est
-   relié, et la fiche d'une piste doit montrer ses artistes. Ce travail
-   concerne le serveur (routes) et le web.
+2. ~~Surveillant, CUE, imports~~ : livré (troisième étape).
+3. ~~Plusieurs MBID~~ : livré (troisième étape).
+4. ~~L'affichage~~ : livré (troisième étape).
 5. **Mesurer** sur une vraie bibliothèque, avant d'activer la règle, ce que le
    découpage relie. L'aperçu `/system/artist-split-preview` peut être aligné
    sur `decouper_pour_le_scan`.

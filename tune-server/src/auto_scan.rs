@@ -104,7 +104,7 @@ pub fn build_track_from_metadata_opts(
     } else {
         meta.musicbrainz_album_artist_id
             .as_deref()
-            .or(meta.musicbrainz_artist_id.as_deref())
+            .or(meta.mbid_de_l_artiste_entier())
     };
     let album_artist_entry = match artist_repo.get_or_create(
         album_artist_name,
@@ -140,11 +140,7 @@ pub fn build_track_from_metadata_opts(
     let track_artist = if (is_compilation || artiste_d_album_neutre)
         && track_artist_name != album_artist_name
     {
-        match artist_repo.get_or_create(
-            track_artist_name,
-            meta.musicbrainz_artist_id.as_deref(),
-            None,
-        ) {
+        match artist_repo.get_or_create(track_artist_name, meta.mbid_de_l_artiste_entier(), None) {
             Ok(a) => Some(a),
             Err(e) => {
                 tracing::warn!(artist = track_artist_name, error = %e, "track_artist_create_failed");
@@ -2275,9 +2271,33 @@ pub(crate) fn reimporter_fichier_surveillant(
         // (écran « Modifier », GO du 25/09/2026) : le
         // fichier réenregistré garde sa place, son
         // titre et son artiste tenus à la main.
-        if tune_core::db::edition_album::Tenues::charger(db).appliquer(&mut track) {
+        let tenues = tune_core::db::edition_album::Tenues::charger(db);
+        // Chantier artistes multiples — lu AVANT `appliquer` : une piste dont
+        // l'ARTISTE est tenu à la main n'est reliée à personne d'autre.
+        let artiste_tenu = tenues.tient_l_artiste(&track);
+        if tenues.appliquer(&mut track) {
             album_id = track.album_id;
         }
+        // Chantier artistes multiples — les artistes du crédit ARTIST, comme
+        // au scan par lots (`TrackImporter::noter_les_artistes_de_piste`).
+        // Écrits une fois la piste rangée.
+        let liens_d_artistes = match sf.metadata.as_ref() {
+            Some(meta) if !artiste_tenu && !meta.artist_from_path => {
+                let mut resoudre =
+                    tune_core::db::track_artist_repo::resoudre_par_la_base(&artist_repo);
+                tune_core::db::track_artist_repo::liens_du_credit(
+                    &artist_repo,
+                    &tune_core::db::track_artist_repo::exceptions_du_reglage(db),
+                    meta.artist.as_deref().unwrap_or_default(),
+                    meta.musicbrainz_artist_ids
+                        .as_deref()
+                        .or(meta.musicbrainz_artist_id.as_deref()),
+                    None,
+                    &mut resoudre,
+                )
+            }
+            _ => Vec::new(),
+        };
 
         // The hash is only a candidate selector. The
         // watcher is allowed to skip solely after a
@@ -2352,6 +2372,13 @@ pub(crate) fn reimporter_fichier_surveillant(
         let ancien_album = ancienne.as_ref().and_then(|a| a.album_id);
         track.id = ancienne.as_ref().and_then(|a| a.id);
         let rangee = ranger_la_piste_du_surveillant(&track_repo, &album_repo, &track, album_id);
+        if rangee {
+            tune_core::db::track_artist_repo::remplacer_par_chemin(
+                db.as_ref(),
+                &sf.path,
+                &liens_d_artistes,
+            );
+        }
         // #5454 — l'album est tranché par la majorité quand cette piste a
         // CHANGÉ sa pochette, ou quand sa jaquette s'écarte d'une pochette
         // tirée du disque (le single retouché garde alors la sienne, #4650).
@@ -3774,6 +3801,10 @@ mod surveillant_retouche_garde_l_identifiant_tests_5341;
 #[cfg(test)]
 #[path = "surveillant_metadonnees_tests_5346.rs"]
 mod surveillant_metadonnees_tests_5346;
+
+#[cfg(test)]
+#[path = "surveillant_artistes_multiples_tests.rs"]
+mod surveillant_artistes_multiples_tests;
 
 #[cfg(test)]
 #[path = "compteur_demarrage_tests_5371.rs"]

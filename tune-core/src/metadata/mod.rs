@@ -130,6 +130,15 @@ pub struct TrackMetadata {
     pub musicbrainz_recording_id: Option<String>,
     pub musicbrainz_release_id: Option<String>,
     pub musicbrainz_artist_id: Option<String>,
+    /// Chantier artistes multiples — TOUTES les valeurs de
+    /// `MUSICBRAINZ_ARTISTID`, jointes par « ; », quand la balise en porte
+    /// plusieurs (Picard en écrit une par artiste du crédit). `lofty`
+    /// (`get_string`) ne rend que la première dans `musicbrainz_artist_id`,
+    /// qui reste l'artiste principal ; celle-ci sert à l'appariement nom ↔
+    /// MBID du découpage (`artist_split::artistes_de_la_piste`). `None` pour
+    /// une valeur unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musicbrainz_artist_ids: Option<String>,
     pub musicbrainz_album_artist_id: Option<String>,
     pub musicbrainz_release_group_id: Option<String>,
     /// #5616 — le type de sortie PRIMAIRE lu dans la balise du fichier
@@ -254,6 +263,21 @@ fn sanitize_untrusted_text_with_layout(
 }
 
 impl TrackMetadata {
+    /// Chantier artistes multiples — le MBID qui désigne l'artiste ENTIER de
+    /// la balise ARTIST, pour la ligne qui porte tout le crédit (artiste de
+    /// piste, artiste d'album qui en hérite). `None` quand la balise porte
+    /// PLUSIEURS MBID (`musicbrainz_artist_ids`) : le premier n'est alors que
+    /// celui du premier artiste du crédit, et le poser sur « The Beatles &
+    /// Genesis » ferait prendre cette ligne pour The Beatles. Le découpage
+    /// (`track_artist_repo::liens_du_credit`) donne à chacun le sien.
+    pub fn mbid_de_l_artiste_entier(&self) -> Option<&str> {
+        if self.musicbrainz_artist_ids.is_some() {
+            None
+        } else {
+            self.musicbrainz_artist_id.as_deref()
+        }
+    }
+
     /// Remove unsafe text from every field that can reach the database.
     pub fn sanitize_text_fields(&mut self) -> Vec<TextCorrection> {
         fn sanitize_option(
@@ -302,6 +326,11 @@ impl TrackMetadata {
         sanitize_option(
             "musicbrainz_artist_id",
             &mut self.musicbrainz_artist_id,
+            &mut corrections,
+        );
+        sanitize_option(
+            "musicbrainz_artist_ids",
+            &mut self.musicbrainz_artist_ids,
             &mut corrections,
         );
         sanitize_option(
@@ -2139,6 +2168,7 @@ fn dsf_dff_fallback_complete(
         musicbrainz_recording_id: mb_recording_id,
         musicbrainz_release_id: mb_release_id,
         musicbrainz_artist_id: mb_artist_id,
+        musicbrainz_artist_ids: None,
         musicbrainz_album_artist_id: mb_album_artist_id,
         musicbrainz_release_group_id: mb_release_group_id,
         release_type: mb_release_type,
@@ -2216,6 +2246,7 @@ fn m4a_fallback(path: &Path) -> Option<TrackMetadata> {
         musicbrainz_recording_id: None,
         musicbrainz_release_id: None,
         musicbrainz_artist_id: None,
+        musicbrainz_artist_ids: None,
         musicbrainz_album_artist_id: None,
         musicbrainz_release_group_id: None,
         release_type: None,
@@ -2649,6 +2680,7 @@ fn tagless_fallback(path: &Path, props: &lofty::properties::FileProperties) -> T
         musicbrainz_recording_id: None,
         musicbrainz_release_id: None,
         musicbrainz_artist_id: None,
+        musicbrainz_artist_ids: None,
         musicbrainz_album_artist_id: None,
         musicbrainz_release_group_id: None,
         release_type: None,
@@ -2758,6 +2790,7 @@ fn matroska_metadata(path: &Path) -> Result<TrackMetadata, String> {
         musicbrainz_recording_id: None,
         musicbrainz_release_id: None,
         musicbrainz_artist_id: None,
+        musicbrainz_artist_ids: None,
         musicbrainz_album_artist_id: None,
         musicbrainz_release_group_id: None,
         release_type: None,
@@ -2835,6 +2868,7 @@ pub fn tagless_fallback_no_props(path: &Path) -> TrackMetadata {
         musicbrainz_recording_id: None,
         musicbrainz_release_id: None,
         musicbrainz_artist_id: None,
+        musicbrainz_artist_ids: None,
         musicbrainz_album_artist_id: None,
         musicbrainz_release_group_id: None,
         release_type: None,
@@ -3998,6 +4032,7 @@ fn try_read_metadata_unsanitized(path: &Path) -> Result<TrackMetadata, String> {
         musicbrainz_recording_id: get(ItemKey::MusicBrainzRecordingId),
         musicbrainz_release_id: get(ItemKey::MusicBrainzReleaseId),
         musicbrainz_artist_id: get(ItemKey::MusicBrainzArtistId),
+        musicbrainz_artist_ids: toutes_les_valeurs_multiples(tag, ItemKey::MusicBrainzArtistId),
         musicbrainz_album_artist_id: get(ItemKey::MusicBrainzReleaseArtistId),
         musicbrainz_release_group_id: get(ItemKey::MusicBrainzReleaseGroupId),
         release_type: type_de_sortie_de_la_balise(tag),
@@ -4026,6 +4061,51 @@ fn try_read_metadata_unsanitized(path: &Path) -> Result<TrackMetadata, String> {
         // Chemin nominal : les balises ont été lues.
         artist_from_path: false,
     })
+}
+
+/// Chantier artistes multiples — toutes les valeurs d'une clé répétable,
+/// jointes par « ; », dans l'ordre du fichier ; `None` s'il n'y en a qu'une
+/// (ou aucune). Les doublons exacts et les valeurs vides sont écartés.
+fn toutes_les_valeurs_multiples(tag: &lofty::tag::Tag, key: lofty::tag::ItemKey) -> Option<String> {
+    let mut valeurs: Vec<&str> = Vec::new();
+    for v in tag.get_strings(key).map(str::trim) {
+        if !v.is_empty() && !valeurs.contains(&v) {
+            valeurs.push(v);
+        }
+    }
+    (valeurs.len() > 1).then(|| valeurs.join("; "))
+}
+
+#[cfg(test)]
+mod toutes_les_valeurs_tests {
+    use super::toutes_les_valeurs_multiples;
+    use lofty::tag::{ItemKey, ItemValue, Tag, TagItem, TagType};
+
+    fn balise(valeurs: &[&str]) -> Tag {
+        let mut t = Tag::new(TagType::VorbisComments);
+        for v in valeurs {
+            t.push(TagItem::new(
+                ItemKey::MusicBrainzArtistId,
+                ItemValue::Text((*v).to_string()),
+            ));
+        }
+        t
+    }
+
+    /// Picard écrit un `MUSICBRAINZ_ARTISTID` par artiste du crédit : tous
+    /// sont gardés, dans l'ordre ; une valeur unique ne remplit rien.
+    #[test]
+    fn toutes_les_valeurs_d_une_cle_repetee_sont_gardees() {
+        let a = "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d";
+        let b = "8e3fcd7d-bda1-4ca0-b987-b8528d2ee74e";
+        let k = ItemKey::MusicBrainzArtistId;
+        assert_eq!(
+            toutes_les_valeurs_multiples(&balise(&[a, b, a]), k),
+            Some(format!("{a}; {b}"))
+        );
+        assert_eq!(toutes_les_valeurs_multiples(&balise(&[a]), k), None);
+        assert_eq!(toutes_les_valeurs_multiples(&balise(&[]), k), None);
+    }
 }
 
 /// #6123 — la note de la piste, de 0 à 5, dans la balise que lofty a lue,
@@ -6140,6 +6220,7 @@ mod tests {
             musicbrainz_recording_id: Some("rec-uuid".into()),
             musicbrainz_release_id: Some("rel-uuid".into()),
             musicbrainz_artist_id: Some("art-uuid".into()),
+            musicbrainz_artist_ids: None,
             musicbrainz_album_artist_id: Some("aa-uuid".into()),
             musicbrainz_release_group_id: Some("rg-uuid".into()),
             isrc: Some("USRC12345678".into()),

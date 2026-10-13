@@ -569,14 +569,7 @@ impl TrackImporter {
             quality_split,
             cache_dir,
             artist_cache: HashMap::new(),
-            exceptions_d_artistes: tune_core::db::settings_repo::SettingsRepo::with_backend(
-                db.clone(),
-            )
-            .get("artist_split_allowlist")
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-            .unwrap_or_default(),
+            exceptions_d_artistes: tune_core::db::track_artist_repo::exceptions_du_reglage(&db),
             artistes_de_piste_en_attente: Vec::new(),
             album_cache: HashMap::new(),
             albums_with_cover: HashSet::new(),
@@ -1587,7 +1580,7 @@ impl TrackImporter {
         } else {
             meta.musicbrainz_album_artist_id
                 .as_deref()
-                .or(meta.musicbrainz_artist_id.as_deref())
+                .or(meta.mbid_de_l_artiste_entier())
         };
         let album_artist_entry = if let Some(cached) = self.artist_cache.get(&album_artist_name) {
             Some(Arc::clone(cached))
@@ -1617,11 +1610,7 @@ impl TrackImporter {
             } else {
                 let result = self
                     .artist_repo
-                    .get_or_create(
-                        &track_artist_name,
-                        meta.musicbrainz_artist_id.as_deref(),
-                        None,
-                    )
+                    .get_or_create(&track_artist_name, meta.mbid_de_l_artiste_entier(), None)
                     .ok()
                     .map(Arc::new);
                 if let Some(ref a) = result {
@@ -1912,7 +1901,9 @@ impl TrackImporter {
             self.noter_les_artistes_de_piste(
                 &sf.path,
                 &track_artist_name,
-                meta.musicbrainz_artist_id.as_deref(),
+                meta.musicbrainz_artist_ids
+                    .as_deref()
+                    .or(meta.musicbrainz_artist_id.as_deref()),
                 track_artist.as_deref(),
             );
         }
@@ -1931,51 +1922,27 @@ impl TrackImporter {
         mbid_brut: Option<&str>,
         principal: Option<&Artist>,
     ) {
-        use tune_core::metadata::artist_split::{artistes_de_la_piste, mbids_de_la_balise};
-        let mbids = mbids_de_la_balise(mbid_brut);
-        let nom_du_mbid = match mbids.as_slice() {
-            [seul] => self
-                .artist_repo
-                .get_by_musicbrainz_id(seul)
-                .ok()
-                .flatten()
-                .map(|a| a.name),
-            _ => None,
-        };
-        let artistes = artistes_de_la_piste(
-            credit,
-            &mbids,
-            nom_du_mbid.as_deref(),
-            &self.exceptions_d_artistes,
-        );
-        let mut liens: Vec<(i64, u32)> = Vec::new();
-        if artistes.len() > 1 {
-            for a in &artistes {
-                let id = match principal {
-                    Some(p) if p.name.eq_ignore_ascii_case(&a.nom) => p.id,
-                    _ => self.artiste_du_credit(&a.nom, a.mbid.as_deref()),
-                };
-                if let Some(id) = id
-                    && !liens.iter().any(|(deja, _)| *deja == id)
-                {
-                    liens.push((id, a.rang));
-                }
+        let artist_repo = &self.artist_repo;
+        let cache = &mut self.artist_cache;
+        let mut resoudre = |nom: &str, mbid: Option<&str>| -> Option<i64> {
+            if let Some(a) = cache.get(nom) {
+                return a.id;
             }
-        }
+            let a = artist_repo.get_or_create(nom, mbid, None).ok()?;
+            let id = a.id;
+            cache.insert(nom.to_string(), Arc::new(a));
+            id
+        };
+        let liens = tune_core::db::track_artist_repo::liens_du_credit(
+            artist_repo,
+            &self.exceptions_d_artistes,
+            credit,
+            mbid_brut,
+            principal.and_then(|p| Some((p.id?, p.name.as_str()))),
+            &mut resoudre,
+        );
         self.artistes_de_piste_en_attente
             .push((chemin.to_string(), liens));
-    }
-
-    /// Un artiste d'un crédit découpé : par le cache du scan, sinon
-    /// `get_or_create` (MBID d'abord, puis nom).
-    fn artiste_du_credit(&mut self, nom: &str, mbid: Option<&str>) -> Option<i64> {
-        if let Some(a) = self.artist_cache.get(nom) {
-            return a.id;
-        }
-        let a = self.artist_repo.get_or_create(nom, mbid, None).ok()?;
-        let id = a.id;
-        self.artist_cache.insert(nom.to_string(), Arc::new(a));
-        id
     }
 
     /// Chantier artistes multiples — écrit dans `track_artists` les

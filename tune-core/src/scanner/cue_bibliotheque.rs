@@ -635,6 +635,10 @@ struct Depots {
     tenues: Tenues,
     /// Les métadonnées étendues des pistes (`track_metadata`, #5463).
     etendues: TrackMetadataRepo,
+    /// Chantier artistes multiples — la base, pour la liaison
+    /// `track_artists`, et la liste d'exceptions du découpage.
+    db: Arc<dyn DbBackend>,
+    exceptions_d_artistes: Vec<String>,
 }
 
 impl Depots {
@@ -647,6 +651,8 @@ impl Depots {
             // Une lecture par passe, comme au scan ordinaire (`TrackImporter`).
             tenues: Tenues::charger(db),
             etendues: TrackMetadataRepo::with_backend(db.clone()),
+            db: db.clone(),
+            exceptions_d_artistes: crate::db::track_artist_repo::exceptions_du_reglage(db),
         }
     }
 }
@@ -689,6 +695,8 @@ fn ecrire_album_avec(
         metadonnees: tenues_meta,
         tenues,
         etendues: etendues_repo,
+        db,
+        exceptions_d_artistes,
     } = depots;
     if album.pistes.is_empty() {
         return;
@@ -860,6 +868,9 @@ fn ecrire_album_avec(
     let mut images_decoupees: HashSet<PathBuf> = HashSet::new();
     // Les pistes écrites, pour leurs métadonnées étendues (#5463).
     let mut a_completer: Vec<(Option<i64>, &PisteCue, bool)> = Vec::new();
+    // Chantier artistes multiples — par piste écrite, les artistes de son
+    // crédit (`PERFORMER` de la piste, sinon de l'album) découpé.
+    let mut artistes_a_relier: Vec<(i64, Vec<(i64, u32)>)> = Vec::new();
 
     for piste in &album.pistes {
         let sonde = match imposition {
@@ -905,6 +916,29 @@ fn ecrire_album_avec(
         // scan ordinaire (`TrackImporter::import`) : album, disque, numéro,
         // titre et artiste que l'utilisateur a tenus, par chemin ou par
         // identité CUE (#5319).
+        // Chantier artistes multiples — lu AVANT `appliquer` : une piste dont
+        // l'ARTISTE est tenu à la main n'est reliée à personne d'autre.
+        let liens = if tenues.tient_l_artiste(&ligne) {
+            Vec::new()
+        } else {
+            let credit = piste
+                .interprete
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .unwrap_or(nom_artiste);
+            // `artiste_de_la_piste` est l'artiste résolu pour ce crédit.
+            let principal_nom = artiste_de_la_piste.map(|id| (id, credit));
+            let mut resoudre = crate::db::track_artist_repo::resoudre_par_la_base(artist_repo);
+            crate::db::track_artist_repo::liens_du_credit(
+                artist_repo,
+                exceptions_d_artistes,
+                credit,
+                None,
+                principal_nom,
+                &mut resoudre,
+            )
+        };
         if tenues.appliquer(&mut ligne)
             && let Some(tenu) = ligne.album_id
             && Some(tenu) != ligne_album
@@ -971,6 +1005,9 @@ fn ecrire_album_avec(
                         bilan.pistes_mises_a_jour += 1;
                         ecrites += 1;
                         a_completer.push((ligne.id, piste, fichier_entier));
+                        if let Some(id) = ligne.id {
+                            artistes_a_relier.push((id, liens));
+                        }
                     }
                     Err(e) => {
                         warn!(media = %media, debut, error = %e, "cue_piste_non_mise_a_jour");
@@ -983,6 +1020,7 @@ fn ecrire_album_avec(
                     bilan.pistes_creees += 1;
                     ecrites += 1;
                     a_completer.push((Some(id), piste, fichier_entier));
+                    artistes_a_relier.push((id, liens));
                 }
                 Err(e) => {
                     warn!(media = %media, debut, error = %e, "cue_piste_non_creee");
@@ -990,6 +1028,10 @@ fn ecrire_album_avec(
                 }
             },
         }
+    }
+
+    for (id, liens) in &artistes_a_relier {
+        crate::db::track_artist_repo::remplacer_par_id(db.as_ref(), *id, liens);
     }
 
     for (id, piste, fichier_entier) in a_completer {
@@ -1819,6 +1861,53 @@ mod tests {
             "Un vrai titre",
             "un repli sur le nom du dossier a écrasé un titre existant"
         );
+    }
+
+    /// Chantier artistes multiples — le `PERFORMER` d'une piste qui nomme
+    /// deux artistes (« Glenn Gould & Yo-Yo Ma ») relie la tranche aux deux ;
+    /// celui de l'album, entier, ne relie rien. Relu : pas de doublon.
+    ///
+    /// Contre-épreuve : retirer l'écriture `remplacer_par_id` de
+    /// `ecrire_album_avec` fait tomber la première assertion.
+    #[test]
+    fn le_performer_d_une_tranche_la_relie_a_ses_artistes() {
+        use crate::db::track_artist_repo::artistes_de_la_piste;
+        let d = tempfile::TempDir::new().unwrap();
+        let dossier = d.path().join("Gould - Duos");
+        fs::create_dir_all(&dossier).unwrap();
+        let image = dossier.join("image.wav");
+        ecrire_wav(&image, 4_000);
+        fs::write(
+            dossier.join("album.cue"),
+            "PERFORMER \"Glenn Gould\"\nTITLE \"Duos\"\nFILE \"image.wav\" WAVE\n  \
+             TRACK 01 AUDIO\n    TITLE \"Duo\"\n    PERFORMER \"Glenn Gould & Yo-Yo Ma\"\n    \
+             INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Solo\"\n    INDEX 01 00:01:00\n",
+        )
+        .unwrap();
+        let db = base();
+        let media = image.to_string_lossy().to_string();
+        let repo = TrackRepo::with_backend(db.clone());
+        for _ in 0..2 {
+            inventorier_et_ecrire(
+                db.clone(),
+                std::slice::from_ref(&dossier),
+                &racines(d.path()),
+            );
+            let duo = repo
+                .get_by_cue_identity(&media, 0)
+                .unwrap()
+                .expect("piste 1");
+            let noms: Vec<String> = artistes_de_la_piste(db.as_ref(), duo.id.unwrap())
+                .into_iter()
+                .map(|(_, n)| n)
+                .collect();
+            assert_eq!(noms, ["Glenn Gould", "Yo-Yo Ma"]);
+            let solo = repo
+                .get_by_cue_identity(&media, 1_000)
+                .unwrap()
+                .expect("piste 2");
+            assert!(artistes_de_la_piste(db.as_ref(), solo.id.unwrap()).is_empty());
+        }
     }
 
     /// LA MOITIÉ QUI PROUVE — le scan ÉCRIT.
