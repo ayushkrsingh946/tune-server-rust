@@ -727,6 +727,9 @@ async fn executer_le_lot(state: AppState, task_id: String, albums: Vec<i64>) {
             Ok(issue) => {
                 // #4805 D — `ambiguous` est compté à part, et rien n'est posé.
                 compte.enregistrer(&issue);
+                // La mesure A (#4805) garde le verdict de chaque album.
+                #[cfg(test)]
+                mesure_a::noter(album_id, &issue);
                 // #4991 (b) — un album que MusicBrainz n'a pas passe derrière
                 //    les albums jamais tentés au prochain lancement.
                 consigner_la_tentative(
