@@ -46,6 +46,39 @@ fn language_directive(lang: &str) -> &'static str {
 
 const MAX_TOOL_ROUNDS: usize = 5;
 
+/// Ce que la bibliothèque envoie au modèle, borné (étape 3 du chantier
+/// « Assistant IA ») : c'est ce qui fixe le coût d'une question.
+///
+/// - un résultat d'outil part tronqué à 6 000 caractères (≈ 1 500 jetons) ;
+///   `search_library` rend déjà au plus 10 artistes, 10 albums et 10 pistes ;
+/// - une question n'envoie pas plus de 24 000 caractères de résultats en tout
+///   (≈ 6 000 jetons) : au-delà, l'outil s'exécute mais le modèle ne reçoit
+///   qu'un avis « limite atteinte » ;
+/// - 5 tours d'outils au plus, plus le tour final.
+pub(crate) const MAX_CARACTERES_PAR_RESULTAT: usize = 6_000;
+pub(crate) const MAX_CARACTERES_PAR_QUESTION: usize = 24_000;
+
+/// Le résultat d'un outil tel que le modèle le reçoit, borné. `envoyes` :
+/// les caractères de résultats déjà envoyés pour cette question.
+pub(crate) fn resultat_borne(resultat: &str, envoyes: &mut usize) -> String {
+    const AVIS_TRONQUE: &str = " …[résultat tronqué]";
+    const AVIS_LIMITE: &str = "{\"error\":\"limite_de_bibliotheque\",\"message\":\"Limite de données de la bibliothèque atteinte pour cette question : réponds avec ce que tu sais déjà.\"}";
+    if *envoyes >= MAX_CARACTERES_PAR_QUESTION {
+        return AVIS_LIMITE.to_string();
+    }
+    let place = MAX_CARACTERES_PAR_RESULTAT.min(MAX_CARACTERES_PAR_QUESTION - *envoyes);
+    let n = resultat.chars().count();
+    let sortie = if n <= place {
+        resultat.to_string()
+    } else {
+        let mut t: String = resultat.chars().take(place).collect();
+        t.push_str(AVIS_TRONQUE);
+        t
+    };
+    *envoyes += n.min(place);
+    sortie
+}
+
 #[derive(Deserialize)]
 struct AiQuery {
     message: String,
@@ -86,6 +119,12 @@ pub fn router() -> Router<AppState> {
 /// fournisseur de l'assistant soit Anthropic ; sinon, repli local, comme sans
 /// clé. Le chemin historique ne reste que pour un binaire compilé sans le
 /// greffon.
+///
+/// Étape 3 (« extension de l'existant », Bertrand, 13/10/2026) : le dialogue
+/// part chez le fournisseur de l'assistant QUEL QU'IL SOIT (Anthropic,
+/// compatible OpenAI, Gemini, Ollama) — la passerelle traduit les outils et
+/// les tours. Toujours sur la bibliothèque locale seule (les outils de
+/// `tune_core::ai::tools`), et bornée : voir [`MAX_CARACTERES_PAR_RESULTAT`].
 enum Interlocuteur {
     #[cfg(not(feature = "assistant-ia"))]
     Historique(AnthropicClient),
@@ -109,13 +148,25 @@ enum Refus {
 const MAX_JETONS_PAR_TOUR: u32 = 1024;
 
 impl Interlocuteur {
+    /// Étape 3 : l'état du plafond de l'assistant (`plafond`, avec l'alerte à
+    /// 80 %) joint à la réponse, comme pour les autres usages.
+    fn avec_plafond(&self, mut v: Value) -> Value {
+        match self {
+            #[cfg(not(feature = "assistant-ia"))]
+            Self::Historique(_) => {}
+            #[cfg(feature = "assistant-ia")]
+            Self::Assistant(p) => v["plafond"] = p.etat_plafond(),
+        }
+        v
+    }
+
     fn choisir(state: &AppState, settings: &SettingsRepo) -> Option<Self> {
         #[cfg(feature = "assistant-ia")]
         {
             let _ = settings;
             let p = crate::plugins::passerelle_assistant(&state.backend);
             p.migrer();
-            p.anthropic_pret().then_some(Self::Assistant(p))
+            p.dialogue_pret().then_some(Self::Assistant(p))
         }
         #[cfg(not(feature = "assistant-ia"))]
         {
@@ -158,7 +209,7 @@ impl Interlocuteur {
                 let messages = serde_json::to_value(&messages).map_err(|_| illisible())?;
                 let outils = serde_json::to_value(tools).map_err(|_| illisible())?;
                 let v = p
-                    .discuter_anthropic(system, &messages, &outils, MAX_JETONS_PAR_TOUR)
+                    .discuter(system, &messages, &outils, MAX_JETONS_PAR_TOUR)
                     .await
                     .map_err(|e| Refus::Assistant {
                         code: e.code(),
@@ -222,6 +273,7 @@ async fn ai_query(
     }];
 
     let mut actions: Vec<Value> = Vec::new();
+    let mut envoyes = 0usize;
 
     for round in 0..MAX_TOOL_ROUNDS {
         let response = match client.chat(&system, messages.clone(), &tools).await {
@@ -243,11 +295,11 @@ async fn ai_query(
                 actions = actions.len(),
                 "ai_done"
             );
-            return Ok(Json(json!({
+            return Ok(Json(client.avec_plafond(json!({
                 "reply": reply,
                 "actions": actions,
                 "zone_id": executor.zone_id(),
-            })));
+            }))));
         }
 
         let assistant_blocks: Vec<ContentBlock> = response.content.clone();
@@ -263,7 +315,7 @@ async fn ai_query(
                 actions.push(json!({ "tool": name, "input": input, "result": result }));
                 tool_results.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
-                    content: result.to_string(),
+                    content: resultat_borne(&result.to_string(), &mut envoyes),
                 });
             }
         }
@@ -284,11 +336,11 @@ async fn ai_query(
     };
 
     let reply = extract_text(&final_response.content);
-    Ok(Json(json!({
+    Ok(Json(client.avec_plafond(json!({
         "reply": reply,
         "actions": actions,
         "zone_id": executor.zone_id(),
-    })))
+    }))))
 }
 
 // ---------------------------------------------------------------------------
@@ -966,4 +1018,52 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests_bornes {
+    use super::*;
+
+    #[test]
+    fn un_resultat_court_part_tel_quel_et_compte() {
+        let mut envoyes = 0;
+        assert_eq!(
+            resultat_borne("{\"ok\":true}", &mut envoyes),
+            "{\"ok\":true}"
+        );
+        assert_eq!(envoyes, 11);
+    }
+
+    #[test]
+    fn un_resultat_long_est_tronque_a_la_limite_par_resultat() {
+        let mut envoyes = 0;
+        // Un caractère de deux octets, absent de l'avis de troncature.
+        let long = "ä".repeat(MAX_CARACTERES_PAR_RESULTAT + 500);
+        let r = resultat_borne(&long, &mut envoyes);
+        assert!(r.ends_with("[résultat tronqué]"));
+        assert_eq!(
+            r.chars().filter(|c| *c == 'ä').count(),
+            MAX_CARACTERES_PAR_RESULTAT,
+            "tronqué sur un caractère entier, pas un octet"
+        );
+        assert_eq!(envoyes, MAX_CARACTERES_PAR_RESULTAT);
+    }
+
+    #[test]
+    fn une_question_n_envoie_pas_plus_que_sa_limite() {
+        let mut envoyes = 0;
+        let bloc = "x".repeat(MAX_CARACTERES_PAR_RESULTAT);
+        let mut total = 0;
+        for _ in 0..10 {
+            let r = resultat_borne(&bloc, &mut envoyes);
+            if !r.contains("limite_de_bibliotheque") {
+                total += r.chars().count();
+            }
+        }
+        assert_eq!(total, MAX_CARACTERES_PAR_QUESTION);
+        assert_eq!(envoyes, MAX_CARACTERES_PAR_QUESTION);
+        let r = resultat_borne("{}", &mut envoyes);
+        let v: Value = serde_json::from_str(&r).expect("l'avis est du JSON");
+        assert_eq!(v["error"], "limite_de_bibliotheque");
+    }
 }

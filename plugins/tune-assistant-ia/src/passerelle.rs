@@ -5,7 +5,8 @@
 //!
 //! - l'ancien assistant conversationnel `POST /ai/query`
 //!   (`tune-server/src/routes/ai.rs`), qui pilote la lecture par des OUTILS
-//!   (tool use) — un dialogue propre à l'API Messages d'Anthropic ;
+//!   (tool use) — écrit pour l'API Messages d'Anthropic ; étape 3 : traduit
+//!   pour tous les fournisseurs de l'assistant par [`crate::dialogue`] ;
 //! - la traduction des requêtes d'ambiance (`tune_core::ai::translate`),
 //!   appelée par la recherche acoustique.
 //!
@@ -130,15 +131,118 @@ impl Passerelle {
         }
     }
 
-    /// L'ancien assistant peut-il dialoguer ? Il lui faut Anthropic : le
-    /// pilotage par outils est écrit pour l'API Messages.
+    /// L'ancien assistant peut-il dialoguer ? Étape 3 : avec tout
+    /// fournisseur de l'assistant prêt (Anthropic, compatible OpenAI, Gemini,
+    /// Ollama) — le dialogue à outils est traduit par [`crate::dialogue`].
+    pub fn dialogue_pret(&self) -> bool {
+        self.pret()
+    }
+
+    /// Le dialogue avec Anthropic seulement (étape 2). Gardé pour qui le
+    /// demande explicitement ; l'hôte passe par [`Self::dialogue_pret`].
     pub fn anthropic_pret(&self) -> bool {
         Reglages::charger(&self.backend).famille == Some(Famille::Anthropic) && self.pret()
     }
 
-    /// Un tour de dialogue de l'ancien assistant, avec ses outils, au tarif
-    /// et sous le plafond de l'assistant. Rend la réponse brute de l'API
-    /// Messages (`content`, `stop_reason`, `usage`).
+    /// Où en est la dépense du mois face au plafond (étape 3), pour la
+    /// réponse de `/ai/query`.
+    pub fn etat_plafond(&self) -> Value {
+        appel::etat_plafond(&self.backend)
+    }
+
+    /// Un tour de dialogue de l'ancien assistant, chez le fournisseur de
+    /// l'assistant QUEL QU'IL SOIT, avec ses outils, au tarif et sous le
+    /// plafond de l'assistant, compté pour l'usage [`USAGE_REQUETE`].
+    ///
+    /// `messages` et `outils` sont dans la forme de l'API Messages
+    /// d'Anthropic, et la réponse aussi (`content` en blocs `text` /
+    /// `tool_use`, `stop_reason`) : l'hôte n'a qu'un dialogue à écrire.
+    pub async fn discuter(
+        &self,
+        systeme: &str,
+        messages: &Value,
+        outils: &Value,
+        max_jetons: u32,
+    ) -> Result<Value, ErreurAppel> {
+        use crate::dialogue::{self, Dialecte};
+        let famille = Reglages::charger(&self.backend)
+            .famille
+            .ok_or(ErreurAppel::NonConfigure)?;
+        match famille {
+            Famille::Anthropic => {
+                self.discuter_anthropic(systeme, messages, outils, max_jetons)
+                    .await
+            }
+            Famille::CompatibleOpenai | Famille::Gemini => {
+                let v = self
+                    .tour(
+                        |acces, modele| {
+                            let mut corps = json!({
+                                "model": modele,
+                                "messages": dialogue::messages_vers(Dialecte::Openai, systeme, messages),
+                            });
+                            let fonctions = dialogue::outils_en_fonctions(outils);
+                            if !fonctions.is_empty() {
+                                corps["tools"] = json!(fonctions);
+                            }
+                            // Pas de plafond de sortie : voir `CompatibleOpenai`
+                            // dans `fournisseur` (clé refusée par certains
+                            // points d'accès). La sortie est comptée sur `usage`.
+                            let mut req = fournisseur::client()
+                                .post(format!("{}/chat/completions", fournisseur::base(acces)))
+                                .timeout(fournisseur::DELAI)
+                                .json(&corps);
+                            if let Some(cle) = acces.cle.as_deref() {
+                                req = req.bearer_auth(cle);
+                            }
+                            req
+                        },
+                        |v| {
+                            let u = v.get("usage").cloned().unwrap_or(Value::Null);
+                            (
+                                fournisseur::jetons(&u, "prompt_tokens"),
+                                fournisseur::jetons(&u, "completion_tokens"),
+                            )
+                        },
+                    )
+                    .await?;
+                Ok(dialogue::reponse_depuis(
+                    v.pointer("/choices/0/message").unwrap_or(&Value::Null),
+                ))
+            }
+            Famille::Ollama => {
+                let v = self
+                    .tour(
+                        |acces, modele| {
+                            let mut corps = json!({
+                                "model": modele,
+                                "stream": false,
+                                "messages": dialogue::messages_vers(Dialecte::Ollama, systeme, messages),
+                            });
+                            let fonctions = dialogue::outils_en_fonctions(outils);
+                            if !fonctions.is_empty() {
+                                corps["tools"] = json!(fonctions);
+                            }
+                            fournisseur::client()
+                                .post(format!("{}/api/chat", fournisseur::base(acces)))
+                                .timeout(fournisseur::DELAI)
+                                .json(&corps)
+                        },
+                        |v| {
+                            (
+                                fournisseur::jetons(v, "prompt_eval_count"),
+                                fournisseur::jetons(v, "eval_count"),
+                            )
+                        },
+                    )
+                    .await?;
+                Ok(dialogue::reponse_depuis(&v["message"]))
+            }
+        }
+    }
+
+    /// Un tour de dialogue avec l'API Messages d'Anthropic. Rend la réponse
+    /// brute (`content`, `stop_reason`, `usage`).
     pub async fn discuter_anthropic(
         &self,
         systeme: &str,
@@ -146,11 +250,55 @@ impl Passerelle {
         outils: &Value,
         max_jetons: u32,
     ) -> Result<Value, ErreurAppel> {
-        let r = Reglages::charger(&self.backend);
-        if r.famille != Some(Famille::Anthropic) {
+        if Reglages::charger(&self.backend).famille != Some(Famille::Anthropic) {
             return Err(ErreurAppel::NonConfigure);
         }
+        self.tour(
+            |acces, modele| {
+                let mut corps = json!({
+                    "model": modele,
+                    "max_tokens": max_jetons,
+                    "system": systeme,
+                    "messages": messages,
+                });
+                if outils.as_array().is_some_and(|o| !o.is_empty()) {
+                    corps["tools"] = outils.clone();
+                }
+                fournisseur::client()
+                    .post(format!("{}/v1/messages", fournisseur::base(acces)))
+                    .header("x-api-key", acces.cle.as_deref().unwrap_or(""))
+                    .header("anthropic-version", "2023-06-01")
+                    .timeout(fournisseur::DELAI)
+                    .json(&corps)
+            },
+            |v| {
+                let u = v.get("usage").cloned().unwrap_or(Value::Null);
+                (
+                    fournisseur::jetons(&u, "input_tokens")
+                        + fournisseur::jetons(&u, "cache_creation_input_tokens")
+                        + fournisseur::jetons(&u, "cache_read_input_tokens"),
+                    fournisseur::jetons(&u, "output_tokens"),
+                )
+            },
+        )
+        .await
+    }
+
+    /// Le chemin commun d'un tour : clé et tarif, plafond sous LE verrou,
+    /// la requête (`construire`), puis le comptage de SES jetons (`jetons`)
+    /// pour l'usage [`USAGE_REQUETE`]. Seuls la famille et le statut HTTP
+    /// sont journalisés, jamais la requête ni la clé.
+    async fn tour(
+        &self,
+        construire: impl FnOnce(&fournisseur::Acces, &str) -> reqwest::RequestBuilder,
+        jetons: impl FnOnce(&Value) -> (u64, u64),
+    ) -> Result<Value, ErreurAppel> {
+        let r = Reglages::charger(&self.backend);
+        let famille = r.famille.ok_or(ErreurAppel::NonConfigure)?;
         let modele = r.modele_effectif(false);
+        if modele.is_empty() {
+            return Err(ErreurAppel::NonConfigure);
+        }
         let (acces, tarif) = appel::acces_et_tarif(&self.backend, &self.coffre, &r, &modele)?;
 
         let _verrou = self.verrou.lock().await;
@@ -159,40 +307,23 @@ impl Passerelle {
             info!(usage = USAGE_REQUETE, "assistant_ia_plafond_atteint");
             return Err(ErreurAppel::PlafondAtteint);
         }
-        let mut corps = json!({
-            "model": modele,
-            "max_tokens": max_jetons,
-            "system": systeme,
-            "messages": messages,
-        });
-        if outils.as_array().is_some_and(|o| !o.is_empty()) {
-            corps["tools"] = outils.clone();
-        }
-        let rep = fournisseur::client()
-            .post(format!("{}/v1/messages", fournisseur::base(&acces)))
-            .header("x-api-key", acces.cle.as_deref().unwrap_or(""))
-            .header("anthropic-version", "2023-06-01")
-            .timeout(fournisseur::DELAI)
-            .json(&corps)
+        let rep = construire(&acces, &modele)
             .send()
             .await
-            .map_err(|e| {
-                ErreurAppel::Fournisseur(fournisseur::erreur_reseau(Famille::Anthropic, &e))
-            })?;
+            .map_err(|e| ErreurAppel::Fournisseur(fournisseur::erreur_reseau(famille, &e)))?;
         let statut = rep.status().as_u16();
-        let texte = rep.text().await.map_err(|e| {
-            ErreurAppel::Fournisseur(fournisseur::erreur_reseau(Famille::Anthropic, &e))
-        })?;
+        let texte = rep
+            .text()
+            .await
+            .map_err(|e| ErreurAppel::Fournisseur(fournisseur::erreur_reseau(famille, &e)))?;
         if !(200..300).contains(&statut) {
             return Err(ErreurAppel::Fournisseur(fournisseur::erreur_de_statut(
-                Famille::Anthropic,
-                statut,
-                &texte,
+                famille, statut, &texte,
             )));
         }
         let v: Value = serde_json::from_str(&texte)
             .map_err(|_| ErreurAppel::Fournisseur(fournisseur::ErreurFournisseur::Autre(statut)))?;
-        let usage = v.get("usage").cloned().unwrap_or(Value::Null);
+        let (entree, sortie) = jetons(&v);
         appel::compter(
             &self.backend,
             &mut c,
@@ -200,10 +331,8 @@ impl Passerelle {
             tarif,
             USAGE_REQUETE,
             &modele,
-            fournisseur::jetons(&usage, "input_tokens")
-                + fournisseur::jetons(&usage, "cache_creation_input_tokens")
-                + fournisseur::jetons(&usage, "cache_read_input_tokens"),
-            fournisseur::jetons(&usage, "output_tokens"),
+            entree,
+            sortie,
         );
         Ok(v)
     }
