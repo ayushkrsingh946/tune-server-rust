@@ -696,6 +696,12 @@ pub fn router() -> Router<AppState> {
             "/identify-all/status",
             get(identification_lot::identification_lot_status),
         )
+        // #4805 (13/10/2026) — la passe de nuit des albums refusés par
+        // MusicBrainz : éteinte par défaut, ce réglage l'allume.
+        .route(
+            "/identify-all/nuit",
+            get(identification_lot::nuit::reglage_nuit).post(identification_lot::nuit::regler_nuit),
+        )
         .route("/write-tags", post(write_tags::write_tags_to_files))
         .route("/write-tags/status", get(write_tags::write_tags_status))
         // Graver le Dynamic Range calculé par Tune dans les fichiers (16/09/2026).

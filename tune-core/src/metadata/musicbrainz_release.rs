@@ -1199,6 +1199,41 @@ pub fn artiste_de_requete(artiste_album: Option<&str>, artiste_pistes: Option<&s
     }
 }
 
+/// Qui demande l'identification d'un album : la fiche (un clic de
+/// l'utilisateur sur CET album) ou une passe de lot (`identify-all`, passe de
+/// nuit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrigineDeLaRecherche {
+    /// Le bouton de la fiche album : l'utilisateur regarde le résultat.
+    Fiche,
+    /// Une passe de lot : personne ne regarde album par album.
+    Lot,
+}
+
+/// [`artiste_de_requete`] selon [`OrigineDeLaRecherche`].
+///
+/// Décision de Bertrand (13/10/2026, #4805) : la recherche par le titre seul,
+/// quand l'artiste est fictif (`Unknown Artist`), est RÉSERVÉE au bouton de la
+/// fiche. Sur la mesure A elle identifiait 47 albums de plus mais en rendait
+/// 23 ambigus : à la main, l'utilisateur juge le candidat ; dans un lot,
+/// personne. La passe de lot garde donc la requête d'avant, l'artiste
+/// d'origine tel quel.
+pub fn artiste_de_requete_pour(
+    origine: OrigineDeLaRecherche,
+    artiste_album: Option<&str>,
+    artiste_pistes: Option<&str>,
+) -> String {
+    let requete = artiste_de_requete(artiste_album, artiste_pistes);
+    if !requete.is_empty() || origine == OrigineDeLaRecherche::Fiche {
+        return requete;
+    }
+    match (artiste_album, artiste_pistes) {
+        (Some(a), _) => a.trim().to_string(),
+        (None, Some(p)) => p.trim().to_string(),
+        (None, None) => String::new(),
+    }
+}
+
 /// Échappe une PHRASE Lucene, le texte placé entre guillemets.
 ///
 /// 🔴 Entre guillemets, deux caractères seulement ont un sens pour l'analyseur
@@ -2693,6 +2728,41 @@ mod tests {
             "The National",
         ] {
             assert_eq!(artiste_de_requete(Some(intact), None), intact, "{intact}");
+        }
+    }
+
+    /// Décision du 13/10/2026 (#4805) : le titre seul pour un artiste fictif
+    /// est réservé à la fiche ; le lot garde l'artiste d'origine.
+    #[test]
+    fn titre_seul_reserve_a_la_fiche() {
+        use OrigineDeLaRecherche::{Fiche, Lot};
+        for (album, pistes) in [
+            (Some("Unknown Artist"), Some("Unknown Artist")),
+            (Some("Unknown Artist"), None),
+            (None, Some("Artiste inconnu")),
+        ] {
+            assert_eq!(
+                artiste_de_requete_pour(Fiche, album, pistes),
+                "",
+                "{album:?}"
+            );
+            assert_ne!(artiste_de_requete_pour(Lot, album, pistes), "", "{album:?}");
+        }
+        assert_eq!(
+            artiste_de_requete_pour(Lot, Some(" Unknown Artist "), None),
+            "Unknown Artist"
+        );
+        // Un vrai artiste : la même requête des deux côtés.
+        for origine in [Fiche, Lot] {
+            assert_eq!(
+                artiste_de_requete_pour(origine, Some("Unknown Artist"), Some("Air")),
+                "Air"
+            );
+            assert_eq!(
+                artiste_de_requete_pour(origine, Some("Brecker Brothers, The"), None),
+                "The Brecker Brothers"
+            );
+            assert_eq!(artiste_de_requete_pour(origine, None, None), "");
         }
     }
 
