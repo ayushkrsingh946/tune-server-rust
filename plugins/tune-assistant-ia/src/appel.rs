@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use tracing::info;
+use tracing::{info, warn};
 use tune_core::db::backend::DbBackend;
 
 use crate::Etat;
@@ -176,7 +176,7 @@ pub async fn appeler_avec(
     {
         let _verrou = m.verrou.lock().await;
         let mut c = reglages::charger_consommation(m.backend);
-        c.depuis_cache += 1;
+        c.ajouter_cache(usage);
         let _ = reglages::ranger_consommation(m.backend, &c);
         info!(usage, "assistant_ia_reponse_du_cache");
         return Ok(Resultat {
@@ -263,11 +263,20 @@ pub(crate) fn compter(
     jetons_sortie: u64,
 ) -> u64 {
     let cout = couts::cout_micro_eur(tarif, jetons_entree, jetons_sortie, r.taux_usd_eur);
-    c.appels += 1;
-    c.jetons_entree += jetons_entree;
-    c.jetons_sortie += jetons_sortie;
-    c.micro_eur += cout;
+    let avant = c.micro_eur;
+    c.ajouter_appel(usage, cout, jetons_entree, jetons_sortie);
     let _ = reglages::ranger_consommation(backend, c);
+    // Étape 3 : le passage du seuil d'alerte se journalise UNE fois, à
+    // l'appel qui le franchit (montants seulement, jamais la clé).
+    if !couts::alerte(avant, r.plafond_micro_eur) && couts::alerte(c.micro_eur, r.plafond_micro_eur)
+    {
+        warn!(
+            usage,
+            depense_micro_eur = c.micro_eur,
+            plafond_micro_eur = r.plafond_micro_eur,
+            "assistant_ia_alerte_80_pour_cent"
+        );
+    }
     info!(
         usage,
         fournisseur = r.famille.map(|f| f.nom()).unwrap_or(""),
@@ -278,6 +287,30 @@ pub(crate) fn compter(
         "assistant_ia_appel"
     );
     cout
+}
+
+/// Étape 3 : où en est la dépense du mois face au plafond, pour l'écran.
+/// Joint à chaque réponse d'un usage (`plafond`), et aux réglages.
+pub fn etat_plafond(backend: &Arc<dyn DbBackend>) -> Value {
+    let r = Reglages::charger(backend);
+    let c = reglages::charger_consommation(backend);
+    etat_plafond_de(&c, r.plafond_micro_eur)
+}
+
+pub(crate) fn etat_plafond_de(c: &couts::Consommation, plafond_micro_eur: u64) -> Value {
+    let part = if plafond_micro_eur == 0 {
+        1.0
+    } else {
+        c.micro_eur as f64 / plafond_micro_eur as f64
+    };
+    json!({
+        "depense_eur": couts::micro_en_euros(c.micro_eur),
+        "plafond_eur": couts::micro_en_euros(plafond_micro_eur),
+        "part": part,
+        "seuil_alerte": couts::SEUIL_ALERTE_POURCENT,
+        "alerte": couts::alerte(c.micro_eur, plafond_micro_eur),
+        "atteint": c.micro_eur >= plafond_micro_eur,
+    })
 }
 
 /// Retire d'une réponse ce qui entoure l'objet JSON (bloc ```json, phrase

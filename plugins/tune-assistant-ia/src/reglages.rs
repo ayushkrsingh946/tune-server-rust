@@ -173,6 +173,23 @@ pub fn vue(db: &Arc<dyn DbBackend>, coffre: &Coffre) -> Value {
     };
     let modele = r.modele_effectif(false);
     let tarif = r.tarif(&modele);
+    let par_usage: serde_json::Map<String, Value> = c
+        .par_usage
+        .iter()
+        .map(|(usage, u)| {
+            (
+                usage.clone(),
+                json!({
+                    "cout_eur": couts::micro_en_euros(u.micro_eur),
+                    "appels": u.appels,
+                    "jetons_entree": u.jetons_entree,
+                    "jetons_sortie": u.jetons_sortie,
+                    "depuis_cache": u.depuis_cache,
+                }),
+            )
+        })
+        .collect();
+    let plafond = crate::appel::etat_plafond_de(&c, r.plafond_micro_eur);
     json!({
         "fournisseur": r.famille.map(Famille::nom),
         "modele": r.modele,
@@ -184,6 +201,7 @@ pub fn vue(db: &Arc<dyn DbBackend>, coffre: &Coffre) -> Value {
         "prix_entree_usd_mtok": r.prix_perso.map(|t| t.entree_usd_mtok),
         "prix_sortie_usd_mtok": r.prix_perso.map(|t| t.sortie_usd_mtok),
         "tarif_connu": tarif.is_some(),
+        "tarif": vue_tarif(&r, &modele, &couts::jour_courant()),
         "taux_usd_eur": r.taux_usd_eur,
         "cle_definie": cle_definie,
         "cle_illisible": cle_illisible,
@@ -201,7 +219,45 @@ pub fn vue(db: &Arc<dyn DbBackend>, coffre: &Coffre) -> Value {
             "jetons_sortie": c.jetons_sortie,
             "depuis_cache": c.depuis_cache,
             "plafond_atteint": c.micro_eur >= r.plafond_micro_eur,
+            "alerte": plafond["alerte"],
+            "part_du_plafond": plafond["part"],
+            "seuil_alerte": couts::SEUIL_ALERTE_POURCENT,
+            "par_usage": par_usage,
         },
+    })
+}
+
+/// Étape 3 : le tarif appliqué au modèle effectif, et d'où il vient, daté.
+///
+/// `origine` : `table` (relevé daté, avec sa source), `saisi` (les prix de
+/// l'utilisateur, qui priment), `local` (Ollama, gratuit), ou `null` (aucun
+/// tarif : l'appel sera refusé, `tarif_inconnu`). `a_relever` : le
+/// fournisseur a annoncé un changement de prix et la date est passée — la
+/// table de ce binaire ne le suit plus.
+pub fn vue_tarif(r: &Reglages, modele: &str, aujourd_hui: &str) -> Value {
+    let Some(famille) = r.famille else {
+        return Value::Null;
+    };
+    let (origine, releve) = match famille {
+        Famille::Ollama => ("local", None),
+        _ if r.prix_perso.is_some() => ("saisi", None),
+        Famille::Anthropic if couts::tarif_anthropic(modele).is_some() => {
+            ("table", Some(couts::RELEVE_ANTHROPIC))
+        }
+        Famille::Gemini if couts::tarif_gemini(modele).is_some() => {
+            ("table", Some(couts::RELEVE_GEMINI))
+        }
+        _ => return json!({ "origine": null }),
+    };
+    let t = r.tarif(modele);
+    json!({
+        "origine": origine,
+        "entree_usd_mtok": t.map(|t| t.entree_usd_mtok),
+        "sortie_usd_mtok": t.map(|t| t.sortie_usd_mtok),
+        "releve_le": releve.map(|x| x.releve_le),
+        "source_url": releve.and_then(|x| x.source_url),
+        "a_relever_avant": releve.and_then(|x| x.a_relever_avant),
+        "a_relever": releve.is_some_and(|x| x.a_relever(aujourd_hui)),
     })
 }
 
@@ -300,4 +356,66 @@ pub fn appliquer(db: &Arc<dyn DbBackend>, coffre: &Coffre, m: &Modification) -> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reglages(famille: Famille, modele: &str, prix: Option<Tarif>) -> Reglages {
+        Reglages {
+            famille: Some(famille),
+            modele: modele.into(),
+            modele_classique: String::new(),
+            url_base: String::new(),
+            plafond_micro_eur: 2_000_000,
+            prix_perso: prix,
+            taux_usd_eur: 1.0,
+            cle_posee: true,
+        }
+    }
+
+    #[test]
+    fn le_tarif_de_la_table_est_date_et_dit_quand_le_relever() {
+        let r = reglages(Famille::Gemini, "", None);
+        let m = r.modele_effectif(false);
+        let v = vue_tarif(&r, &m, "2026-10-13");
+        assert_eq!(v["origine"], "table");
+        assert_eq!(v["releve_le"], "2026-10-12");
+        assert_eq!(v["a_relever_avant"], "2027-01-01");
+        assert_eq!(
+            v["source_url"],
+            "https://ai.google.dev/gemini-api/docs/pricing"
+        );
+        assert_eq!(v["entree_usd_mtok"], 0.30);
+        assert_eq!(v["a_relever"], false);
+        assert_eq!(vue_tarif(&r, &m, "2027-01-01")["a_relever"], true);
+
+        let a = reglages(Famille::Anthropic, "", None);
+        let v = vue_tarif(&a, &a.modele_effectif(false), "2027-06-01");
+        assert_eq!(v["origine"], "table");
+        assert_eq!(v["a_relever"], false, "aucun changement annoncé");
+    }
+
+    #[test]
+    fn un_prix_saisi_ollama_et_un_modele_inconnu_ne_sont_pas_dates() {
+        let saisi = Some(Tarif {
+            entree_usd_mtok: 1.0,
+            sortie_usd_mtok: 2.0,
+        });
+        let r = reglages(Famille::CompatibleOpenai, "mon-modele", saisi);
+        let v = vue_tarif(&r, "mon-modele", "2026-10-13");
+        assert_eq!(v["origine"], "saisi");
+        assert_eq!(v["releve_le"], Value::Null);
+        assert_eq!(v["sortie_usd_mtok"], 2.0);
+
+        let o = reglages(Famille::Ollama, "llama", None);
+        assert_eq!(vue_tarif(&o, "llama", "2026-10-13")["origine"], "local");
+
+        let inconnu = reglages(Famille::Anthropic, "claude-inconnu", None);
+        assert_eq!(
+            vue_tarif(&inconnu, "claude-inconnu", "2026-10-13")["origine"],
+            Value::Null
+        );
+    }
 }

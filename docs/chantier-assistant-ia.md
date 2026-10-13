@@ -1,4 +1,4 @@
-# Chantier « Assistant IA » — étapes 1 et 2
+# Chantier « Assistant IA » — étapes 1, 2 et 3
 
 GO de Bertrand du 12/10/2026. Fonction **gratuite**, pour tout le monde :
 l'utilisateur fournit **sa** clé, les appels partent de **son** serveur vers
@@ -229,12 +229,14 @@ modifié depuis n'est pas écrasé (`modifie_depuis`). `GET /albums/{id}/histori
 
 **Étape 2** — livrée, voir § 10.
 
-**Étape 3**
+**Étape 3** (« continue », Bertrand, 13/10/2026)
 - recherche conversationnelle dans la bibliothèque, radio « dans l'esprit
-  de… » ;
-- suivi de consommation détaillé par usage, alerte à 80 % du plafond ;
+  de… » — **en attente d'une décision de produit**, voir § 11.3 ;
+- suivi de consommation détaillé par usage, alerte à 80 % du plafond —
+  livré, § 11.1 ;
 - relevé des tarifs automatisé ou daté à l'écran, avant le changement de prix
-  Gemini du 01/01/2027.
+  Gemini du 01/01/2027 — **daté à l'écran**, livré, § 11.2 ; le relevé
+  automatisé reste ouvert (§ 11.3).
 
 ## 10. Étape 2 (GO de Bertrand du 12/10/2026)
 
@@ -359,3 +361,61 @@ n'affiche le formulaire qu'à un administrateur.
 `tune-server/tests/assistant_ia_ancien_assistant_etape2.rs` (la route montée
 `/ai/query`, plafond à zéro).
 
+## 11. Étape 3
+
+### 11.1 Consommation par usage, alerte à 80 %
+
+La consommation du mois (`assistant_ia_consommation`) porte, en plus des
+totaux, `par_usage` : les mêmes compteurs (coût, appels, jetons, réponses du
+cache) pour chaque usage compté — `playlist`, `album` (l'album seul et le
+lot), `pistes`, `test`, `requete` (l'ancien `/ai/query`), `traduction`. Une
+consommation rangée avant l'étape 3 se relit (champ absent : vide). La
+somme des usages refait le total.
+
+`couts::alerte` : la dépense a atteint 80 % du plafond (un plafond nul est
+atteint d'emblée). L'état du plafond (`depense_eur`, `plafond_eur`, `part`,
+`seuil_alerte`, `alerte`, `atteint`) est joint, sous `plafond`, à chaque
+réponse d'un usage (`/tester`, `/playlist`, `/albums/{id}/suggestions`,
+`/albums/{id}/pistes/suggestions`, `/lot/suggestions`) ; `GET /reglages` le
+donne dans `consommation` (`alerte`, `part_du_plafond`, `seuil_alerte`,
+`par_usage`). L'appel qui franchit le seuil le journalise une fois
+(`assistant_ia_alerte_80_pour_cent`, montants seulement). L'alerte ne bloque
+rien : seul le plafond refuse.
+
+Écran : un encart sous chaque usage (playlist par phrase, suggestions sur un
+album, sur ses pistes, sur un lot) et dans Réglages ▸ Assistant IA tant que
+le plafond n'est pas atteint ; le détail par usage y est replié.
+
+### 11.2 Tarifs datés
+
+`couts::Releve` date chaque table : `RELEVE_ANTHROPIC` (12/10/2026) et
+`RELEVE_GEMINI` (12/10/2026, source <https://ai.google.dev/gemini-api/docs/pricing>,
+à relever avant le 01/01/2027). `GET /reglages` rend `tarif` : `origine`
+(`table`, `saisi`, `local`, ou `null` = tarif inconnu), les deux prix,
+`releve_le`, `source_url`, `a_relever_avant`, et `a_relever` (la date
+annoncée est passée). L'écran affiche le tarif appliqué et sa date, annonce
+le changement à venir, et, la date passée, prévient que la dépense comptée
+peut être sous-estimée et invite à saisir les nouveaux prix (qui priment sur
+la table) ou à mettre Tune à jour.
+
+### 11.3 Laissé à Bertrand
+
+- **Recherche conversationnelle, radio « dans l'esprit de… »** : le
+  document n'en fixe ni la forme ni le périmètre. À trancher : un nouvel
+  écran de dialogue ou l'extension de l'ancien `/ai/query` (déjà un dialogue
+  à outils, Anthropic seulement) ; la graine d'une radio (artiste, album,
+  piste, phrase) ; bibliothèque seule ou services de streaming aussi ; lien
+  avec la lecture automatique existante ; ce que le modèle reçoit de la
+  bibliothèque (taille de la consigne, donc coût).
+- **Après le 01/01/2027** : la table Gemini du binaire est fausse. Continuer
+  à compter à l'ancien tarif en prévenant (ce qui est fait), ou refuser
+  `tarif_inconnu` tant que l'utilisateur n'a pas saisi les nouveaux prix ?
+- **Relevé automatisé des tarifs** : aucun fournisseur n'expose ses prix par
+  une API ; un relevé automatique voudrait dire lire leur page HTML, ou un
+  fichier publié par Tune. Non fait.
+
+### 11.4 Essais
+
+`plugins/tune-assistant-ia/tests/etape3.rs` (faux fournisseur) et les essais
+de module de `couts` et `reglages` ; côté web,
+`src/lib/__tests__/assistantIaEtape3.test.ts`.

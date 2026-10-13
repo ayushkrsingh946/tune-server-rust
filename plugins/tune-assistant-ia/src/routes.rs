@@ -163,6 +163,7 @@ async fn tester(State(etat): State<Etat>) -> Response {
         Ok(res) => Json(json!({
             "ok": true,
             "cout_eur": couts::micro_en_euros(res.cout_micro_eur),
+            "plafond": appel::etat_plafond(&etat.backend),
         }))
         .into_response(),
         Err(e) => appel::reponse_erreur(&e),
@@ -250,6 +251,7 @@ async fn playlist(
             "proposition": p,
             "depuis_cache": res.depuis_cache,
             "cout_eur": couts::micro_en_euros(res.cout_micro_eur),
+            "plafond": appel::etat_plafond(&etat.backend),
         }))
         .into_response(),
         Err(code) => erreur(
@@ -370,7 +372,10 @@ async fn suggerer(
     let d = corps.map(|Json(d)| d).unwrap_or_default();
     let langue = langue(d.langue.as_deref(), &entetes);
     match suggestions_d_un_album(&etat, id, &langue).await {
-        Ok(a) => Json(a.corps).into_response(),
+        Ok(mut a) => {
+            a.corps["plafond"] = appel::etat_plafond(&etat.backend);
+            Json(a.corps).into_response()
+        }
         Err(e) => e.reponse(),
     }
 }
@@ -484,6 +489,7 @@ async fn suggerer_pistes(
             "ecartees": ecartees,
             "depuis_cache": res.depuis_cache,
             "cout_eur": couts::micro_en_euros(res.cout_micro_eur),
+            "plafond": appel::etat_plafond(&etat.backend),
         }))
         .into_response(),
         Err(code) => Echec::ReponseInvalide(code).reponse(),
@@ -613,6 +619,7 @@ async fn lot_suggestions(
         "arret": arret,
         "non_traites": non_traites,
         "cout_eur": couts::micro_en_euros(total),
+        "plafond": appel::etat_plafond(&etat.backend),
     }))
     .into_response()
 }
