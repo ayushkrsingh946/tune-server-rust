@@ -2084,6 +2084,9 @@ async fn spawn_library_scan_avec_lecteur(
             );
         }
         let pre_skipped = (total_discovered - files_to_scan.len()) as i64;
+        // #6167 — pourcentage par emplacement : les inchangés sont faits, les
+        // lots à venir sont comptés par racine (même découpe que le parcours).
+        portee.amorcer(&files_to_scan, tune_core::scanner::walker::SCAN_BATCH_SIZE);
 
         tracing::info!(
             total = total_discovered,
@@ -2214,6 +2217,8 @@ async fn spawn_library_scan_avec_lecteur(
                     // refusé. Un scan arrêté n'est pas un scan qui perd.
                     return tune_core::scanner::walker::EcrituresDuLot::SANS_PERTE;
                 }
+                // #6167 — les fichiers du lot comptent pour leur emplacement.
+                portee.avancer_le_lot(batch_idx);
                 // Collect tracks to batch-insert and batch-update
                 let mut to_insert: Vec<tune_core::db::models::Track> =
                     Vec::with_capacity(batch.len());
@@ -6052,13 +6057,28 @@ mod progression_scan_manuel_tests_6019;
 /// - `locations_total` : le nombre d'emplacements couverts ;
 /// - quand le dossier en cours est connu, `location_index` (rang 1-based dans
 ///   l'ordre des réglages), `location` (la racine) et, une fois le parcours
-///   fini, `location_files` (fichiers repérés sous cette racine).
+///   fini, `location_files` (fichiers repérés sous cette racine) et, après le
+///   pré-filtre, `location_scanned` (fichiers traités, inchangés compris) ;
+/// - pour un scan de plusieurs emplacements, une fois le parcours fini,
+///   `locations` : `[{index, location, files, scanned?}]`, chaque emplacement
+///   avec ses fichiers repérés et traités — le pourcentage de chacun, en plus
+///   du total.
 ///
 /// Champs AJOUTÉS : un client qui les ignore lit les mêmes annonces qu'avant.
 pub(crate) struct PorteeDuScan {
     bibliotheque: bool,
     racines: Vec<String>,
     fichiers_par_racine: Vec<Option<usize>>,
+    /// Fichiers TRAITÉS par racine (inchangés compris), une fois
+    /// [`amorcer`](Self::amorcer) appelé : la base du pourcentage par
+    /// emplacement (décision de Bertrand du 13/10).
+    faits_par_racine: Vec<std::sync::atomic::AtomicUsize>,
+    amorce: std::sync::atomic::AtomicBool,
+    /// Pour chaque lot de `scan_files_batched_avec_arret`, ses fichiers par
+    /// racine. Les lots sont recalculés par la même fonction
+    /// (`lots_alignes_sur_les_dossiers`) : un fichier illisible, absent du lot
+    /// rendu, compte quand même comme traité.
+    lots_par_racine: std::sync::OnceLock<Vec<Vec<usize>>>,
 }
 
 impl PorteeDuScan {
@@ -6068,7 +6088,67 @@ impl PorteeDuScan {
             bibliotheque,
             racines,
             fichiers_par_racine: vec![None; n],
+            faits_par_racine: (0..n)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect(),
+            amorce: std::sync::atomic::AtomicBool::new(false),
+            lots_par_racine: std::sync::OnceLock::new(),
         }
+    }
+
+    fn compter_par_racine<'a>(
+        &self,
+        chemins: impl Iterator<Item = &'a std::path::Path>,
+    ) -> Vec<usize> {
+        let mut comptes = vec![0usize; self.racines.len()];
+        for f in chemins {
+            if let Some(i) = self.rang(&f.to_string_lossy()) {
+                comptes[i] += 1;
+            }
+        }
+        comptes
+    }
+
+    /// Après le pré-filtre : les fichiers inchangés de chaque racine sont déjà
+    /// « faits » ; les lots à venir sont comptés par racine.
+    pub(crate) fn amorcer(&self, a_scanner: &[std::path::PathBuf], taille_de_lot: usize) {
+        use std::sync::atomic::Ordering;
+        let a_lire = self.compter_par_racine(a_scanner.iter().map(|p| p.as_path()));
+        for (i, fait) in self.faits_par_racine.iter().enumerate() {
+            let vus = self.fichiers_par_racine[i].unwrap_or(0);
+            fait.store(vus.saturating_sub(a_lire[i]), Ordering::Relaxed);
+        }
+        let lots =
+            tune_core::scanner::walker::lots_alignes_sur_les_dossiers(a_scanner, taille_de_lot)
+                .into_iter()
+                .map(|lot| self.compter_par_racine(lot.into_iter()))
+                .collect();
+        let _ = self.lots_par_racine.set(lots);
+        self.amorce.store(true, Ordering::Relaxed);
+    }
+
+    /// Le lot `rang_du_lot` est traité : ses fichiers comptent pour leur racine.
+    pub(crate) fn avancer_le_lot(&self, rang_du_lot: usize) {
+        use std::sync::atomic::Ordering;
+        if let Some(lot) = self.lots_par_racine.get().and_then(|l| l.get(rang_du_lot)) {
+            for (i, n) in lot.iter().enumerate() {
+                self.faits_par_racine[i].fetch_add(*n, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Fichiers traités sous la racine `i`, bornés à ses fichiers repérés ;
+    /// `None` avant [`amorcer`](Self::amorcer).
+    fn faits(&self, i: usize) -> Option<usize> {
+        use std::sync::atomic::Ordering;
+        if !self.amorce.load(Ordering::Relaxed) {
+            return None;
+        }
+        let fait = self.faits_par_racine[i].load(Ordering::Relaxed);
+        Some(match self.fichiers_par_racine[i] {
+            Some(n) => fait.min(n),
+            None => fait,
+        })
     }
 
     /// Le rang (0-based) de la racine qui contient `chemin` : la plus longue,
@@ -6084,12 +6164,7 @@ impl PorteeDuScan {
 
     /// Compte, une fois le parcours fini, les fichiers repérés par racine.
     pub(crate) fn compter(&mut self, fichiers: &[std::path::PathBuf]) {
-        let mut comptes = vec![0usize; self.racines.len()];
-        for f in fichiers {
-            if let Some(i) = self.rang(&f.to_string_lossy()) {
-                comptes[i] += 1;
-            }
-        }
+        let comptes = self.compter_par_racine(fichiers.iter().map(|p| p.as_path()));
         self.fichiers_par_racine = comptes.into_iter().map(Some).collect();
     }
 
@@ -6112,6 +6187,31 @@ impl PorteeDuScan {
                 if let Some(n) = self.fichiers_par_racine[i] {
                     o.insert("location_files".into(), json!(n));
                 }
+                if let Some(f) = self.faits(i) {
+                    o.insert("location_scanned".into(), json!(f));
+                }
+            }
+            // Chaque emplacement, une fois le parcours fini : ses fichiers et,
+            // après le pré-filtre, ceux qui sont traités. Le pourcentage de
+            // chacun se lit `scanned / files`, à côté du total.
+            if self.racines.len() > 1 && self.fichiers_par_racine.iter().all(Option::is_some) {
+                let emplacements: Vec<Value> = self
+                    .racines
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let mut e = json!({
+                            "index": i + 1,
+                            "location": r,
+                            "files": self.fichiers_par_racine[i].unwrap_or(0),
+                        });
+                        if let Some(f) = self.faits(i) {
+                            e["scanned"] = json!(f);
+                        }
+                        e
+                    })
+                    .collect();
+                o.insert("locations".into(), Value::Array(emplacements));
             }
         }
         annonce

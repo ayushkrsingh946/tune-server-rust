@@ -53,6 +53,55 @@ fn l_annonce_porte_la_portee_et_l_emplacement_en_cours() {
     assert_eq!(c["location_index"], 1);
 }
 
+/// Décision du 13/10 : un pourcentage PAR emplacement. Les inchangés sont
+/// faits dès le pré-filtre ; chaque lot compte pour la racine de ses fichiers.
+#[test]
+fn chaque_emplacement_a_ses_fichiers_traites() {
+    let mut p = PorteeDuScan::new(true, vec!["/m/1".into(), "/m/2".into()]);
+    let tous: Vec<std::path::PathBuf> = vec![
+        "/m/1/a/1.flac".into(),
+        "/m/1/a/2.flac".into(),
+        "/m/2/x/3.flac".into(),
+        "/m/2/x/4.flac".into(),
+        "/m/2/y/5.flac".into(),
+    ];
+    p.compter(&tous);
+    // Avant le pré-filtre : les fichiers de chacun, pas encore de « traités ».
+    let a = p.avec(json!({}), Some("/m/2/x"));
+    assert_eq!(a["locations"][0]["files"], 2);
+    assert_eq!(a["locations"][1]["files"], 3);
+    assert!(a["locations"][1].get("scanned").is_none());
+    assert!(a.get("location_scanned").is_none());
+
+    // /m/1/a/2.flac est inchangé : il est fait d'emblée. Lots de 2 alignés
+    // sur les dossiers : [/m/1/a], [/m/2/x ×2], [/m/2/y].
+    let a_scanner: Vec<std::path::PathBuf> = tous
+        .iter()
+        .filter(|f| !f.ends_with("2.flac"))
+        .cloned()
+        .collect();
+    p.amorcer(&a_scanner, 2);
+    let b = p.avec(json!({}), Some("/m/1/a"));
+    assert_eq!(b["locations"][0]["scanned"], 1);
+    assert_eq!(b["locations"][1]["scanned"], 0);
+    assert_eq!(b["location_scanned"], 1);
+
+    p.avancer_le_lot(0);
+    p.avancer_le_lot(1);
+    let c = p.avec(json!({}), Some("/m/2/x"));
+    assert_eq!(c["locations"][0]["scanned"], 2, "/m/1 est fini : 2/2");
+    assert_eq!(c["locations"][1]["scanned"], 2, "/m/2 : 2/3");
+    assert_eq!(c["location_scanned"], 2);
+    p.avancer_le_lot(2);
+    let d = p.avec(json!({}), Some("/m/2/y"));
+    assert_eq!(d["locations"][1]["scanned"], 3, "/m/2 est fini : 3/3");
+
+    // Un seul emplacement : le total suffit, pas de liste.
+    let mut seul = PorteeDuScan::new(true, vec!["/m/1".into()]);
+    seul.compter(&tous);
+    assert!(seul.avec(json!({}), None).get("locations").is_none());
+}
+
 fn wav(i: u8) -> Vec<u8> {
     let data = vec![i; 2048];
     let mut wav = b"RIFF".to_vec();
@@ -159,5 +208,15 @@ async fn un_scan_de_deux_emplacements_dit_sa_portee_et_l_emplacement_en_cours_61
             && d["location"] == tune_core::scanner::walker::normalize_path(&deux_txt).as_str()
             && d["location_files"] == 3),
         "#6167 : le second emplacement doit être nommé, rang et fichiers compris : {progres:?}"
+    );
+    // Décision du 13/10 : le pourcentage de CHAQUE emplacement. Une annonce
+    // du lot dit 1/1 pour le premier et 3/3 pour le second.
+    assert!(
+        avancement.iter().any(|d| d["phase"] == "files"
+            && d["locations"][0]["files"] == 1
+            && d["locations"][0]["scanned"] == 1
+            && d["locations"][1]["files"] == 3
+            && d["locations"][1]["scanned"] == 3),
+        "#6167 : chaque emplacement doit dire ses fichiers traités : {progres:?}"
     );
 }
