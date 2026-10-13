@@ -103,17 +103,64 @@ livre pas les mots de passe. Au démarrage, `restore_tokens` les ouvre et
 - tests : domaine non autorisé refusé, identifiants chiffrés, de bout en bout
   par les routes `/streaming/…`.
 
-## Étape suivante
+## Étape 2 (livrée)
 
-1. Écran web : champs de connexion lus du manifeste (route
-   `GET /plugins/sources`), carte du service dans Réglages › Services.
-2. Couverture du trait : artistes, playlists, favoris, découverte, pagination.
-3. Lecture réelle : vérifier le chemin `resolve_stream` pour une source wasm
-   (en-têtes ou cookies exigés par le CDN, URL qui expire), et la qualité
-   annoncée.
-4. Durcissement : quota de requêtes par greffon, délai par appel, journal des
-   domaines contactés visible dans l'écran du greffon, cookies persistés
-   (aujourd'hui en mémoire).
-5. Documentation SDK et modèle de greffon (`cargo tune-plugin new --source`).
-6. MusicMe : décision de Bertrand sur les conditions d'utilisation avant tout
-   connecteur.
+Le guide de l'auteur de greffon est
+[`docs/plugins/wasm-streaming-source.md`](plugins/wasm-streaming-source.md) :
+il tient le tableau complet des exports, des bornes et de la lecture.
+
+1. **Écran** : `GET /api/v1/plugins/sources` rend, pour chaque greffon
+   chargé, la source qu'il fournit (`service`, `display_name`,
+   `login_fields`, `http_allowed_domains`, `registered`) et le journal réseau
+   de chaque greffon `http` (`network`). Le client web en tire le formulaire
+   de connexion de Réglages › Services (les champs du manifeste, dans leur
+   ordre) et le journal de la carte du greffon dans Extensions. Rien d'autre
+   du manifeste ne sort, et jamais un identifiant.
+2. **Couverture du trait** : exports FACULTATIFS `search_page` (pagination,
+   `totals`, `has_more`), `get_artist`, `get_artist_albums` (avec `offset`),
+   `get_artist_top_tracks`, `get_playlist`, `get_playlist_tracks`,
+   `get_user_albums|artists|playlists|tracks`, `add_favorite` +
+   `remove_favorite` (le cœur ne se coche que si LES DEUX existent),
+   `get_new_releases`, `get_featured`, `get_genres`, `get_genre_albums`. Les
+   exports présents sont relevés à l'inscription ; un absent rend le défaut du
+   trait. Sans `get_album_tracks` (ou `get_playlist_tracks`), les pistes sont
+   les `tracks` de `get_album` (ou `get_playlist`).
+3. **Lecture réelle** : l'adresse de `get_track_url` doit être dans la liste
+   de domaines ; l'hôte y ajoute les cookies qu'il tient pour l'hôte du CDN
+   (le téléchargeur les rejoue, `StreamUrl::headers`), et la route
+   `/streaming/{service}/tracks/{id}/url` les retire de ce qu'elle rend au
+   client (`Cookie`, `Authorization`). Une erreur du greffon portant
+   `"status": 401|403` devient `HTTP 401 : …` : c'est le motif que la lecture,
+   le préchargement et la route reconnaissent pour appeler
+   `refresh_if_needed`, qui rejoue `login` avec les identifiants scellés.
+   `expires_at` n'est lu par aucun chemin du cœur : l'adresse est demandée au
+   moment de jouer et consommée aussitôt. La qualité annoncée est celle que
+   rend le greffon ; une cadence nulle est complétée par
+   `cadence_du_flux` ou la piste n'est pas préchargée, comme pour tout
+   service.
+4. **Durcissement** (`ReseauDesGreffons`) : budget d'UN appel au greffon —
+   32 requêtes, 45 s (`too_many_requests`, `call_timeout`), ouvert après la
+   prise du verrou du greffon, pour ses fonctions exportées comme pour ses
+   routes ; quota de 240 requêtes par minute et par greffon
+   (`rate_limited`) ; chaque refus rend `{error, detail}` sans réseau. Le
+   journal compte, par hôte, requêtes, refus (du runtime — nouvelle méthode
+   `HostContext::http_refused` — comme de l'hôte), dernier statut, dernière
+   erreur ; il retient 64 hôtes, les suivants sous `(autres)`. Les cookies
+   sont persistés dans `settings` (`plugin_cookies_{greffon}`), scellés par
+   le coffre (service `#cookies`, qui ne s'ouvre pas comme un identifiant),
+   relus au chargement ; un scellé illisible est effacé.
+5. **SDK** : `cargo tune-plugin new <id> --source --output <dir>` engendre le
+   greffon d'exemple sous un autre identifiant (source incluse depuis
+   `tests/fixtures/plugins/source-exemple/`, l'unique exemplaire), sans test
+   d'hôte dans sa liste de domaines.
+
+## Reste
+
+- MusicMe, ou tout connecteur vers un vrai service : décision de Bertrand
+  sur les conditions d'utilisation avant tout connecteur. Le fil 2238 attend
+  la réponse (`tune-parole`).
+- Les valeurs des bornes (32 requêtes / 45 s par appel, 240 par minute) sont
+  des choix techniques, à revoir sur un vrai connecteur.
+- Les cookies persistés n'ont pas d'expiration (`Expires`/`Max-Age` autre que
+  0 ne sont pas lus) : une session que le service a close se renouvelle par
+  le 401 et `refresh_if_needed`.

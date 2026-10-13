@@ -79,7 +79,30 @@ def main():
             run(binary, "check", project, expected=1)
         run(binary, "new", "../escape", "--template", "dsp", "--sdk-path", sdk, "--output", root / "escape", expected=1)
         assert not (root / "escape").exists()
-    print("External DSP and batch scaffolding verified; native exports, WAV dev capture and packaging verified; hardware and production UI acceptance are separate.")
+
+        # #6197 — the WASM streaming-source template: its own workspace, no
+        # SDK nor server crate, a manifest whose service is the plugin id.
+        source = root / "external source plugin"
+        run(binary, "new", "ma-source", "--source", "--output", source)
+        manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["id"] == "ma-source" and manifest["entry_point"] == "main.wasm"
+        assert manifest["streaming_source"]["name"] == "ma-source"
+        assert set(manifest["permissions"]) == {"http", "streaming_source"}
+        assert manifest["http_allowed_domains"] == ["api.exemple.invalid"], "no test host in a generated plugin"
+        assert [f["key"] for f in manifest["streaming_source"]["login_fields"]][:2] == ["email", "password"]
+        lib = (source / "src/lib.rs").read_text(encoding="utf-8")
+        for export in ["login", "search", "get_album", "get_track_url", "search_page", "add_favorite"]:
+            assert f"pub extern \"C\" fn {export}(" in lib, export
+        metadata = json.loads(run("cargo", "metadata", "--manifest-path", source / "Cargo.toml", "--no-deps", "--format-version", "1", quiet=True))
+        assert Path(metadata["workspace_root"]).resolve() == source.resolve(), "generated source plugin must own its workspace"
+        deps = {d["name"] for package in metadata["packages"] for d in package["dependencies"]}
+        assert deps == {"serde_json"}, deps
+        before = (source / "src/lib.rs").read_bytes()
+        run(binary, "new", "ma-source", "--source", "--output", source, expected=1)
+        assert (source / "src/lib.rs").read_bytes() == before, "scaffolding must not overwrite a project"
+        run(binary, "new", "Mauvais_Id", "--source", "--output", root / "bad-source", expected=1)
+        assert not (root / "bad-source").exists()
+    print("External DSP and batch scaffolding verified; native exports, WAV dev capture and packaging verified; WASM streaming-source scaffolding verified; hardware and production UI acceptance are separate.")
 
 
 if __name__ == "__main__":

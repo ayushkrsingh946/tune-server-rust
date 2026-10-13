@@ -8,7 +8,14 @@
 //!   greffon ne voit jamais le cookie de session que le service pose ;
 //! - les fonctions exportées `login`, `search`, `get_album`,
 //!   `get_album_tracks`, `get_track`, `get_track_url`, `logout`, que
-//!   l'adaptateur `WasmStreamingService` de l'hôte appelle.
+//!   l'adaptateur `WasmStreamingService` de l'hôte appelle — et, depuis
+//!   l'étape 2, les FACULTATIVES : `search_page` (pagination), artistes,
+//!   playlists, favoris (lecture et écriture), nouveautés et sélections.
+//!
+//! Une session refusée par le service (401/403) est rendue avec son statut
+//! (`{"error", "status": 401}`) : l'hôte rejoue alors `login` avec les
+//! identifiants qu'il a scellés, et redemande. L'adresse de lecture est sur
+//! un « CDN » qui exige le cookie de session : l'hôte l'y ajoute lui-même.
 //!
 //! Le « service » est un serveur HTTP de test, qui parle son propre dialecte
 //! (`resultats`, `titre`, `artiste`…) : le travail du greffon est de le
@@ -78,11 +85,34 @@ fn rendre(v: &Value) -> u64 {
     (ptr << 32) | len
 }
 
-fn exporter(ptr: u32, len: u32, f: impl FnOnce(Value) -> Result<Value, String>) -> u64 {
+/// Une erreur rendue à l'hôte : un message, et le statut HTTP du service
+/// quand c'est lui qui a refusé. `401`/`403` disent « session expirée » :
+/// l'hôte se reconnecte et redemande.
+struct Erreur {
+    message: String,
+    status: Option<u64>,
+}
+
+impl From<String> for Erreur {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            status: None,
+        }
+    }
+}
+
+impl From<&str> for Erreur {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+fn exporter(ptr: u32, len: u32, f: impl FnOnce(Value) -> Result<Value, Erreur>) -> u64 {
     let entree = lire(ptr, len);
     match f(entree) {
         Ok(v) => rendre(&v),
-        Err(e) => rendre(&json!({ "error": e })),
+        Err(e) => rendre(&json!({ "error": e.message, "status": e.status })),
     }
 }
 
@@ -108,7 +138,7 @@ fn http(requete: &Value) -> Value {
 }
 
 /// GET ou POST JSON, et le corps rendu analysé — ou une erreur lisible.
-fn appeler(methode: &str, url: &str, corps: Option<&Value>) -> Result<Value, String> {
+fn appeler(methode: &str, url: &str, corps: Option<&Value>) -> Result<Value, Erreur> {
     let mut requete =
         json!({ "method": methode, "url": url, "headers": { "accept": "application/json" } });
     if let Some(c) = corps {
@@ -117,26 +147,32 @@ fn appeler(methode: &str, url: &str, corps: Option<&Value>) -> Result<Value, Str
     }
     let reponse = http(&requete);
     if let Some(e) = reponse.get("error").and_then(Value::as_str) {
-        return Err(format!("{e}: {}", reponse["detail"].as_str().unwrap_or("")));
+        return Err(format!("{e}: {}", reponse["detail"].as_str().unwrap_or("")).into());
     }
     let statut = reponse["status"].as_u64().unwrap_or(0);
     if statut == 401 || statut == 403 {
-        return Err("session refusée par le service".to_string());
+        return Err(Erreur {
+            message: "session refusée par le service".to_string(),
+            status: Some(statut),
+        });
     }
     if !(200..300).contains(&statut) {
-        return Err(format!("le service a répondu {statut}"));
+        return Err(format!("le service a répondu {statut}").into());
+    }
+    if reponse["body"].as_str().is_none_or(str::is_empty) {
+        return Ok(Value::Null);
     }
     serde_json::from_str(reponse["body"].as_str().unwrap_or("null"))
-        .map_err(|e| format!("réponse illisible : {e}"))
+        .map_err(|e| format!("réponse illisible : {e}").into())
 }
 
-fn base() -> Result<String, String> {
+fn base() -> Result<String, Erreur> {
     SESSION
         .lock()
-        .map_err(|_| "session indisponible".to_string())?
+        .map_err(|_| Erreur::from("session indisponible"))?
         .as_ref()
         .map(|s| s.base.clone())
-        .ok_or_else(|| "non connecté".to_string())
+        .ok_or_else(|| "non connecté".into())
 }
 
 fn encoder(s: &str) -> String {
@@ -192,8 +228,36 @@ fn pistes(a: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn fiche_album(id: &str) -> Result<Value, String> {
+fn fiche_album(id: &str) -> Result<Value, Erreur> {
     appeler("GET", &format!("{}/albums/{}", base()?, encoder(id)), None)
+}
+
+fn artiste(a: &Value) -> Value {
+    json!({ "id": a["ref"], "name": a["nom"], "image_path": a["photo"] })
+}
+
+fn playlist(l: &Value) -> Value {
+    json!({
+        "id": l["ref"],
+        "name": l["nom"],
+        "description": l["texte"],
+        "cover_path": null,
+        "track_count": l["pistes"].as_array().map_or(0, Vec::len),
+        "owner": l["auteur"],
+    })
+}
+
+/// Une piste d'une playlist : le service la donne avec son album.
+fn piste_de_liste(p: &Value) -> Value {
+    piste(p, &p["album"])
+}
+
+fn liste_de(v: &Value, f: impl Fn(&Value) -> Value) -> Value {
+    json!(v.as_array().map(|a| a.iter().map(f).collect::<Vec<_>>()).unwrap_or_default())
+}
+
+fn id_de(v: &Value) -> String {
+    encoder(v["id"].as_str().unwrap_or(""))
 }
 
 // ── Les fonctions exportées ──────────────────────────────────────────────
@@ -244,15 +308,173 @@ pub extern "C" fn search(ptr: u32, len: u32) -> u64 {
             &format!("{}/catalogue?q={}", base()?, encoder(q)),
             None,
         )?;
-        let albums: Vec<Value> = r["resultats"]
+        Ok(resultats(&r))
+    })
+}
+
+/// Les résultats du catalogue dans la forme du cœur.
+fn resultats(r: &Value) -> Value {
+    let albums: Vec<Value> = r["resultats"]
+        .as_array()
+        .map(|a| a.iter().map(album).collect())
+        .unwrap_or_default();
+    let tracks: Vec<Value> = r["resultats"]
+        .as_array()
+        .map(|a| a.iter().flat_map(pistes).collect())
+        .unwrap_or_default();
+    json!({ "tracks": tracks, "albums": albums, "artists": [], "playlists": [] })
+}
+
+/// Étape 2 — la recherche PAGINÉE : le service compte en albums
+/// (`debut`, `nombre`) et annonce son `total` ; le greffon le dit au cœur
+/// (`totals`, `has_more`).
+#[unsafe(no_mangle)]
+pub extern "C" fn search_page(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |v| {
+        let q = v["query"].as_str().unwrap_or("");
+        let debut = v["offset"].as_u64().unwrap_or(0);
+        let nombre = v["limit"].as_u64().unwrap_or(50);
+        let r = appeler(
+            "GET",
+            &format!(
+                "{}/catalogue?q={}&debut={debut}&nombre={nombre}",
+                base()?,
+                encoder(q)
+            ),
+            None,
+        )?;
+        let total = r["total"].as_u64().unwrap_or(0);
+        let mut page = resultats(&r);
+        let rendus = page["albums"].as_array().map_or(0, Vec::len) as u64;
+        page["totals"] = json!({ "tracks": 0, "albums": total, "artists": 0, "playlists": 0 });
+        page["has_more"] = json!(debut + rendus < total);
+        Ok(page)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_artist(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |v| {
+        let a = appeler("GET", &format!("{}/artistes/{}", base()?, id_de(&v)), None)?;
+        Ok(artiste(&a))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_artist_albums(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |v| {
+        if v["offset"].as_u64().unwrap_or(0) > 0 {
+            return Ok(json!([]));
+        }
+        let a = appeler("GET", &format!("{}/artistes/{}", base()?, id_de(&v)), None)?;
+        Ok(liste_de(&a["albums"], album))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_artist_top_tracks(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |v| {
+        let a = appeler("GET", &format!("{}/artistes/{}", base()?, id_de(&v)), None)?;
+        let toutes: Vec<Value> = a["albums"]
             .as_array()
-            .map(|a| a.iter().map(album).collect())
+            .map(|al| al.iter().flat_map(pistes).collect())
             .unwrap_or_default();
-        let tracks: Vec<Value> = r["resultats"]
-            .as_array()
-            .map(|a| a.iter().flat_map(pistes).collect())
-            .unwrap_or_default();
-        Ok(json!({ "tracks": tracks, "albums": albums, "artists": [], "playlists": [] }))
+        Ok(json!(toutes))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_playlist(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |v| {
+        let l = appeler("GET", &format!("{}/listes/{}", base()?, id_de(&v)), None)?;
+        Ok(playlist(&l))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_playlist_tracks(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |v| {
+        let l = appeler("GET", &format!("{}/listes/{}", base()?, id_de(&v)), None)?;
+        Ok(liste_de(&l["pistes"], piste_de_liste))
+    })
+}
+
+/// Les favoris du compte : `{albums: [...], artistes: [...], listes: [...],
+/// pistes: [...]}` dans le dialecte du service.
+fn favoris() -> Result<Value, Erreur> {
+    appeler("GET", &format!("{}/favoris", base()?), None)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_user_albums(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |_| Ok(liste_de(&favoris()?["albums"], album)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_user_artists(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |_| Ok(liste_de(&favoris()?["artistes"], artiste)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_user_playlists(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |_| Ok(liste_de(&favoris()?["listes"], playlist)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_user_tracks(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |_| {
+        Ok(liste_de(&favoris()?["pistes"], piste_de_liste))
+    })
+}
+
+/// Le type de favori du cœur (`tracks`, `albums`, `artists`, `playlists`,
+/// celui des routes `/streaming/{service}/favorites/{type}/{id}`) dans le
+/// dialecte du service.
+fn type_de_favori(v: &Value) -> Result<&'static str, Erreur> {
+    match v["type"].as_str().unwrap_or("") {
+        "tracks" => Ok("pistes"),
+        "albums" => Ok("albums"),
+        "artists" => Ok("artistes"),
+        "playlists" => Ok("listes"),
+        autre => Err(format!("type de favori inconnu : {autre}").into()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn add_favorite(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |v| {
+        let t = type_de_favori(&v)?;
+        appeler("PUT", &format!("{}/favoris/{t}/{}", base()?, id_de(&v)), None)?;
+        Ok(json!({}))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn remove_favorite(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |v| {
+        let t = type_de_favori(&v)?;
+        appeler(
+            "DELETE",
+            &format!("{}/favoris/{t}/{}", base()?, id_de(&v)),
+            None,
+        )?;
+        Ok(json!({}))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_new_releases(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |_| {
+        let r = appeler("GET", &format!("{}/nouveautes", base()?), None)?;
+        Ok(liste_de(&r, album))
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn get_featured(ptr: u32, len: u32) -> u64 {
+    exporter(ptr, len, |_| {
+        let r = appeler("GET", &format!("{}/selections", base()?), None)?;
+        Ok(liste_de(&r, playlist))
     })
 }
 

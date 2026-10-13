@@ -816,6 +816,12 @@ impl HostContext for AppStateHost {
     fn http_request(&self, plugin_id: &str, request: Value) -> Result<Value, String> {
         block_on(self.reseau.executer(plugin_id, request))
     }
+
+    /// #6197 étape 2 — un refus du runtime (domaine hors liste…) entre au
+    /// journal réseau du greffon, que l'écran montre.
+    fn http_refused(&self, plugin_id: &str, code: &str, detail: &str) {
+        self.reseau.noter_un_refus(plugin_id, detail, code);
+    }
 }
 
 /// A wasm plugin that loaded successfully, plus the manifest the route mount
@@ -834,12 +840,26 @@ pub struct LoadedWasmPlugin {
 /// handler — mirroring the `plugin_info` snapshot pattern.
 pub struct WasmRegistry {
     plugins: HashMap<String, LoadedWasmPlugin>,
+    /// #6197 étape 2 — le réseau des greffons (quota, budget d'appel,
+    /// journal, cookies). `None` quand aucun greffon n'a été chargé.
+    reseau: Option<Arc<crate::sources_wasm::ReseauDesGreffons>>,
 }
 
 impl WasmRegistry {
     /// Look up a loaded plugin by manifest id.
     pub fn get(&self, id: &str) -> Option<&LoadedWasmPlugin> {
         self.plugins.get(id)
+    }
+
+    /// #6197 étape 2 — les greffons chargés, par identifiant.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &LoadedWasmPlugin)> {
+        self.plugins.iter()
+    }
+
+    /// #6197 étape 2 — le réseau des greffons, pour le budget d'un appel de
+    /// route et le journal que montre l'écran.
+    pub fn reseau(&self) -> Option<&Arc<crate::sources_wasm::ReseauDesGreffons>> {
+        self.reseau.as_ref()
     }
 
     /// Number of loaded plugins (diagnostics/tests).
@@ -1075,6 +1095,7 @@ pub async fn load_wasm_plugins(state: &AppState) {
         info!("wasm_plugins_disabled_by_env");
         let _ = state.wasm_plugins.set(WasmRegistry {
             plugins: HashMap::new(),
+            reseau: None,
         });
         return;
     }
@@ -1088,6 +1109,7 @@ pub async fn load_wasm_plugins(state: &AppState) {
             warn!(dir = %dir.display(), error = %e, "wasm_plugins_scan_failed");
             let _ = state.wasm_plugins.set(WasmRegistry {
                 plugins: HashMap::new(),
+                reseau: None,
             });
             return;
         }
@@ -1176,14 +1198,23 @@ pub async fn load_wasm_plugins(state: &AppState) {
                     "wasm_plugin_loaded"
                 );
                 let plugin = Arc::new(tokio::sync::Mutex::new(plugin));
+                // #6197 étape 2 — un greffon `http` retrouve ses cookies,
+                // scellés en base par le coffre (ouvert pour lui, et branché
+                // une fois sur le réseau des greffons).
+                let veut_http = info.manifest.permissions.iter().any(|p| p == "http");
+                if (veut_http || info.manifest.streaming_source.is_some()) && coffre.is_none() {
+                    let c = crate::sources_wasm::coffre_du_serveur(&state.config.db_path);
+                    reseau.brancher_la_persistance(state.backend.clone(), c.clone());
+                    coffre = Some(c);
+                }
+                if veut_http {
+                    reseau.restaurer_les_cookies(&id);
+                }
                 // #6197 — un greffon qui déclare une source s'inscrit comme
                 // service de streaming.
-                if info.manifest.streaming_source.is_some() {
-                    let coffre = coffre
-                        .get_or_insert_with(|| {
-                            crate::sources_wasm::coffre_du_serveur(&state.config.db_path)
-                        })
-                        .clone();
+                if info.manifest.streaming_source.is_some()
+                    && let Some(coffre) = coffre.clone()
+                {
                     match crate::sources_wasm::inscrire_la_source(
                         &state.services,
                         &state.backend,
@@ -1217,7 +1248,10 @@ pub async fn load_wasm_plugins(state: &AppState) {
     crate::boot_status::set_current(None);
 
     info!(count = plugins.len(), "wasm_plugins_ready");
-    let _ = state.wasm_plugins.set(WasmRegistry { plugins });
+    let _ = state.wasm_plugins.set(WasmRegistry {
+        plugins,
+        reseau: Some(reseau),
+    });
 }
 
 /// Does an event-subscription glob `pattern` match the event `name`?

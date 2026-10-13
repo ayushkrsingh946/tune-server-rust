@@ -246,6 +246,18 @@ pub trait HostContext: Send + Sync {
         Err("http: aucun hôte réseau câblé".to_string())
     }
 
+    /// `http` (#6197, étape 2) — le runtime vient de REFUSER une requête de
+    /// `plugin_id` avant tout réseau (domaine hors liste, schéma, identifiants
+    /// dans l'URL). `code` est celui rendu au greffon, `detail` l'hôte refusé
+    /// (ou la raison). L'hôte le note dans le journal réseau du greffon, que
+    /// l'écran montre ; aucune requête n'est faite.
+    ///
+    /// Méthode par défaut — rien — pour les hôtes qui ne tiennent pas de
+    /// journal.
+    fn http_refused(&self, plugin_id: &str, code: &str, detail: &str) {
+        let _ = (plugin_id, code, detail);
+    }
+
     /// L'heure de l'hôte, en millisecondes depuis l'époque Unix (#4718).
     ///
     /// Un greffon `wasm32-unknown-unknown` n'a pas d'horloge : sans elle, un
@@ -1084,10 +1096,13 @@ fn register_host_imports(linker: &mut Linker<StoreData>) -> Result<(), String> {
                     let url = texte(&v, "url");
                     match reseau::verifier_l_adresse(&url, &domaines) {
                         Ok(_) => ctx.http_request(greffon, v),
-                        Err(refus) => Ok(serde_json::json!({
-                            "error": refus.code,
-                            "detail": refus.detail,
-                        })),
+                        Err(refus) => {
+                            ctx.http_refused(greffon, refus.code, &refus.detail);
+                            Ok(serde_json::json!({
+                                "error": refus.code,
+                                "detail": refus.detail,
+                            }))
+                        }
                     }
                 })
             },
@@ -1616,6 +1631,10 @@ mod tests {
         /// méthode, arguments reçus)`. Une capacité refusée doit laisser ce
         /// journal VIDE — c'est ce que prouvent les tests de refus.
         appels_4716: Mutex<Vec<(String, serde_json::Value)>>,
+        /// #6197 — les refus `http` signalés à l'hôte : `(greffon, code,
+        /// détail)`. À part de `appels_4716`, qui doit rester VIDE sur un
+        /// refus : un refus n'est pas un appel.
+        refus_6197: Mutex<Vec<(String, String, String)>>,
     }
 
     impl MockHostContext {
@@ -1813,6 +1832,13 @@ mod tests {
                 "kv_list",
                 serde_json::json!({ "plugin_id": plugin_id, "prefix": prefix }),
             )
+        }
+        fn http_refused(&self, plugin_id: &str, code: &str, detail: &str) {
+            self.refus_6197.lock().unwrap().push((
+                plugin_id.to_string(),
+                code.to_string(),
+                detail.to_string(),
+            ));
         }
         fn http_request(
             &self,
@@ -2749,6 +2775,16 @@ mod tests {
         assert!(
             mock.appels_4716.lock().unwrap().is_empty(),
             "l'hôte ne doit pas avoir été appelé"
+        );
+        // Étape 2 : le refus est SIGNALÉ à l'hôte (journal réseau du
+        // greffon), sous l'identifiant rangé au chargement.
+        assert_eq!(
+            *mock.refus_6197.lock().unwrap(),
+            vec![(
+                "source-exemple".to_string(),
+                "domain_not_allowed".to_string(),
+                "evil.com".to_string()
+            )]
         );
 
         // Le greffon ne peut pas élargir la liste par son JSON d'entrée.
