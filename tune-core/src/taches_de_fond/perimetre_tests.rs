@@ -581,3 +581,164 @@ fn les_genres_ne_touchent_que_le_clap() {
     assert_eq!(clause_hors_perimetre_decodage(&backend), "");
     assert!(!clause_clap(&backend).is_empty());
 }
+
+// ── Chantier périmètre — dossiers et genres de TOUTES les passes ─────────
+
+/// Les quatre compteurs (ReplayGain, plage dynamique, empreintes, CLAP), dans
+/// cet ordre. ReplayGain en mode piste, sans témoin posé : chaque piste
+/// ouvrable est candidate de chacun tant qu'elle est dans le périmètre.
+fn quatre_compteurs(backend: &Arc<dyn DbBackend>) -> (i64, i64, Option<i64>, i64) {
+    (
+        replaygain::compter_les_candidats_replaygain(backend),
+        replaygain::compter_les_candidats_dr(backend),
+        replaygain::compter_les_candidats_a_empreinter(backend),
+        embedding_store::eligible_count(backend),
+    )
+}
+
+/// Fil 2173 : « circonscrire l'analyse à un répertoire ». Un SOUS-DOSSIER
+/// réglé dans `background_analysis_excluded_roots` exclut ce dossier et lui
+/// seul, des quatre passes : ni son voisin de même préfixe, ni le reste de la
+/// racine. Contre-épreuve : la liste levée, les chiffres d'avant reviennent.
+#[test]
+fn un_sous_dossier_exclu_sort_des_quatre_passes_et_lui_seul() {
+    let (db, backend) = base();
+    piste(&db, 1, "Z:\\NAS\\Jazz\\a.flac");
+    piste(&db, 2, "Z:\\NAS\\Podcasts\\b.mp3");
+    piste(&db, 3, "Z:/NAS/Podcasts/c.mp3");
+    piste(&db, 4, "Z:\\NAS\\Podcasts2\\d.flac");
+    let avant = quatre_compteurs(&backend);
+    assert_eq!(avant, (4, 4, Some(4), 4), "sans périmètre");
+
+    regler(
+        &backend,
+        CLE_RACINES_EXCLUES,
+        serde_json::json!(["Z:\\NAS\\Podcasts\\"]),
+    );
+    assert_eq!(
+        quatre_compteurs(&backend),
+        (2, 2, Some(2), 2),
+        "2 et 3 (les deux séparateurs) sortent ; 4, voisin de même préfixe, reste"
+    );
+    assert_eq!(ids(&backend, &clause_decodage(&backend)), vec![1, 4]);
+    assert_eq!(
+        ids(&backend, &clause_hors_perimetre_decodage(&backend)),
+        vec![2, 3]
+    );
+
+    regler(&backend, CLE_RACINES_EXCLUES, serde_json::json!([]));
+    assert_eq!(quatre_compteurs(&backend), avant);
+}
+
+/// Un genre écarté de toutes les passes sort des QUATRE compteurs et des
+/// sélections, qu'il soit dans la colonne ou dans le tableau ; une piste sans
+/// genre reste. Contre-épreuve dans le même test.
+#[test]
+fn un_genre_exclu_sort_des_quatre_passes() {
+    let (db, backend) = base();
+    piste_de_genre(&db, 1, "/m/1.flac", Some("Jazz"), None);
+    piste_de_genre(&db, 2, "/m/2.mp3", Some("podcast"), None);
+    piste_de_genre(&db, 3, "/m/3.mp3", None, Some(r#"["Talk","Podcast"]"#));
+    piste_de_genre(&db, 4, "/m/4.flac", None, None);
+    let avant = quatre_compteurs(&backend);
+    assert_eq!(avant, (4, 4, Some(4), 4));
+    assert_eq!(candidats_clap(&backend), vec![1, 2, 3, 4]);
+
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!(["Podcast"]));
+    assert_eq!(
+        quatre_compteurs(&backend),
+        (2, 2, Some(2), 2),
+        "2 (colonne, casse ignorée) et 3 (tableau) sortent ; 4, sans genre, reste"
+    );
+    assert_eq!(candidats_clap(&backend), vec![1, 4]);
+
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!([]));
+    assert_eq!(quatre_compteurs(&backend), avant);
+    assert_eq!(candidats_clap(&backend), vec![1, 2, 3, 4]);
+}
+
+/// La PARTITION, dossiers et genres mêlés : chaque piste est dans le
+/// périmètre (`clause_decodage`) ou hors de lui
+/// (`clause_hors_perimetre_decodage`) — jamais les deux, jamais aucun. C'est
+/// ce qui garde les jauges de la page Santé justes (fil 2157).
+#[test]
+fn dossiers_et_genres_partitionnent_la_bibliotheque() {
+    let (db, backend) = base();
+    piste_de_genre(&db, 1, "/local/1.flac", Some("Jazz"), None);
+    piste_de_genre(&db, 2, "/local/2.mp3", Some("Podcast"), None);
+    piste_de_genre(&db, 3, "/nas/3.flac", Some("Jazz"), None);
+    piste_de_genre(&db, 4, "/nas/4.mp3", Some("Podcast"), None);
+    piste_de_genre(&db, 5, "/local/5.flac", None, None);
+    regler(&backend, CLE_RACINES_EXCLUES, serde_json::json!(["/nas"]));
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!(["Podcast"]));
+    let dedans = ids(&backend, &clause_decodage(&backend));
+    let dehors = ids(&backend, &clause_hors_perimetre_decodage(&backend));
+    assert_eq!(dedans, vec![1, 5]);
+    assert_eq!(
+        dehors,
+        vec![2, 3, 4],
+        "la 4 est exclue deux fois, comptée une"
+    );
+
+    // Seuls les genres : la clause hors périmètre ne dépend plus des racines.
+    regler(&backend, CLE_RACINES_EXCLUES, serde_json::json!([]));
+    assert_eq!(
+        ids(&backend, &clause_hors_perimetre_decodage(&backend)),
+        vec![2, 4]
+    );
+    // Rien d'exclu : les deux clauses sont vides.
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!([]));
+    assert_eq!(clause_decodage(&backend), "");
+    assert_eq!(clause_hors_perimetre_decodage(&backend), "");
+}
+
+/// Une piste sans plage dynamique d'un genre écarté est comptée à part, comme
+/// celle d'une racine exclue (fil 2157) : la jauge Santé ne l'attend pas.
+#[test]
+fn une_piste_sans_dr_d_un_genre_exclu_est_comptee_a_part() {
+    let (db, backend) = base();
+    piste_de_genre(&db, 1, "/m/1.flac", Some("Jazz"), None);
+    piste_de_genre(&db, 2, "/m/2.mp3", Some("Podcast"), None);
+    assert_eq!(replaygain::compter_les_sans_dr_hors_perimetre(&backend), 0);
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!(["Podcast"]));
+    assert_eq!(replaygain::compter_les_sans_dr_hors_perimetre(&backend), 1);
+    assert_eq!(replaygain::compter_les_candidats_dr(&backend), 1);
+}
+
+/// 🔴 Le cœur, côté genre : une piste d'un genre écarté, sur un fichier
+/// parfaitement décodable, n'est décodée par AUCUNE passe — ReplayGain,
+/// empreintes, plage dynamique, CLAP (sa sélection). Contre-épreuve : la
+/// liste levée, les mêmes passes la décodent.
+#[tokio::test]
+async fn aucune_passe_ne_decode_une_piste_d_un_genre_exclu() {
+    let (db, backend) = base();
+    piste_de_genre(&db, 42, fixture(), Some("Podcast"), None);
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!(["Podcast"]));
+
+    // ReplayGain coupé : les rattrapages travaillent sans témoin (#5246),
+    // c'est le cas où ils décoderaient seuls.
+    assert!(!replaygain::analysis_enabled(&backend));
+    assert_eq!(replaygain::empreinter_un_lot(&backend).await, 0);
+    assert_eq!(replaygain::rattraper_un_lot_de_dr(&backend).await, 0);
+    assert!(candidats_clap(&backend).is_empty());
+    SettingsRepo::with_backend(backend.clone())
+        .set(replaygain::MODE_KEY, "track")
+        .unwrap();
+    assert_eq!(replaygain::analyze_track_batch(&backend).await, 0);
+    let m = TrackMetadataRepo::new(db.clone()).get_all(42).unwrap();
+    assert!(
+        !m.contains_key("rg_analyzed") && !m.contains_key("dr_track"),
+        "écartée : jamais décodée : {m:?}"
+    );
+
+    // Contre-épreuve.
+    regler(&backend, CLE_GENRES_EXCLUS, serde_json::json!([]));
+    assert_eq!(candidats_clap(&backend), vec![42]);
+    assert_eq!(replaygain::analyze_track_batch(&backend).await, 1);
+    assert!(
+        TrackMetadataRepo::new(db.clone())
+            .get_all(42)
+            .unwrap()
+            .contains_key("rg_analyzed")
+    );
+}
