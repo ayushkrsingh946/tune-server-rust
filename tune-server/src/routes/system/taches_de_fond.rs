@@ -86,9 +86,10 @@ pub(crate) fn etat_de(state: &AppState, tache: Tache) -> Etat {
         Tache::Acoustique => false,
         // #6282 — la table des inscriptions est celle du drapeau `paused` des
         // tâches (`background_tasks::tache_suspendable`) : une seule source.
-        Tache::Enrichissement | Tache::ImagesArtistes | Tache::Identification => {
-            inscrite(state, tache)
-        }
+        Tache::Enrichissement
+        | Tache::ImagesArtistes
+        | Tache::Identification
+        | Tache::Integrite => inscrite(state, tache),
         // #6285 — la passe des faux hi-res : un lot décode-t-il.
         Tache::FauxHiRes => tune_core::audio::faux_hires_passe::lot_en_cours(),
     };

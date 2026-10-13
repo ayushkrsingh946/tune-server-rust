@@ -117,6 +117,8 @@ pub enum Tache {
     /// La détection des faux hi-res (#6285) : un extrait de chaque piste sans
     /// perte décodé, sa bande passante et ses bits effectifs mesurés.
     FauxHiRes,
+    /// Audit manuel complet des fichiers de la bibliothèque (#6286).
+    Integrite,
 }
 
 impl Tache {
@@ -132,6 +134,7 @@ impl Tache {
         Tache::ImagesArtistes,
         Tache::Identification,
         Tache::FauxHiRes,
+        Tache::Integrite,
     ];
 
     /// Identifiant STABLE — c'est le mot que lisent l'API et le client web.
@@ -152,6 +155,7 @@ impl Tache {
             Tache::ImagesArtistes => "artist_images",
             Tache::Identification => "identification",
             Tache::FauxHiRes => "hires_check",
+            Tache::Integrite => "integrity",
         }
     }
 
@@ -177,6 +181,7 @@ impl Tache {
             Tache::ImagesArtistes => "tache_de_fond_pause_artist_images",
             Tache::Identification => "tache_de_fond_pause_identification",
             Tache::FauxHiRes => "tache_de_fond_pause_hires_check",
+            Tache::Integrite => "tache_de_fond_pause_integrity",
         }
     }
 
