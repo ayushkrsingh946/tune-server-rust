@@ -446,6 +446,13 @@ pub(super) async fn get_config(
             tune_core::taches_de_fond::perimetre::CLE_RACINES_EXCLUES,
             json!([]),
         ),
+        // Chantier périmètre des analyses — les genres écartés de TOUTES les
+        // passes de fond (ReplayGain, plage dynamique, empreintes, CLAP).
+        // Vide par défaut : aucun écarté.
+        (
+            tune_core::taches_de_fond::perimetre::CLE_GENRES_EXCLUS,
+            json!([]),
+        ),
         // #6198 — les genres de la passe CLAP : retenus (vide : tous) et
         // écartés (vide : aucun). Ils ne touchent que le CLAP.
         (
@@ -1224,26 +1231,32 @@ fn normaliser_politique_de_lecture(
     values.insert(CLE_REGLAGE.to_string(), json!(politique));
     Ok(Some(politique))
 }
-/// #5593 — le périmètre des analyses de fond : un tableau de chaînes (les
-/// racines exclues), rognées, sans vide ni doublon. `null` vaut le tableau
-/// vide. Toute autre forme est REFUSÉE (400) en nommant la clé : une chaîne
-/// seule ou un nombre, gardés tels quels en base, se reliraient « rien
-/// d'exclu » sans un mot.
+/// #5593 — le périmètre des analyses de fond : deux tableaux de chaînes, les
+/// dossiers exclus (racines ou sous-dossiers) et les genres écartés de toutes
+/// les passes, rognées, sans vide ni doublon. `null` vaut le tableau vide.
+/// Toute autre forme est REFUSÉE (400) en nommant la clé : une chaîne seule
+/// ou un nombre, gardés tels quels en base, se reliraient « rien d'exclu »
+/// sans un mot.
 ///
-/// Rend `true` quand la clé est dans la requête : l'appelant
-/// referme alors la campagne ReplayGain en cours, dont le total a été compté
-/// sur l'ANCIEN périmètre.
+/// Rend `true` quand l'une des clés est dans la requête : l'appelant referme
+/// alors la campagne ReplayGain en cours, dont le total a été compté sur
+/// l'ANCIEN périmètre.
 fn normaliser_perimetre_des_analyses(
     values: &mut serde_json::Map<String, Value>,
 ) -> Result<bool, AppError> {
-    use tune_core::taches_de_fond::perimetre::{CLE_RACINES_EXCLUES, normaliser};
-    let Some(brut) = values.get(CLE_RACINES_EXCLUES) else {
-        return Ok(false);
+    use tune_core::taches_de_fond::perimetre::{
+        CLE_GENRES_EXCLUS, CLE_RACINES_EXCLUES, normaliser,
     };
-    let liste = normaliser(brut)
-        .map_err(|e| AppError::bad_request(format!("{CLE_RACINES_EXCLUES} : {e}")))?;
-    values.insert(CLE_RACINES_EXCLUES.to_string(), json!(liste));
-    Ok(true)
+    let mut touche = false;
+    for cle in [CLE_RACINES_EXCLUES, CLE_GENRES_EXCLUS] {
+        let Some(brut) = values.get(cle) else {
+            continue;
+        };
+        let liste = normaliser(brut).map_err(|e| AppError::bad_request(format!("{cle} : {e}")))?;
+        values.insert(cle.to_string(), json!(liste));
+        touche = true;
+    }
+    Ok(touche)
 }
 
 /// #6198 — les genres de la passe CLAP, retenus et écartés : la même forme
@@ -5835,5 +5848,54 @@ mod perimetre_des_analyses_5593_tests {
             Ok(false)
         ));
         assert!(vide.is_empty());
+    }
+
+    /// Chantier périmètre — les genres écartés de TOUTES les passes : publiés
+    /// vides par défaut, normalisés, relus par le moteur, et une forme
+    /// illisible est refusée. Les régler referme la campagne ReplayGain
+    /// (`Ok(true)`) : son total a été compté sur l'ancien périmètre.
+    #[tokio::test]
+    async fn les_genres_exclus_de_toutes_les_passes_sont_publies_puis_relus() {
+        use tune_core::taches_de_fond::perimetre::{CLE_GENRES_EXCLUS, genres_exclus};
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let c = config(&state).await;
+        assert_eq!(c[CLE_GENRES_EXCLUS], json!([]), "{c}");
+
+        let mut v: serde_json::Map<String, Value> = json!({
+            CLE_GENRES_EXCLUS: [" Podcast ", "", "Podcast", "Livre audio"],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(matches!(
+            normaliser_perimetre_des_analyses(&mut v),
+            Ok(true)
+        ));
+        let settings = SettingsRepo::with_backend(state.backend.clone());
+        for (k, val) in v {
+            settings.set(&k, &val.to_string()).unwrap();
+        }
+        let c = config(&state).await;
+        assert_eq!(
+            c[CLE_GENRES_EXCLUS],
+            json!(["Podcast", "Livre audio"]),
+            "{c}"
+        );
+        assert_eq!(
+            genres_exclus(&state.backend),
+            vec!["Podcast", "Livre audio"]
+        );
+
+        for mauvais in [json!("Podcast"), json!(4), json!([1]), json!({})] {
+            let mut v: serde_json::Map<String, Value> =
+                json!({ CLE_GENRES_EXCLUS: mauvais.clone() })
+                    .as_object()
+                    .unwrap()
+                    .clone();
+            assert!(
+                normaliser_perimetre_des_analyses(&mut v).is_err(),
+                "{CLE_GENRES_EXCLUS} = {mauvais}"
+            );
+        }
     }
 }

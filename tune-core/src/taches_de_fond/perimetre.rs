@@ -13,12 +13,33 @@
 //! | `background_analysis_excluded_roots`  | tableau de racines exclues | rien d'exclu  |
 //! | `audio_embedding_genres_included`     | genres retenus pour le CLAP | tous les genres |
 //! | `audio_embedding_genres_excluded`     | genres écartés du CLAP     | aucun écarté  |
+//! | `background_analysis_excluded_genres` | genres écartés de TOUTES les passes | aucun écarté |
 //!
 //! Les deux listes de genres (#6198, Thierry, plus de 550 000 pistes) ne
 //! touchent QUE la passe CLAP : ReplayGain, plage dynamique et empreintes
 //! servent à la lecture de chaque piste, le CLAP seulement à la recherche par
 //! ambiance. Une piste écartée n'est ni sélectionnée ni comptée : la passe ne
 //! l'attend pas et se termine sans elle.
+//!
+//! # Dossiers et genres de toutes les passes (chantier « périmètre des analyses »)
+//!
+//! Décision de Bertrand du 13/10 : l'exclusion par DOSSIER et par GENRE vaut
+//! pour les trois passes de fond (ReplayGain, plage dynamique, CLAP), et
+//! les empreintes, qui décodent avec le ReplayGain, suivent comme pour les
+//! racines. Voir `docs/chantier-perimetre-analyses.md`.
+//!
+//! * Un DOSSIER se règle dans `background_analysis_excluded_roots`, qui n'a
+//!   jamais exigé une racine : toute entrée est un préfixe de chemin, borné
+//!   par le séparateur. `Z:\NAS\Podcasts` exclut ce sous-dossier et lui seul.
+//!   La clé garde son nom : les clients rc3 l'écrivent déjà.
+//! * Un GENRE se règle dans `background_analysis_excluded_genres`, testé
+//!   comme les genres du CLAP (colonne `genre` ou tableau `genres`, casse
+//!   ignorée). Une piste SANS genre n'est jamais écartée par cette liste.
+//!
+//! Une piste d'un genre écarté du ReplayGain empêche le gain d'ALBUM de son
+//! album : il n'est calculé que lorsque TOUTES les pistes ont leur gain de
+//! piste (garde de complétude de `analyze_album_batch`). C'est voulu : une
+//! moyenne partielle n'est pas une moyenne.
 //!
 //! Le réglage vit dans `settings`, à côté de `music_dirs` qui porte les racines
 //! elles-mêmes : aucune table, donc aucune migration. Une racine retirée de
@@ -68,6 +89,10 @@ pub const CLE_GENRES_CLAP_INCLUS: &str = "audio_embedding_genres_included";
 /// Les genres que la passe CLAP n'analyse pas (#6198). Vide : aucun.
 pub const CLE_GENRES_CLAP_EXCLUS: &str = "audio_embedding_genres_excluded";
 
+/// Les genres écartés de TOUTES les passes de fond : ReplayGain, plage
+/// dynamique, empreintes et CLAP. Vide : aucun.
+pub const CLE_GENRES_EXCLUS: &str = "background_analysis_excluded_genres";
+
 /// Borne du nombre d'entrées d'une liste : une clause de mille préfixes
 /// coûterait à chaque `COUNT(*)` de la page État, pour un réglage qui en compte
 /// une poignée.
@@ -93,6 +118,11 @@ fn liste(backend: &Arc<dyn DbBackend>, cle: &str) -> Vec<String> {
 /// Les racines exclues, telles que réglées.
 pub fn racines_exclues(backend: &Arc<dyn DbBackend>) -> Vec<String> {
     liste(backend, CLE_RACINES_EXCLUES)
+}
+
+/// Les genres écartés de toutes les passes, tels que réglés. Vide : aucun.
+pub fn genres_exclus(backend: &Arc<dyn DbBackend>) -> Vec<String> {
+    liste(backend, CLE_GENRES_EXCLUS)
 }
 
 /// Les genres retenus pour le CLAP, tels que réglés. Vide : tous.
@@ -270,25 +300,46 @@ pub fn clause_genres_exclus(genres: &[String]) -> String {
 }
 
 /// La clause du périmètre pour ReplayGain, plage dynamique et empreintes : les
-/// racines exclues, sur `t.file_path`.
+/// dossiers exclus, sur `t.file_path`, puis les genres écartés de toutes les
+/// passes.
 pub fn clause_decodage(backend: &Arc<dyn DbBackend>) -> String {
-    clause_hors_racines("t.file_path", &racines_exclues(backend))
+    let mut c = clause_hors_racines("t.file_path", &racines_exclues(backend));
+    c.push_str(&clause_genres_exclus(&genres_exclus(backend)));
+    c
 }
 
-/// L'inverse de [`clause_decodage`] : `" AND (…)"` sur les pistes des racines
-/// exclues, vide si aucune racine n'est exclue.
+/// L'inverse EXACT de [`clause_decodage`] : `" AND (…)"` sur les pistes d'un
+/// dossier exclu OU d'un genre écarté, sur les mêmes termes. Vide si rien
+/// n'est exclu.
+///
+/// `NOT A AND NOT B` a pour complément `A OR B` : chaque piste est dans l'une
+/// des deux clauses, jamais dans les deux (les termes valent vrai ou faux,
+/// jamais NULL : `COALESCE` partout).
 pub fn clause_hors_perimetre_decodage(backend: &Arc<dyn DbBackend>) -> String {
-    clause_dans_les_racines("t.file_path", &racines_exclues(backend))
+    let termes: Vec<String> = [
+        termes_des_racines("t.file_path", &racines_exclues(backend)),
+        termes_des_genres(&genres_exclus(backend)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|t| format!("({t})"))
+    .collect();
+    if termes.is_empty() {
+        return String::new();
+    }
+    format!(" AND ({})", termes.join(" OR "))
 }
 
-/// La clause du périmètre du CLAP : les racines exclues, sur le chemin
-/// OUVRABLE (le support d'une piste de feuille CUE compte), puis les genres
-/// retenus et les genres écartés (#6198). Une piste doit passer les trois.
+/// La clause du périmètre du CLAP : les dossiers exclus, sur le chemin
+/// OUVRABLE (le support d'une piste de feuille CUE compte), les genres écartés
+/// de toutes les passes, puis les genres retenus et écartés du seul CLAP
+/// (#6198). Une piste doit passer les quatre.
 pub fn clause_clap(backend: &Arc<dyn DbBackend>) -> String {
     let mut c = clause_hors_racines(
         crate::db::track_repo::sql::CHEMIN_OUVRABLE,
         &racines_exclues(backend),
     );
+    c.push_str(&clause_genres_exclus(&genres_exclus(backend)));
     c.push_str(&clause_genres_inclus(&genres_clap_inclus(backend)));
     c.push_str(&clause_genres_exclus(&genres_clap_exclus(backend)));
     c
