@@ -335,6 +335,54 @@ pub(crate) mod tests {
         assert!(essais > 200, "la garde ne joue presque rien : {essais}");
     }
 
+    /// Chantier artistes multiples (docs/chantier-artistes-multiples.md,
+    /// point 7) — la règle « Artiste » trouve aussi les pistes où l'artiste
+    /// est RELIÉ par un crédit découpé (`track_artists`), des deux côtés ; « n'est
+    /// pas » écarte ni l'artiste principal, ni aucun artiste relié.
+    ///
+    /// Ajouts à la bibliothèque : la piste 4 (`Solo`, artiste principal Autre)
+    /// est reliée à Autre et John Coltrane ; une piste 5 sans album, reliée de
+    /// même, vérifie qu'un `NOT IN` ne vide pas la collection sur un NULL.
+    ///
+    /// Contre-épreuve : sans `avec_les_artistes_relies`, « = John Coltrane »
+    /// rend `[3]` (et l'album `[2]`).
+    #[test]
+    fn la_regle_artiste_suit_les_artistes_relies() {
+        let db = bibliotheque();
+        db.execute_batch(
+            "INSERT INTO tracks (id, album_id, artist_id, title, file_path) VALUES \
+               (5,NULL,3,'Sans album','/m/rock/5.flac'); \
+             INSERT INTO track_artists (track_id, artist_id, rang) VALUES \
+               (4,3,0),(4,2,1),(5,3,0),(5,2,1);",
+        )
+        .unwrap();
+        let r = |op: &str, v: Value| regle("artist", op, v);
+        assert_eq!(pistes(&db, &r("=", json!("John Coltrane"))), [3, 4, 5]);
+        assert_eq!(pistes(&db, &r("contains", json!("coltr"))), [3, 4, 5]);
+        assert_eq!(pistes(&db, &r("starts_with", json!("John"))), [3, 4, 5]);
+        assert_eq!(pistes(&db, &r("in", json!(["John Coltrane"]))), [3, 4, 5]);
+        assert_eq!(pistes(&db, &r("!=", json!("John Coltrane"))), [1, 2]);
+        assert_eq!(
+            pistes(&db, &r("=", json!("Autre"))),
+            [4, 5],
+            "le principal compte toujours"
+        );
+        // L'ancienne graphie du champ suit le même chemin.
+        assert_eq!(
+            pistes(&db, &regle("artist_name", "=", json!("John Coltrane"))),
+            [3, 4, 5]
+        );
+        // Collections : l'album passe dès qu'une de ses pistes est reliée.
+        assert_eq!(albums(&db, &r("=", json!("John Coltrane"))), [2, 3]);
+        assert_eq!(albums(&db, &r("contains", json!("coltr"))), [2, 3]);
+        assert_eq!(albums(&db, &r("!=", json!("John Coltrane"))), [1]);
+        // « Artiste de l'album » (#6121) ne change pas.
+        assert_eq!(
+            albums(&db, &regle("album_artist", "=", json!("John Coltrane"))),
+            [2]
+        );
+    }
+
     /// Ce test vérifiait que la « Note » était cassée des DEUX côtés (`no such
     /// column: t.rating`) et devait échouer le jour de sa réparation. Adapté,
     /// et non supprimé (#5547) : la même requête, dans les deux moteurs, doit
@@ -964,6 +1012,11 @@ pub(crate) mod tests {
 /// Seule retouche voulue depuis : la clause « Favori · est · Piste » (#5997,
 /// forum #2127) départage désormais les éditions par l'album et l'ISRC — la
 /// ligne gelée correspondante a été mise à jour avec elle.
+///
+/// Seconde retouche voulue : la règle « Artiste » cherche aussi les artistes
+/// reliés par un crédit découpé (chantier artistes multiples,
+/// `regles_sql::avec_les_artistes_relies`) — les deux lignes « artist » ont
+/// été mises à jour avec elle.
 #[cfg(test)]
 mod anciennes_regles {
     use crate::smart_playlists::build_smart_query_rapport;

@@ -62,7 +62,13 @@ compter pour les deux artistes.
      `TrackImporter::ecrire_les_artistes_de_piste` est appelée après
      `create_batch` / `update_batch`, dans la transaction du lot, et retrouve
      la piste par son chemin.
-   - Une piste éditée à la main (`Tenues`) perd ses liaisons.
+   - Une piste dont l'**artiste** est tenu à la main n'a plus de liaison :
+     elle garde l'artiste qu'on lui a donné. La liaison part au moment de
+     l'édition (`champs_tenus::tenir` avec `Champ::Artiste`, et l'écran
+     « Modifier » de l'album, `edition_album::appliquer`), et le scan ne la
+     repose pas (`Tenues::tient_l_artiste`). Une tenue qui ne touche pas
+     l'artiste (disposition, titre, genre…) laisse la liaison suivre les
+     balises.
    - La purge des artistes orphelins (#5007) tient compte de `track_artists`.
    - La fusion d'artistes (`ArtistRepo::absorber`) reporte les liaisons du
      doublon sur la cible.
@@ -91,12 +97,19 @@ compter pour les deux artistes.
 - La purge des orphelins et la fusion d'artistes.
 - Les tests unitaires de tout ce qui précède.
 
+## Livré dans la deuxième étape
+
+- L'édition manuelle : seule une tenue de l'ARTISTE vide la liaison (point 6).
+- Les règles « Artiste » des playlists et des collections intelligentes
+  (point 7) : `regles_sql::avec_les_artistes_relies`, appelée par
+  `build_smart_query` (niveau piste) et `build_album_query` (niveau album).
+  Positifs (`=`, `contains`, `starts_with`, `ends_with`, `in`) : `ar.name`
+  OU un artiste relié. `!=` : ni l'un ni l'autre. « Vide » / « non vide » :
+  inchangés.
+
 ## Reste à faire
 
-1. **Les règles « Artiste »** des playlists intelligentes
-   (`tune-smart-http/src/regles_sql.rs`, `colonne_piste`) et des collections
-   intelligentes (`smart_collections.rs`, `build_album_query`), selon le
-   point 7.
+1. ~~Les règles « Artiste »~~ : livré (deuxième étape).
 2. **Le surveillant de fichiers** (`auto_scan.rs`,
    `build_track_from_metadata_opts`) : ce chemin, qui traite un fichier à la
    fois, ne remplit pas encore la liaison. Il faut aussi brancher l'import CUE

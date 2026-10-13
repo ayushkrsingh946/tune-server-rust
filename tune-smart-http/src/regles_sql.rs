@@ -310,6 +310,72 @@ pub(crate) fn bornes_de_nombres(valeur: Option<&serde_json::Value>) -> Option<(i
     }
 }
 
+/// Chantier artistes multiples — à quel niveau une règle « Artiste » cherche
+/// les artistes reliés (`track_artists`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Niveau {
+    /// Une playlist : la piste `t`.
+    Piste,
+    /// Une collection : l'album `al`, dès qu'une de ses pistes est reliée.
+    Album,
+}
+
+/// La colonne du nom d'un artiste RELIÉ, dans la sous-requête de
+/// [`avec_les_artistes_relies`].
+pub(crate) const COLONNE_ARTISTE_RELIE: Colonne = texte("ata.name");
+
+/// Chantier artistes multiples (docs/chantier-artistes-multiples.md, point 7)
+/// — la règle « Artiste » tient compte des artistes reliés à la piste par un
+/// crédit découpé (« The Beatles & Genesis » compte pour les deux).
+///
+/// `principal` est la condition d'aujourd'hui, sur `ar.name`. `relie(op)`
+/// traduit la même règle sur [`COLONNE_ARTISTE_RELIE`], avec l'opérateur
+/// donné.
+///
+/// - Opérateurs positifs (`=`, `contains`, `starts_with`, `ends_with`,
+///   `in`) : `ar.name` correspond **ou** l'un des artistes reliés.
+/// - « n'est pas » (`!=`) : ni `ar.name`, ni aucun artiste relié.
+/// - « vide » / « non vide » et le reste : inchangés. Une piste reliée a
+///   toujours un artiste principal.
+///
+/// Même modèle que la règle « crédit » ([`conditions_credit`]). Une piste
+/// sans ligne dans `track_artists` (crédit non découpé) n'est jugée que sur
+/// `ar.name`, comme avant.
+pub(crate) fn avec_les_artistes_relies(
+    niveau: Niveau,
+    op: &str,
+    principal: String,
+    relie: impl Fn(&str) -> Option<String>,
+) -> String {
+    // `t2.album_id IS NOT NULL` : un `NOT IN` sur une liste qui porte un NULL
+    // ne vaut jamais vrai, et viderait la collection.
+    let (cle, sous) = match niveau {
+        Niveau::Piste => (
+            "t.id",
+            "SELECT ta.track_id FROM track_artists ta \
+             JOIN artists ata ON ata.id = ta.artist_id WHERE",
+        ),
+        Niveau::Album => (
+            "al.id",
+            "SELECT t2.album_id FROM tracks t2 \
+             JOIN track_artists ta ON ta.track_id = t2.id \
+             JOIN artists ata ON ata.id = ta.artist_id \
+             WHERE t2.album_id IS NOT NULL AND",
+        ),
+    };
+    match op {
+        "=" | "contains" | "starts_with" | "ends_with" | "in" => match relie(op) {
+            Some(c) => format!("({principal} OR {cle} IN ({sous} {c}))"),
+            None => principal,
+        },
+        "!=" => match relie("=") {
+            Some(c) => format!("({principal} AND {cle} NOT IN ({sous} {c}))"),
+            None => principal,
+        },
+        _ => principal,
+    }
+}
+
 /// Les sous-conditions d'une règle « crédit » (`{"role", "artist_name",
 /// "instrument"}`), sur l'alias `tc` de `track_credits`.
 ///

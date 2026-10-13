@@ -60,6 +60,21 @@ pub fn remplacer_par_chemin(db: &dyn DbBackend, file_path: &str, artistes: &[(i6
         .sum()
 }
 
+/// Retire les artistes reliés à la piste `track_id` : l'utilisateur vient de
+/// lui donner un artiste à la main. Elle garde l'artiste qu'on lui a donné,
+/// le découpage des balises ne la relie plus à personne d'autre (le scan suit
+/// la même règle, `Tenues::tient_l_artiste`).
+///
+/// Rend le nombre de lignes retirées ; une erreur est journalisée.
+pub fn retirer_de_la_piste(db: &dyn DbBackend, track_id: i64) -> usize {
+    let sql = format!("DELETE FROM track_artists WHERE track_id = {}", ph(db, 1));
+    let params: [&dyn ToSqlValue; 1] = [&track_id];
+    db.execute(&sql, &params).unwrap_or_else(|e| {
+        warn!(track_id, error = %e, "track_artists_retrait_echec");
+        0
+    })
+}
+
 /// Les artistes reliés à une piste, dans l'ordre du crédit : `(artist_id,
 /// nom)`. Vide pour une piste à un seul artiste.
 pub fn artistes_de_la_piste(db: &dyn DbBackend, track_id: i64) -> Vec<(i64, String)> {
@@ -143,6 +158,22 @@ mod tests {
             .unwrap()[0]
             .as_i64();
         assert_eq!(reste, Some(0));
+    }
+
+    #[test]
+    fn l_artiste_donne_a_la_main_retire_la_liaison() {
+        let db = base();
+        let beatles = artiste(&db, "The Beatles");
+        let genesis = artiste(&db, "Genesis");
+        let id = piste(&db, "/m/a.flac", beatles);
+        let autre = piste(&db, "/m/b.flac", beatles);
+        remplacer_par_chemin(&db, "/m/a.flac", &[(beatles, 0), (genesis, 1)]);
+        remplacer_par_chemin(&db, "/m/b.flac", &[(beatles, 0), (genesis, 1)]);
+        assert_eq!(retirer_de_la_piste(&db, id), 2);
+        assert!(artistes_de_la_piste(&db, id).is_empty());
+        // L'autre piste garde la sienne.
+        assert_eq!(artistes_de_la_piste(&db, autre).len(), 2);
+        assert_eq!(retirer_de_la_piste(&db, id), 0);
     }
 
     /// Un artiste qui n'est relié QUE par la liaison n'est pas un orphelin :

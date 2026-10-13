@@ -499,6 +499,17 @@ pub(crate) fn build_smart_query_rapport(
             match regles_sql::colonne_piste(field)
                 .and_then(|col| regles_sql::condition_valeur(col, op, value_raw))
             {
+                // Chantier artistes multiples — « Artiste » trouve aussi les
+                // pistes où l'artiste est relié par un crédit découpé.
+                Some(c) if matches!(field, "artist" | "artist_name") => {
+                    regles_sql::avec_les_artistes_relies(regles_sql::Niveau::Piste, op, c, |o| {
+                        regles_sql::condition_valeur(
+                            regles_sql::COLONNE_ARTISTE_RELIE,
+                            o,
+                            value_raw,
+                        )
+                    })
+                }
                 Some(c) => c,
                 None => {
                     tracing::warn!(
