@@ -305,15 +305,22 @@ pub(crate) fn plausible(
     want_title: &str,
     want_artist: &str,
 ) -> bool {
+    // L'égalité ou l'inclusion, dans un sens ou dans l'autre.
+    let concorde = |a: &str, b: &str| a == b || a.contains(b) || b.contains(a);
+    // #4805, introuvables de la mesure A : 36 albums dont le pressage portait
+    // l'artiste à ses accents (`Étienne Daho`, `Céline Dion`, `Téléphone`)
+    // quand la balise les omettait. La recherche les rendait ; ce filtre les
+    // écartait. Les deux formes se comparent donc aussi sans diacritiques.
+    let sans = normalize_sans_diacritiques;
+
     let norm_title = normalize(want_title);
     let norm_rel_title = normalize(rel_title);
     // Idée : MetaRust — les titres se comparent aussi sans espaces, « Mind
     // State » contre « Mindstate ». Égalité seulement : l'inclusion compacte
     // serait trop lâche (« heart of noise » contient « artofnoise »).
-    if norm_rel_title != norm_title
-        && !norm_title.contains(&norm_rel_title)
-        && !norm_rel_title.contains(&norm_title)
+    if !concorde(&norm_rel_title, &norm_title)
         && normalize_compact(rel_title) != normalize_compact(want_title)
+        && !concorde(&sans(rel_title), &sans(want_title))
     {
         return false;
     }
@@ -322,8 +329,8 @@ pub(crate) fn plausible(
     let norm_rel_artist = normalize(rel_artist);
     if !norm_artist.is_empty()
         && !norm_rel_artist.is_empty()
-        && !norm_artist.contains(&norm_rel_artist)
-        && !norm_rel_artist.contains(&norm_artist)
+        && !concorde(&norm_artist, &norm_rel_artist)
+        && !concorde(&sans(want_artist), &sans(rel_artist))
     {
         return false;
     }
@@ -1115,6 +1122,25 @@ pub fn est_un_artiste_fictif(nom: &str) -> bool {
     n.is_empty() || ARTISTES_FICTIFS.contains(&n.as_str())
 }
 
+/// Les articles qu'un classement alphabétique renvoie en fin de nom.
+const ARTICLES_EN_FIN: &[&str] = &[
+    "the", "les", "le", "la", "los", "las", "die", "der", "el", "il",
+];
+
+/// `Brecker Brothers, The` → `The Brecker Brothers` (#4805, introuvables de la
+/// mesure A). La phrase Lucene `artist:"Brecker Brothers, The"` ne retrouve
+/// pas le crédit `The Brecker Brothers` : les mots n'y sont pas dans l'ordre.
+fn article_remis_en_tete(nom: &str) -> String {
+    if let Some((tete, article)) = nom.rsplit_once(',') {
+        let article = article.trim();
+        let tete = tete.trim();
+        if !tete.is_empty() && ARTICLES_EN_FIN.contains(&article.to_lowercase().as_str()) {
+            return format!("{article} {tete}");
+        }
+    }
+    nom.to_string()
+}
+
 /// L'artiste à mettre dans la requête MusicBrainz d'un album (#4805).
 ///
 /// - un alias de compilation (`VA`, `Artistes divers`…) devient `Various
@@ -1130,7 +1156,7 @@ pub fn artiste_de_requete(artiste_album: Option<&str>, artiste_pistes: Option<&s
         if ALIAS_DE_COMPILATION.contains(&normalize(nom).as_str()) {
             "Various Artists".to_string()
         } else {
-            nom.trim().to_string()
+            article_remis_en_tete(nom.trim())
         }
     };
     match (artiste_album, artiste_pistes) {
@@ -2614,6 +2640,63 @@ mod tests {
         // Un vrai nom n'est jamais réécrit, même court.
         assert_eq!(artiste_de_requete(Some("Air"), None), "Air");
         assert_eq!(artiste_de_requete(Some("Divers Gens"), None), "Divers Gens");
+    }
+
+    /// #4805, introuvables de la mesure A : l'article renvoyé en fin de nom
+    /// revient en tête, dans la requête seulement.
+    #[test]
+    fn artiste_de_requete_remet_l_article_en_tete() {
+        for (brut, requete) in [
+            ("Brecker Brothers, The", "The Brecker Brothers"),
+            ("Chemical Brothers, the", "the Chemical Brothers"),
+            ("Ogres de Barbak, Les", "Les Ogres de Barbak"),
+        ] {
+            assert_eq!(artiste_de_requete(Some(brut), None), requete, "{brut}");
+        }
+        // Une virgule qui ne précède pas un article ne change rien.
+        for intact in [
+            "Crosby, Stills, Nash & Young",
+            "Earth, Wind & Fire",
+            "The National",
+        ] {
+            assert_eq!(artiste_de_requete(Some(intact), None), intact, "{intact}");
+        }
+    }
+
+    /// #4805, introuvables de la mesure A : la balise sans accents, le
+    /// pressage avec. Un autre artiste reste écarté.
+    #[test]
+    fn plausible_compare_aussi_sans_diacritiques() {
+        assert!(plausible(
+            "Corps & Armes",
+            "Étienne Daho",
+            "Corps & Armes",
+            "Etienne Daho"
+        ));
+        assert!(plausible(
+            "S'il suffisait d'aimer",
+            "Céline Dion",
+            "S'il Suffisait D'Aimer",
+            "Celine Dion"
+        ));
+        assert!(plausible(
+            "Réévolution",
+            "Étienne Daho",
+            "Reevolution",
+            "Etienne Daho"
+        ));
+        assert!(!plausible(
+            "Corps & Armes",
+            "Florent Pagny",
+            "Corps & Armes",
+            "Etienne Daho"
+        ));
+        assert!(!plausible(
+            "Autre chose",
+            "Étienne Daho",
+            "Corps & Armes",
+            "Etienne Daho"
+        ));
     }
 
     #[test]
