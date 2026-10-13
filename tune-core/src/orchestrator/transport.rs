@@ -2130,6 +2130,11 @@ impl PlaybackOrchestrator {
                     local_output.set_strict_bitperfect(
                         crate::audio::bitperfect_strict::zone_enabled(&self.db, zone_id),
                     );
+                    // #6132 — la sortie double de la zone, posée à chaque
+                    // lecture comme le strict : `play_url` la lit une fois.
+                    local_output.set_seconde_sortie(
+                        crate::outputs::sortie_double::seconde_sortie_de_zone(&self.db, zone_id),
+                    );
                     // ReplayGain, applied by the output itself for a local DAC.
                     // A PURE zone is left strictly alone: applying a gain would
                     // multiply every sample and the path would no longer be
