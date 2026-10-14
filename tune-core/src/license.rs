@@ -1036,24 +1036,25 @@ const CLE_MODULES_DE_LA_CLE: &str = "license_modules";
 
 /// Les modules de la clé comptent-ils en ce moment ?
 ///
-/// Comme [`key_premium_active`], mais **sans palier ni grâce** :
+/// Comme [`key_premium_active`], mais **sans palier, sans grâce et sans
+/// échéance** :
 /// - une clé est enregistrée ;
-/// - son échéance, si le site en a donné une, n'est pas passée ;
 /// - aucun autre serveur ne tient la session (une clé, un appareil actif à
 ///   la fois — la même règle que pour le Premium).
 ///
-/// Pas de fenêtre de grâce : un module de la clé est un achat à vie, il reste
-/// valable hors ligne sans limite (décision D5 du 14/10/2026). Il ne naît que
-/// d'une confirmation en ligne (`update_from_server`), et une expiration
-/// autoritaire le vide.
+/// L'échéance de la clé (`expires_at`) est celle du **Premium**, pas du
+/// module : un Premium échu garde son module (décision du 14/10/2026). Le
+/// site valide alors la clé au palier Free avec `modules` rempli, et le
+/// Premium ne revient pas : `key_premium_active` exige le palier Premium ET
+/// une échéance non passée.
+///
+/// Pas de fenêtre de grâce non plus : un module de la clé est un achat à vie,
+/// il reste valable hors ligne sans limite (D5). Il ne naît que d'une
+/// confirmation en ligne (`update_from_server`) ; une expiration autoritaire
+/// (`license_valid: false` avec une échéance passée, que le site ne rend plus
+/// que pour une clé échue SANS module) le vide.
 fn key_modules_active(state: &LicenseState) -> bool {
-    if state.license_key.is_none() || state.session_conflict.is_some() {
-        return false;
-    }
-    match state.expires_at {
-        Some(ref exp) => !is_expired(exp, 0),
-        None => true,
-    }
+    state.license_key.is_some() && state.session_conflict.is_none()
 }
 
 /// Les modules possédés : ceux du compte ∪ ceux de la clé quand elle compte.
@@ -2629,7 +2630,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn une_echeance_passee_ou_un_conflit_de_session_suspend_les_modules_de_la_cle() {
+    async fn un_conflit_de_session_suspend_les_modules_de_la_cle_pas_une_echeance() {
         let mgr = gestionnaire_sur(base_neuve());
         mgr.set_license_key("TUNE-CLE-MODULE").await.unwrap();
         mgr.update_from_server(Tier::Free, None, Some(vec!["module-a".into()]))
@@ -2644,9 +2645,14 @@ mod tests {
         mgr.clear_session_conflict().await;
         assert!(mgr.has_module("module-a").await);
 
-        mgr.update_from_server(Tier::Free, Some("2020-01-01T00:00:00Z".into()), None)
+        // Un Premium échu garde son module, sans retrouver le Premium.
+        mgr.update_from_server(Tier::Premium, Some("2020-01-01T00:00:00Z".into()), None)
             .await;
-        assert!(!mgr.has_module("module-a").await, "clé échue");
+        assert!(
+            mgr.has_module("module-a").await,
+            "Premium échu : module perdu"
+        );
+        assert_eq!(mgr.tier().await, Tier::Free, "Premium échu réactivé");
     }
 
     #[tokio::test]

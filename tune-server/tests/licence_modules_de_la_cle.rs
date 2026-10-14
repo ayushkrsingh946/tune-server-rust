@@ -396,3 +396,68 @@ async fn la_desactivation_retire_le_module_de_la_cle() {
     let srv = demarrer(&db_path, &site);
     assert!(!srv.state.license.has_module(MODULE).await);
 }
+
+/// Décision du 14/10 : un Premium échu garde son module. Le site valide alors
+/// la clé au palier Free, avec l'échéance passée et `modules` rempli. Le
+/// module reste, le Premium ne revient pas — ni au battement suivant, ni au
+/// redémarrage, ni si le site annonçait par erreur `premium` avec une
+/// échéance passée.
+#[tokio::test]
+async fn un_premium_echu_garde_son_module_sans_redevenir_premium() {
+    let (site, corps) = faux_site(json!({
+        "license_valid": true,
+        "license_tier": "premium",
+        "license_expires_at": "2099-01-01T00:00:00Z",
+        "modules": [MODULE],
+    }))
+    .await;
+    let (srv, _garde) = serveur_froid(&site);
+    let (_, body) = poster(&srv.app, ACTIVATE, json!({ "license_key": CLE })).await;
+    assert_eq!(body["tier"], "premium", "activation : {body}");
+
+    // L'abonnement est échu : le site valide la clé pour son module seul.
+    *corps.lock().unwrap() = json!({
+        "license_valid": true,
+        "license_tier": "free",
+        "premium_active": false,
+        "license_expires_at": "2020-01-01T00:00:00Z",
+        "modules": [MODULE],
+    });
+    let (_, v) = poster(&srv.app, VALIDATE, json!({})).await;
+    assert_eq!(v["status"], "validated", "validation : {v}");
+    let s = statut(&srv.app).await;
+    assert_eq!(s["tier"], "free", "Premium échu toujours actif : {s}");
+    assert_eq!(
+        s["modules"],
+        json!([MODULE]),
+        "un Premium échu a perdu son module : {s}"
+    );
+
+    // La commande d'activation rejouée dit bien `activated`, au palier Free.
+    let (_, body) = poster(&srv.app, ACTIVATE, json!({ "license_key": CLE })).await;
+    assert_eq!(body["status"], "activated", "activation : {body}");
+    assert_eq!(body["tier"], "free", "activation : {body}");
+    assert_eq!(body["modules"], json!([MODULE]), "activation : {body}");
+
+    // Un site qui annoncerait `premium` avec une échéance passée ne rouvre
+    // pas le Premium.
+    *corps.lock().unwrap() = json!({
+        "license_valid": true,
+        "license_tier": "premium",
+        "license_expires_at": "2020-01-01T00:00:00Z",
+        "modules": [MODULE],
+    });
+    poster(&srv.app, VALIDATE, json!({})).await;
+    let s = statut(&srv.app).await;
+    assert_eq!(s["tier"], "free", "Premium échu réactivé : {s}");
+    assert_eq!(s["modules"], json!([MODULE]), "statut : {s}");
+
+    // Et rien ne change au redémarrage, site injoignable.
+    let db_path = srv.db_path.clone();
+    drop(srv);
+    let hors_ligne = site_injoignable().await;
+    let srv = demarrer(&db_path, &hors_ligne);
+    let s = statut(&srv.app).await;
+    assert_eq!(s["tier"], "free", "après redémarrage : {s}");
+    assert_eq!(s["modules"], json!([MODULE]), "après redémarrage : {s}");
+}
