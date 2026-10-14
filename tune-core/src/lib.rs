@@ -50,6 +50,9 @@ pub mod lyrics;
 pub mod memoire_rendue;
 pub mod metadata;
 pub mod notifications;
+/// Flux Ogg Vorbis et Opus fabriqués pour les tests des radios Ogg.
+#[cfg(test)]
+pub(crate) mod ogg_factice;
 pub mod orchestrator;
 pub mod outputs;
 pub mod party_mode;
