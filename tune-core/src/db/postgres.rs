@@ -299,6 +299,11 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     // 077, alors que `tag_item` nomme la colonne. TEXT comme côté SQLite, NULL
     // pour l'existant.
     "ALTER TABLE item_tags ADD COLUMN IF NOT EXISTS created_at TEXT",
+    // #6257 — l'ordre des etiquettes (PG 090). Ici AUSSI : l'INSERT des
+    // etiquettes NOMME la colonne. Sans rangement : toutes a 0, la liste reste
+    // rangee par nom. Sans effet sur la colonne TEXT d'une bascule : c'est la
+    // 090 qui la convertit.
+    "ALTER TABLE tags ADD COLUMN IF NOT EXISTS position BIGINT NOT NULL DEFAULT 0",
     // #4991 (b) — marque « déjà tenté, rien trouvé » de l'identification en
     // lot (PG 080). Ici AUSSI : une base de bascule ne rejoue pas la 080, et
     // la sélection de `identify-all` nomme la colonne. NULL = jamais tenté.
