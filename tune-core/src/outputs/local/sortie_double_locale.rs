@@ -30,7 +30,8 @@
 
 use super::*;
 use crate::outputs::sortie_double::{
-    AnneauSecondaire, CONSIGNE_PAR_DEFAUT_S, Recopieur, SecondeSortieDemandee,
+    AnneauSecondaire, CONSIGNE_PAR_DEFAUT_S, RETARD_MAX_S, Recopieur, SecondeSortieDemandee,
+    SortieMultiple,
 };
 use std::sync::atomic::AtomicUsize;
 
@@ -41,6 +42,8 @@ const AUCUNE: u64 = u64::MAX;
 pub(super) struct AnneauDeB {
     anneau: RingBuf,
     periode: AtomicUsize,
+    /// La période que le rappel de B demande, publiée dès son premier rappel.
+    periode_annoncee: AtomicUsize,
     /// Origine commune des instants des deux rappels.
     origine: std::time::Instant,
     /// Instant de la dernière lecture de B, en ns depuis `origine`.
@@ -56,6 +59,7 @@ impl AnneauDeB {
         Self {
             anneau: RingBuf::new(capacite),
             periode: AtomicUsize::new(0),
+            periode_annoncee: AtomicUsize::new(0),
             origine: std::time::Instant::now(),
             derniere_lecture_ns: AtomicU64::new(AUCUNE),
             latence_b_ns: AtomicU64::new(AUCUNE),
@@ -93,6 +97,9 @@ impl AnneauSecondaire for AnneauDeB {
     fn publier_l_avance_de_a(&self, avance_s: f64) {
         self.avance_a.store(avance_s.to_bits(), Ordering::Relaxed);
     }
+    fn periode_annoncee(&self) -> usize {
+        self.periode_annoncee.load(Ordering::Relaxed)
+    }
 }
 
 /// La latence matérielle qu'un rappel de sortie lit dans ses horodatages :
@@ -106,10 +113,8 @@ pub(super) fn latence_du_rappel(info: &cpal::OutputCallbackInfo) -> Option<f64> 
         .filter(|s| *s > 0.0 && *s < 1.0)
 }
 
-pub(super) struct Recopie {
-    recopieur: Recopieur,
-    anneau: Arc<AnneauDeB>,
-}
+/// Les sorties B d'un groupe, servies ensemble par le rappel de A.
+pub(super) type Recopie = SortieMultiple<Arc<AnneauDeB>>;
 
 /// Ce que le rappel de A consulte à chaque période. Inactif : A joue seul,
 /// exactement comme avant.
@@ -130,7 +135,7 @@ pub(super) fn emplacement_vide() -> EmplacementDeRecopie {
 impl Emplacement {
     /// Une recopie est-elle installée ? Lu par le rappel de A pour savoir s'il
     /// doit rendre au volume unité (le volume de A s'applique APRÈS la
-    /// recopie, celui de B dans le rappel de B).
+    /// recopie, celui de chaque B dans le rappel de ce B).
     pub(super) fn est_actif(&self) -> bool {
         self.actif.load(Ordering::Acquire)
     }
@@ -150,7 +155,8 @@ impl Emplacement {
 }
 
 /// Dans le rappel de A, après le rendu (rampe et silence compris) :
-/// recopier la période vers B, et la remplacer par sa version retardée.
+/// recopier la période vers chaque B, et la remplacer par sa version
+/// retardée du retard commun.
 ///
 /// `try_lock` : le rappel temps réel n'attend jamais. Le verrou n'est pris
 /// ailleurs qu'à l'installation et au retrait de la recopie.
@@ -162,9 +168,7 @@ pub(super) fn recopier_la_periode(
     if let Ok(mut garde) = emplacement.recopie.try_lock()
         && let Some(recopie) = garde.as_mut()
     {
-        recopie
-            .recopieur
-            .recopier(data, &*recopie.anneau, latence_a);
+        recopie.traiter(data, latence_a);
     }
 }
 
@@ -288,33 +292,79 @@ pub(crate) fn refus_prealable(
     None
 }
 
-/// B ouvert et en marche. Le garder vivant garde B qui joue ; le lâcher
-/// retire la recopie de l'emplacement de A, puis ferme B.
-pub(super) struct SecondeSortie {
+/// Les sorties B ouvertes et en marche. Les garder vivantes garde les B qui
+/// jouent ; les lâcher retire la recopie de l'emplacement de A, puis ferme
+/// les B.
+pub(super) struct SecondesSorties {
     emplacement: EmplacementDeRecopie,
-    nom: String,
-    // Dernier champ : fermé APRÈS le retrait de la recopie (ordre de `Drop`).
-    _flux: cpal::Stream,
+    noms: Vec<String>,
+    // Dernier champ : fermés APRÈS le retrait de la recopie (ordre de `Drop`).
+    _flux: Vec<cpal::Stream>,
 }
 
-impl Drop for SecondeSortie {
+impl Drop for SecondesSorties {
     fn drop(&mut self) {
         if let Some(recopie) = self.emplacement.retirer() {
-            let releve = recopie.recopieur.releve();
-            info!(
-                seconde_sortie = %self.nom,
-                ecart_ms = releve.ecart_ms,
-                derive_ppm = releve.derive_ppm,
-                correction_ppm = releve.correction_ppm,
-                latence_a_ms = ?releve.latence_a_ms,
-                latence_b_ms = ?releve.latence_b_ms,
-                compensation_ms = releve.compensation_ms,
-                echantillons_refuses = releve.echantillons_refuses,
-                trames_produites = releve.trames_produites,
-                "sortie_double_releve"
-            );
+            let retard_commun_ms = recopie.retard_commun_ms();
+            for ((recopieur, _), nom) in recopie.membres().iter().zip(&self.noms) {
+                let releve = recopieur.releve();
+                info!(
+                    seconde_sortie = %nom,
+                    retard_commun_ms,
+                    ecart_ms = releve.ecart_ms,
+                    derive_ppm = releve.derive_ppm,
+                    correction_ppm = releve.correction_ppm,
+                    latence_a_ms = ?releve.latence_a_ms,
+                    latence_b_ms = ?releve.latence_b_ms,
+                    compensation_ms = releve.compensation_ms,
+                    echantillons_refuses = releve.echantillons_refuses,
+                    trames_produites = releve.trames_produites,
+                    "sortie_double_releve"
+                );
+            }
         }
     }
+}
+
+/// Une sortie B ouverte et démarrée, pas encore servie : son flux, son
+/// recopieur, son anneau.
+pub(super) struct SortieBOuverte {
+    flux: cpal::Stream,
+    recopieur: Recopieur,
+    anneau: Arc<AnneauDeB>,
+    nom: String,
+}
+
+/// Installer la recopie de A vers toutes les sorties B ouvertes. Avant le
+/// démarrage de A : le retard commun se règle pendant son silence de départ.
+pub(super) fn installer_les_secondes_sorties(
+    emplacement: &EmplacementDeRecopie,
+    canaux: u16,
+    cadence_a: u32,
+    ouvertes: Vec<SortieBOuverte>,
+) -> Option<SecondesSorties> {
+    if ouvertes.is_empty() {
+        return None;
+    }
+    let mut membres = Vec::new();
+    let mut flux = Vec::new();
+    let mut noms = Vec::new();
+    for b in ouvertes {
+        membres.push((b.recopieur, b.anneau));
+        flux.push(b.flux);
+        noms.push(b.nom);
+    }
+    emplacement.installer(SortieMultiple::nouvelle(
+        usize::from(canaux),
+        cadence_a,
+        CONSIGNE_PAR_DEFAUT_S,
+        membres,
+    ));
+    Some(SecondesSorties {
+        emplacement: emplacement.clone(),
+        noms,
+        _flux: flux,
+    })
 }
 
 /// Le périphérique `nom` sur `host`, SANS repli et sans rien noter pour
@@ -347,6 +397,7 @@ fn trouver_sans_repli(host: &cpal::Host, nom: &str) -> Option<cpal::Device> {
 
 /// Ce que le rappel de B lit de A : son volume, son facteur de rendu, son
 /// drapeau DoP.
+#[derive(Clone)]
 pub(super) struct ReglagesDeA {
     pub(super) volume: Arc<AtomicU32>,
     pub(super) facteur_de_rendu: Arc<AtomicU32>,
@@ -354,15 +405,15 @@ pub(super) struct ReglagesDeA {
 }
 
 /// Ouvrir B à la cadence de A si B l'accepte, sinon à sa cadence par défaut
-/// (le recopieur convertit), installer la recopie, démarrer B.
+/// (le recopieur convertit), et le démarrer. B joue du silence jusqu'à ce
+/// que la recopie, installée ensuite pour toutes les B à la fois, le nourrisse.
 pub(super) fn ouvrir_la_seconde_sortie(
     host: &cpal::Host,
     demande: &SecondeSortieDemandee,
     cadence_a: u32,
     canaux: u16,
     reglages_a: ReglagesDeA,
-    emplacement: &EmplacementDeRecopie,
-) -> Result<SecondeSortie, RefusDeSecondeSortie> {
+) -> Result<SortieBOuverte, RefusDeSecondeSortie> {
     let nom = demande.nom.as_str();
     let device = trouver_sans_repli(host, nom).ok_or(RefusDeSecondeSortie::Introuvable)?;
     let config = match find_matching_config(&device, canaux, cadence_a) {
@@ -389,7 +440,9 @@ pub(super) fn ouvrir_la_seconde_sortie(
     );
     recopieur.regler_le_decalage_manuel(demande.decalage_manuel_s);
     let consigne = recopieur.consigne();
-    let capacite = ((CONSIGNE_PAR_DEFAUT_S * 4.0 * f64::from(cadence_b)) as usize).max(16_384)
+    // De quoi tenir la consigne, le plus grand retard commun et deux périodes.
+    let capacite = (((CONSIGNE_PAR_DEFAUT_S + RETARD_MAX_S) * 2.0 * f64::from(cadence_b)) as usize)
+        .max(16_384)
         * usize::from(canaux);
     let anneau = Arc::new(AnneauDeB::nouveau(capacite));
     let anneau_cb = anneau.clone();
@@ -407,6 +460,9 @@ pub(super) fn ouvrir_la_seconde_sortie(
             &config,
             move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 let latence_b = latence_du_rappel(info);
+                anneau_cb
+                    .periode_annoncee
+                    .store(data.len(), Ordering::Relaxed);
                 if let Some(l) = latence_b {
                     anneau_cb
                         .latence_b_ns
@@ -454,11 +510,8 @@ pub(super) fn ouvrir_la_seconde_sortie(
             None,
         )
         .map_err(|e| RefusDeSecondeSortie::Ouverture(e.to_string()))?;
-    emplacement.installer(Recopie { recopieur, anneau });
-    if let Err(e) = flux.play() {
-        emplacement.retirer();
-        return Err(RefusDeSecondeSortie::Ouverture(e.to_string()));
-    }
+    flux.play()
+        .map_err(|e| RefusDeSecondeSortie::Ouverture(e.to_string()))?;
     info!(
         seconde_sortie = %nom,
         cadence_a,
@@ -469,10 +522,11 @@ pub(super) fn ouvrir_la_seconde_sortie(
         volume_propre = demande.volume_utilisateur.is_some(),
         "sortie_double_ouverte"
     );
-    Ok(SecondeSortie {
-        emplacement: emplacement.clone(),
+    Ok(SortieBOuverte {
+        flux,
+        recopieur,
+        anneau,
         nom: nom.to_string(),
-        _flux: flux,
     })
 }
 
@@ -516,16 +570,24 @@ mod tests {
         assert!(periode.iter().all(|s| *s == 0.25));
 
         let anneau = Arc::new(AnneauDeB::nouveau(48_000));
-        emplacement.installer(Recopie {
-            recopieur: Recopieur::nouveau(2, 48_000, 48_000, 0.010),
-            anneau: anneau.clone(),
-        });
+        let autre = Arc::new(AnneauDeB::nouveau(48_000));
+        emplacement.installer(SortieMultiple::nouvelle(
+            2,
+            48_000,
+            0.010,
+            vec![
+                (Recopieur::nouveau(2, 48_000, 48_000, 0.010), anneau.clone()),
+                (Recopieur::nouveau(2, 48_000, 44_100, 0.010), autre.clone()),
+            ],
+        ));
         assert!(emplacement.est_actif());
         recopier_la_periode(&emplacement, &mut periode, Some(0.005));
         // A est retardé de 10 ms (480 trames) : sa première période est muette.
         assert!(periode.iter().all(|s| *s == 0.0));
-        // B a reçu la période, au filtre près, et l'avance de A est publiée.
+        // Chaque B a reçu la période, au filtre près, et l'avance de A est publiée.
         assert!(anneau.en_attente() >= 2 * (480 - 32));
+        // La seconde suiveuse aussi, à sa cadence (44,1 kHz).
+        assert!(autre.en_attente() >= 2 * (441 - 32));
         assert_eq!(
             f64::from_bits(anneau.avance_a.load(Ordering::Relaxed)),
             0.005

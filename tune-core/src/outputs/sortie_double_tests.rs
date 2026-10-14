@@ -20,6 +20,7 @@ struct AnneauSimule {
     file: RefCell<VecDeque<f32>>,
     capacite: usize,
     periode_lue: std::cell::Cell<usize>,
+    periode_vue: std::cell::Cell<usize>,
     latence_b: std::cell::Cell<Option<f64>>,
     avance_a: std::cell::Cell<f64>,
     maintenant: std::cell::Cell<f64>,
@@ -32,6 +33,7 @@ impl AnneauSimule {
             file: RefCell::new(VecDeque::with_capacity(capacite)),
             capacite,
             periode_lue: std::cell::Cell::new(0),
+            periode_vue: std::cell::Cell::new(0),
             latence_b: std::cell::Cell::new(None),
             avance_a: std::cell::Cell::new(0.0),
             maintenant: std::cell::Cell::new(0.0),
@@ -55,6 +57,9 @@ impl AnneauSecondaire for AnneauSimule {
     }
     fn latence_du_lecteur_s(&self) -> Option<f64> {
         self.latence_b.get()
+    }
+    fn periode_annoncee(&self) -> usize {
+        self.periode_vue.get()
     }
     fn depuis_la_derniere_lecture_s(&self) -> Option<f64> {
         self.derniere_lecture
@@ -96,6 +101,8 @@ struct Bilan {
     /// Trames de B comblées de zéros APRÈS le démarrage de B.
     famines_b: u64,
     releve: Releve,
+    /// Le retard commun du groupe à la fin, en ms.
+    retard_commun_ms: f64,
 }
 
 /// Fait tourner A et B `duree_s` secondes de temps simulé.
@@ -114,31 +121,57 @@ fn simuler_avec_decalage(
     duree_s: f64,
     manuel_s: f64,
 ) -> Bilan {
+    simuler_groupe(a, &[(b, manuel_s)], canaux, duree_s)
+        .pop()
+        .unwrap()
+}
+
+/// Le groupe : A et N sorties B, chacune avec son décalage manuel, servies
+/// par UNE [`SortieMultiple`] comme en production.
+fn simuler_groupe(
+    a: Peripherique,
+    bs: &[(Peripherique, f64)],
+    canaux: usize,
+    duree_s: f64,
+) -> Vec<Bilan> {
+    use std::rc::Rc;
     let consigne = CONSIGNE_PAR_DEFAUT_S;
-    let mut rec = Recopieur::nouveau(canaux, a.cadence, b.cadence, consigne);
-    rec.regler_le_decalage_manuel(manuel_s);
-    let retard_a = (consigne * f64::from(a.cadence)).round();
-    let consigne_b = rec.consigne();
-    let anneau = AnneauSimule::nouveau((consigne * f64::from(b.cadence)) as usize * canaux * 4);
+    let capacite = ((consigne + RETARD_MAX_S) * 48_000.0 * 2.0) as usize * canaux;
+    let mut membres = Vec::new();
+    let mut anneaux = Vec::new();
+    let mut consignes = Vec::new();
+    for (b, manuel_s) in bs {
+        let mut rec = Recopieur::nouveau(canaux, a.cadence, b.cadence, consigne);
+        rec.regler_le_decalage_manuel(*manuel_s);
+        consignes.push(rec.consigne());
+        let anneau = Rc::new(AnneauSimule::nouveau(capacite));
+        anneaux.push(anneau.clone());
+        membres.push((rec, anneau));
+    }
+    let mut sortie = SortieMultiple::nouvelle(canaux, a.cadence, consigne, membres);
 
-    // Repères (trame produite, position d'entrée, pas) au début de chaque
-    // période de A, pour retrouver la position source d'une trame de B.
-    let mut reperes: Vec<(u64, f64, f64)> = Vec::new();
+    // Repères (trame produite, position d'entrée, pas) de chaque B au début
+    // de chaque période de A, pour retrouver la position source d'une trame.
+    let n = bs.len();
+    let mut reperes: Vec<Vec<(u64, f64, f64)>> = vec![Vec::new(); n];
     let mut periode_a = vec![0f32; a.periode * canaux];
-    let mut lu_b = vec![0f32; b.periode * canaux];
-
-    let (ra, rb) = (a.cadence_reelle(), b.cadence_reelle());
-    let (mut na, mut nb) = (0u64, 0u64);
+    let ra = a.cadence_reelle();
+    let mut na = 0u64;
+    let mut nb = vec![0u64; n];
     let mut source = 0u64;
-    let mut b_demarre = false;
-    // Trames de B tirées de l'anneau (hors zéros), et zéros joués avant.
-    let mut sortis_b = 0u64;
-    let mut famines_b = 0u64;
-    let mut ecarts_ms = Vec::new();
+    let mut demarre = vec![false; n];
+    let mut sortis = vec![0u64; n];
+    let mut famines = vec![0u64; n];
+    let mut ecarts: Vec<Vec<(f64, f64)>> = vec![Vec::new(); n];
 
     loop {
         let ta = (na * a.periode as u64) as f64 / ra;
-        let tb = (nb * b.periode as u64) as f64 / rb;
+        // Le prochain rappel de B, tous B confondus.
+        let (j, tb) = bs
+            .iter()
+            .enumerate()
+            .map(|(j, (b, _))| (j, (nb[j] * b.periode as u64) as f64 / b.cadence_reelle()))
+            .fold((0, f64::INFINITY), |m, x| if x.1 < m.1 { x } else { m });
         if ta.min(tb) > duree_s {
             break;
         }
@@ -150,48 +183,64 @@ fn simuler_avec_decalage(
                 }
             }
             source += a.periode as u64;
-            let (k, x) = rec.repere();
-            anneau.maintenant.set(ta);
-            rec.recopier(&mut periode_a, &anneau, a.latence_annoncee());
-            reperes.push((k, x, 1.0 / rec.rapport()));
+            let avant: Vec<(u64, f64)> = sortie.membres().iter().map(|(r, _)| r.repere()).collect();
+            for anneau in &anneaux {
+                anneau.maintenant.set(ta);
+            }
+            sortie.traiter(&mut periode_a, a.latence_annoncee());
+            for (i, (r, _)) in sortie.membres().iter().enumerate() {
+                reperes[i].push((avant[i].0, avant[i].1, 1.0 / r.rapport()));
+            }
             na += 1;
         } else {
+            let b = bs[j].0;
+            let anneau = &anneaux[j];
+            let lu = b.periode * canaux;
             anneau.latence_b.set(b.latence_annoncee());
+            anneau.periode_vue.set(lu);
             let compensation = anneau.avance_a.get() - b.latence_annoncee().unwrap_or(0.0);
-            let seuil_b = consigne_b.seuil_de_depart(b.periode * canaux, compensation);
-            if !b_demarre && anneau.en_attente() >= seuil_b {
-                b_demarre = true;
+            if !demarre[j] && anneau.en_attente() >= consignes[j].seuil_de_depart(lu, compensation)
+            {
+                demarre[j] = true;
             }
-            if b_demarre {
+            if demarre[j] {
                 // La trame que B joue au début de cette période.
-                let k = sortis_b;
-                let i = reperes.partition_point(|r| r.0 <= k).saturating_sub(1);
-                let (k0, x0, pas) = reperes[i];
+                let k = sortis[j];
+                let r = &reperes[j];
+                let i = r.partition_point(|x| x.0 <= k).saturating_sub(1);
+                let (k0, x0, pas) = r[i];
                 let pos_b = x0 + (k - k0) as f64 * pas;
                 // Ce que A fait entendre à l'instant où cette trame de B sort
                 // de son convertisseur.
-                let pos_a = ra * (tb + b.latence_s - a.latence_s) - retard_a;
+                let pos_a = ra * (tb + b.latence_s - a.latence_s) - sortie.retard_trames() as f64;
                 if tb > 0.5 {
-                    ecarts_ms.push((tb, (pos_a - pos_b) / f64::from(a.cadence) * 1000.0));
+                    ecarts[j].push((tb, (pos_a - pos_b) / f64::from(a.cadence) * 1000.0));
                 }
-                anneau.periode_lue.set(lu_b.len());
+                anneau.periode_lue.set(lu);
                 anneau.derniere_lecture.set(Some(tb));
                 let mut f = anneau.file.borrow_mut();
-                let n = lu_b.len().min(f.len());
-                for s in lu_b.iter_mut().take(n) {
-                    *s = f.pop_front().unwrap();
+                let pris = lu.min(f.len());
+                for _ in 0..pris {
+                    f.pop_front();
                 }
-                sortis_b += (n / canaux) as u64;
-                famines_b += ((lu_b.len() - n) / canaux) as u64;
+                sortis[j] += (pris / canaux) as u64;
+                famines[j] += ((lu - pris) / canaux) as u64;
             }
-            nb += 1;
+            nb[j] += 1;
         }
     }
-    Bilan {
-        ecarts_ms,
-        famines_b,
-        releve: rec.releve(),
-    }
+    let retard_commun_ms = sortie.retard_commun_ms();
+    sortie
+        .membres()
+        .iter()
+        .enumerate()
+        .map(|(j, (r, _))| Bilan {
+            ecarts_ms: std::mem::take(&mut ecarts[j]),
+            famines_b: famines[j],
+            releve: r.releve(),
+            retard_commun_ms,
+        })
+        .collect()
 }
 
 fn pire_ecart(bilan: &Bilan, apres_s: f64) -> f64 {
@@ -478,5 +527,117 @@ fn periodes_egales_et_phase_figee_restent_alignees() {
     assert!(
         pire < 0.5,
         "écart calé sur la phase des rappels : {pire:.3} ms"
+    );
+}
+
+/// #6132 — trois cartes : A et deux suiveuses, chacune avec son quartz, sa
+/// cadence, sa période et sa latence. Chacune est corrigée de SA dérive par
+/// son propre recopieur, et toutes sortent alignées sur A.
+#[test]
+fn trois_cartes_chacune_corrigee_de_sa_derive() {
+    let a = Peripherique {
+        cadence: 48_000,
+        ppm: 50.0,
+        periode: 480,
+        latence_s: 0.005,
+        horodate: true,
+    };
+    let b1 = Peripherique {
+        cadence: 48_000,
+        ppm: -100.0,
+        periode: 512,
+        latence_s: 0.008,
+        horodate: true,
+    };
+    let b2 = Peripherique {
+        cadence: 44_100,
+        ppm: 200.0,
+        periode: 441,
+        latence_s: 0.012,
+        horodate: true,
+    };
+    let bilans = simuler_groupe(a, &[(b1, 0.0), (b2, 0.0)], 1, 300.0);
+    for (nom, bilan, derive) in [("B1", &bilans[0], -150.0), ("B2", &bilans[1], 150.0)] {
+        let pire = pire_ecart(bilan, 20.0);
+        eprintln!(
+            "sortie_double trois cartes, {nom}, 300 s : pire écart de 20 s à 300 s = {pire:.3} ms, \
+             dérive estimée = {:.1} ppm (vraie {derive}), retard commun = {:.1} ms, famines = {}",
+            bilan.releve.derive_ppm, bilan.retard_commun_ms, bilan.famines_b
+        );
+        assert!(
+            pire < 0.5,
+            "{nom} non aligné sur A : {pire:.3} ms (attendu < 0,5 ms)"
+        );
+        assert!(
+            (bilan.releve.derive_ppm - derive).abs() < 5.0,
+            "{nom} : dérive estimée {:.1} ppm, vraie {derive} ppm",
+            bilan.releve.derive_ppm
+        );
+        assert_eq!(bilan.famines_b, 0, "{nom} a manqué d'échantillons");
+    }
+}
+
+/// #6132 — une carte bien plus lente que les autres (70 ms de latence contre
+/// 5 et 10) : la consigne de 40 ms ne suffit pas à la nourrir assez tôt. Le
+/// retard commun s'adapte AUTOMATIQUEMENT à elle, et les trois restent
+/// alignées.
+#[test]
+fn le_retard_commun_s_adapte_a_la_carte_la_plus_lente() {
+    let a = Peripherique {
+        cadence: 48_000,
+        ppm: 0.0,
+        periode: 480,
+        latence_s: 0.005,
+        horodate: true,
+    };
+    let rapide = Peripherique {
+        cadence: 48_000,
+        ppm: 80.0,
+        periode: 480,
+        latence_s: 0.010,
+        horodate: true,
+    };
+    let lente = Peripherique {
+        cadence: 48_000,
+        ppm: -60.0,
+        periode: 1024,
+        latence_s: 0.070,
+        horodate: true,
+    };
+    let bilans = simuler_groupe(a, &[(rapide, 0.0), (lente, 0.0)], 1, 120.0);
+    let retard = bilans[0].retard_commun_ms;
+    for (nom, bilan) in [("rapide", &bilans[0]), ("lente", &bilans[1])] {
+        let pire = pire_ecart(bilan, 20.0);
+        eprintln!(
+            "sortie_double carte lente (latences 5/10/70 ms), {nom}, 120 s : pire écart = {pire:.3} ms, \
+             retard commun = {retard:.1} ms, famines = {}",
+            bilan.famines_b
+        );
+        assert!(
+            pire < 0.5,
+            "{nom} non alignée : {pire:.3} ms — le retard commun ({retard:.1} ms) ne couvre pas la carte la plus lente"
+        );
+        assert_eq!(bilan.famines_b, 0, "{nom} a manqué d'échantillons");
+    }
+    assert!(
+        retard > 80.0 && retard < 120.0,
+        "retard commun {retard:.1} ms : attendu ≈ 65 ms d'écart de latence + la période de la lente + marges"
+    );
+}
+
+#[test]
+fn le_reglage_lit_une_ou_plusieurs_sorties() {
+    assert_eq!(
+        lire_la_valeur(r#"["local:SMSL SU-8","local:TASCAM US-366"]"#),
+        vec!["SMSL SU-8".to_string(), "TASCAM US-366".to_string()]
+    );
+    assert_eq!(
+        lire_la_valeur("local:SMSL SU-8"),
+        vec!["SMSL SU-8".to_string()]
+    );
+    assert!(lire_la_valeur("[]").is_empty());
+    assert_eq!(
+        lire_la_valeur(&ecrire_la_valeur(&["local:A, B".to_string()])),
+        vec!["A, B".to_string()]
     );
 }

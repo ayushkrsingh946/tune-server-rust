@@ -1,4 +1,7 @@
-use super::{CreateGroup, GroupRefusal, choisir_la_sortie_double, refus_asio, validate_group};
+use super::{
+    CreateGroup, GroupRefusal, choisir_les_sorties_doubles, recalculer_les_sorties_doubles,
+    refus_asio, validate_group,
+};
 use tune_core::db::zone_repo::Zone;
 
 // #1702 (Bilou, fil 1392) — deux zones pointant sur la même sortie : le
@@ -133,20 +136,26 @@ fn every_refusal_has_a_french_sentence() {
 // double au meneur ; le reste du groupe n'est pas concerné.
 
 #[test]
-fn deux_zones_locales_donnent_une_sortie_double_au_meneur() {
+fn chaque_zone_locale_du_groupe_devient_une_suiveuse() {
     let zones = vec![
         zone(1, "Salon", Some("local:SMSL SU-8")),
         zone(2, "Bureau", Some("local:TASCAM US-366")),
         zone(3, "Cuisine", Some("dlna:uuid-1")),
+        zone(4, "Atelier", Some("local:Marantz AV7706")),
+        // Doublon de sortie de la zone 2 : une seule recopie par périphérique.
+        zone(5, "Bureau bis", Some("local:TASCAM US-366")),
     ];
     assert_eq!(
-        choisir_la_sortie_double(1, &[1, 3, 2], &zones),
-        Some((2, "local:TASCAM US-366".to_string()))
+        choisir_les_sorties_doubles(1, &[1, 3, 2, 4, 5], &zones),
+        vec![
+            (2, "local:TASCAM US-366".to_string()),
+            (4, "local:Marantz AV7706".to_string()),
+        ]
     );
-    // Meneur réseau : pas de sortie double, même avec deux locales dedans.
-    assert_eq!(choisir_la_sortie_double(3, &[3, 1, 2], &zones), None);
+    // Meneur réseau : pas de sortie double (étape 2b), même avec des locales.
+    assert!(choisir_les_sorties_doubles(3, &[3, 1, 2], &zones).is_empty());
     // Une seule zone locale : rien à recopier.
-    assert_eq!(choisir_la_sortie_double(1, &[1, 3], &zones), None);
+    assert!(choisir_les_sorties_doubles(1, &[1, 3], &zones).is_empty());
 }
 
 #[test]
@@ -172,14 +181,17 @@ fn asio_refuse_la_sortie_double_en_nommant_les_zones() {
 #[test]
 fn la_vue_du_groupe_dit_qui_est_synchronise() {
     let groupe = serde_json::json!({
-        "id": 1, "leader_id": 1, "zone_ids": [1, 2, 3],
-        "sortie_double": { "suiveur_id": 2, "sortie": "local:B" },
+        "id": 1, "leader_id": 1, "zone_ids": [1, 2, 3, 4],
+        "sortie_double": { "suiveurs": [
+            { "zone_id": 2, "sortie": "local:B" },
+            { "zone_id": 4, "sortie": "local:D" },
+        ] },
     });
     let vue = crate::routes::zone_manager::generic_group_view(groupe);
     let sync = &vue["synchronization"];
     assert_eq!(sync["supported"], true);
     assert_eq!(sync["transport"], "local_double_output");
-    assert_eq!(sync["synchronized_zone_ids"], serde_json::json!([1, 2]));
+    assert_eq!(sync["synchronized_zone_ids"], serde_json::json!([1, 2, 4]));
     assert_eq!(sync["independent_zone_ids"], serde_json::json!([3]));
 
     let sans = crate::routes::zone_manager::generic_group_view(
@@ -197,4 +209,58 @@ fn le_refus_asio_a_sa_phrase_dans_chaque_langue() {
             "{lang} : {t}"
         );
     }
+}
+
+/// #6132 — un groupe enregistré avant la sortie double (aucun champ
+/// `sortie_double`, aucun réglage) est recalculé au démarrage : le meneur
+/// reçoit ses deux suiveuses locales, sans geste de l'utilisateur. Un groupe
+/// au meneur réseau reste tel qu'il était.
+#[tokio::test]
+async fn les_groupes_d_avant_sont_recalcules_au_demarrage() {
+    use tune_core::db::settings_repo::SettingsRepo;
+    use tune_core::db::zone_repo::ZoneRepo;
+    let state =
+        crate::state::AppState::new(":memory:", 0, crate::config::TuneConfig::default()).unwrap();
+    let repo = ZoneRepo::with_backend(state.backend.clone());
+    let salon = repo
+        .create("Salon", Some("local"), Some("local:DAC A"))
+        .unwrap();
+    let bureau = repo
+        .create("Bureau", Some("local"), Some("local:DAC B"))
+        .unwrap();
+    let atelier = repo
+        .create("Atelier", Some("local"), Some("local:DAC C"))
+        .unwrap();
+    let cuisine = repo
+        .create("Cuisine", Some("dlna"), Some("dlna:uuid-1"))
+        .unwrap();
+    let settings = SettingsRepo::with_backend(state.backend.clone());
+    let anciens = serde_json::json!([
+        { "id": 1, "group_id": "1", "name": "Maison", "leader_id": salon,
+          "zone_ids": [salon, bureau, cuisine, atelier] },
+        { "id": 2, "group_id": "2", "name": "Réseau", "leader_id": cuisine,
+          "zone_ids": [cuisine, salon] },
+    ]);
+    settings.set("zone_groups", &anciens.to_string()).unwrap();
+
+    recalculer_les_sorties_doubles(&state).await;
+
+    let cle = tune_core::outputs::sortie_double::cle_de_zone;
+    assert_eq!(
+        tune_core::outputs::sortie_double::secondes_sorties_de_zone(&state.backend, salon),
+        vec!["DAC B".to_string(), "DAC C".to_string()],
+        "le meneur local doit recevoir ses deux suiveuses"
+    );
+    assert_eq!(settings.get(&cle(cuisine)).unwrap(), None);
+    let groupes: Vec<serde_json::Value> =
+        serde_json::from_str(&settings.get("zone_groups").unwrap().unwrap()).unwrap();
+    assert_eq!(
+        groupes[0]["sortie_double"]["suiveurs"][1]["zone_id"],
+        serde_json::json!(atelier)
+    );
+    assert!(groupes[1].get("sortie_double").is_none());
+    assert_eq!(
+        groupes[0]["name"], "Maison",
+        "le groupe n'est pas refait, seulement complété"
+    );
 }

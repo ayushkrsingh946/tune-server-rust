@@ -95,7 +95,43 @@ pub trait AnneauSecondaire {
     /// pour que le rappel de B parte au bon seuil avant même la première
     /// mesure.
     fn publier_l_avance_de_a(&self, _avance_s: f64) {}
+    /// Taille, en échantillons entrelacés, de la période que le rappel de B
+    /// demande, connue dès son premier rappel — avant même qu'il lise. Sert à
+    /// régler le retard commun avant que le son ne sorte.
+    fn periode_annoncee(&self) -> usize {
+        self.periode_du_lecteur()
+    }
 }
+
+macro_rules! deleguer_l_anneau {
+    ($pointeur:ty) => {
+        impl<T: AnneauSecondaire + ?Sized> AnneauSecondaire for $pointeur {
+            fn pousser(&self, echantillons: &[f32]) -> usize {
+                (**self).pousser(echantillons)
+            }
+            fn en_attente(&self) -> usize {
+                (**self).en_attente()
+            }
+            fn periode_du_lecteur(&self) -> usize {
+                (**self).periode_du_lecteur()
+            }
+            fn depuis_la_derniere_lecture_s(&self) -> Option<f64> {
+                (**self).depuis_la_derniere_lecture_s()
+            }
+            fn latence_du_lecteur_s(&self) -> Option<f64> {
+                (**self).latence_du_lecteur_s()
+            }
+            fn publier_l_avance_de_a(&self, avance_s: f64) {
+                (**self).publier_l_avance_de_a(avance_s)
+            }
+            fn periode_annoncee(&self) -> usize {
+                (**self).periode_annoncee()
+            }
+        }
+    };
+}
+deleguer_l_anneau!(std::sync::Arc<T>);
+deleguer_l_anneau!(std::rc::Rc<T>);
 
 /// Table polyphasée d'un sinc fenêtré (Blackman-Harris), chaque phase
 /// normalisée à un gain unitaire en continu.
@@ -251,7 +287,12 @@ impl Consigne {
     /// commence à lire : au départ, ce que l'anneau tient juste avant la
     /// première lecture est exactement l'avance de B.
     pub fn seuil_de_depart(&self, periode_b: usize, compensation_s: f64) -> usize {
-        (self.effective(periode_b, compensation_s).round() as usize) * self.canaux
+        // Jamais moins d'une période de B plus 5 ms : une compensation encore
+        // provisoire (le retard commun n'est réglé qu'au rappel suivant de A)
+        // ferait partir B sur un anneau vide.
+        let plancher = (periode_b / self.canaux) as f64 + 0.005 * self.cadence_b;
+        let trames = self.effective(periode_b, compensation_s).max(plancher);
+        (trames.round() as usize) * self.canaux
     }
 }
 
@@ -309,15 +350,161 @@ pub struct Recopieur {
     sortie: Box<[f32]>,
     regulateur: Regulateur,
     consigne_trames_b: f64,
-    /// Ligne à retard de A, `retard_trames × canaux`, initialisée à zéro.
-    retard: Box<[f32]>,
-    index_retard: usize,
+    /// Ligne à retard de A pour l'usage à une seule sortie ([`Self::recopier`]).
+    /// Avec plusieurs sorties, c'est [`SortieMultiple`] qui porte LA ligne à
+    /// retard de A.
+    retard: RetardDeA,
+    /// Retard commun ajouté à la consigne quand une sortie du groupe est plus
+    /// lente que ce que la consigne absorbe ([`SortieMultiple`]).
+    retard_supplementaire_s: f64,
     echantillons_refuses: u64,
     trames_produites: u64,
     latence_a: Option<f64>,
     latence_b: Option<f64>,
     decalage_manuel_s: f64,
     compensation_s: f64,
+}
+
+/// Plus grand retard commun, en secondes : au-delà, le départ et la pause
+/// tardent de façon gênante, et une latence de carte de cet ordre est une
+/// mesure fausse.
+pub const RETARD_MAX_S: f64 = 0.200;
+
+/// La ligne à retard de A : ce que A joue est ce qu'il a reçu `longueur`
+/// trames plus tôt. Longueur réglable dans une capacité fixée à la
+/// construction (aucune allocation dans le rappel).
+pub struct RetardDeA {
+    canaux: usize,
+    tampon: Box<[f32]>,
+    longueur: usize,
+    ecriture: usize,
+}
+
+impl RetardDeA {
+    pub fn nouveau(canaux: usize, longueur_trames: usize, capacite_trames: usize) -> Self {
+        let canaux = canaux.max(1);
+        let capacite = (capacite_trames.max(longueur_trames) + 1) * canaux;
+        Self {
+            canaux,
+            tampon: vec![0f32; capacite].into_boxed_slice(),
+            longueur: longueur_trames * canaux,
+            ecriture: 0,
+        }
+    }
+
+    pub fn longueur_trames(&self) -> usize {
+        self.longueur / self.canaux
+    }
+
+    /// Changer la longueur. Allonger rejoue du silence tant que le tampon n'a
+    /// pas encore été rempli de son : c'est pourquoi [`SortieMultiple`] ne la
+    /// règle qu'avant que le premier échantillon réel ne sorte.
+    pub fn regler(&mut self, longueur_trames: usize) {
+        let max = self.tampon.len() / self.canaux - 1;
+        self.longueur = longueur_trames.min(max) * self.canaux;
+    }
+
+    pub fn appliquer(&mut self, periode: &mut [f32]) {
+        let cap = self.tampon.len();
+        for s in periode.iter_mut() {
+            self.tampon[self.ecriture] = *s;
+            *s = self.tampon[(self.ecriture + cap - self.longueur) % cap];
+            self.ecriture += 1;
+            if self.ecriture == cap {
+                self.ecriture = 0;
+            }
+        }
+    }
+}
+
+/// #6132 — la même écoute sur A et sur PLUSIEURS sorties B, chacune corrigée
+/// de sa dérive par son propre [`Recopieur`], et un retard commun qui
+/// s'adapte à la plus lente.
+///
+/// Le retard commun vaut la consigne (40 ms) tant qu'elle suffit. Quand une
+/// carte a plus de latence que ce que la consigne absorbe (au-delà d'environ
+/// 25 ms de plus que A), le retard commun grandit AUTOMATIQUEMENT jusqu'à ce
+/// que cette carte-là puisse être nourrie assez tôt, et toutes les autres
+/// sont retardées d'autant pour rester alignées. Il est réglé pendant le
+/// silence de départ — les latences sont lues dès les premiers rappels — puis
+/// figé quand le premier échantillon réel sort de A : le changer en cours
+/// d'écoute s'entendrait.
+pub struct SortieMultiple<R> {
+    cadence_a: f64,
+    canaux: usize,
+    consigne_s: f64,
+    retard: RetardDeA,
+    membres: Vec<(Recopieur, R)>,
+    trames_traitees: u64,
+    fige: bool,
+    retard_supplementaire_s: f64,
+}
+
+impl<R: AnneauSecondaire> SortieMultiple<R> {
+    pub fn nouvelle(
+        canaux: usize,
+        cadence_a: u32,
+        consigne_s: f64,
+        membres: Vec<(Recopieur, R)>,
+    ) -> Self {
+        let canaux = canaux.max(1);
+        let cadence_a = f64::from(cadence_a.max(1));
+        let trames = (consigne_s * cadence_a).round() as usize;
+        let capacite = ((consigne_s + RETARD_MAX_S) * cadence_a).ceil() as usize;
+        Self {
+            cadence_a,
+            canaux,
+            consigne_s,
+            retard: RetardDeA::nouveau(canaux, trames, capacite),
+            membres,
+            trames_traitees: 0,
+            fige: false,
+            retard_supplementaire_s: 0.0,
+        }
+    }
+
+    /// Une période de A : recopiée vers chaque B, puis retardée en place du
+    /// retard commun.
+    pub fn traiter(&mut self, periode: &mut [f32], latence_a_s: Option<f64>) {
+        for (recopieur, anneau) in self.membres.iter_mut() {
+            recopieur.recopier_vers_b(periode, &*anneau, latence_a_s);
+        }
+        let trames = (periode.len() / self.canaux) as u64;
+        if !self.fige {
+            let requis = self
+                .membres
+                .iter()
+                .map(|(r, a)| r.retard_requis_s(a))
+                .fold(0.0, f64::max)
+                .min(RETARD_MAX_S);
+            if (requis - self.retard_supplementaire_s).abs() > 1e-4 {
+                self.retard_supplementaire_s = requis;
+                self.retard
+                    .regler(((self.consigne_s + requis) * self.cadence_a).round() as usize);
+                for (recopieur, _) in self.membres.iter_mut() {
+                    recopieur.regler_le_retard_supplementaire(requis);
+                }
+            }
+            if self.trames_traitees + trames >= self.retard.longueur_trames() as u64 {
+                self.fige = true;
+            }
+        }
+        self.retard.appliquer(periode);
+        self.trames_traitees += trames;
+    }
+
+    /// Le retard commun appliqué à A, en trames de A.
+    pub fn retard_trames(&self) -> usize {
+        self.retard.longueur_trames()
+    }
+
+    pub fn retard_commun_ms(&self) -> f64 {
+        (self.consigne_s + self.retard_supplementaire_s) * 1000.0
+    }
+
+    pub fn membres(&self) -> &[(Recopieur, R)] {
+        &self.membres
+    }
 }
 
 /// Plus grande période de A traitée d'un bloc ; une période plus longue est
@@ -353,8 +540,8 @@ impl Recopieur {
             sortie: vec![0f32; sortie_max].into_boxed_slice(),
             regulateur: Regulateur::nouveau(),
             consigne_trames_b: consigne_s * cadence_b,
-            retard: vec![0f32; retard_trames * canaux].into_boxed_slice(),
-            index_retard: 0,
+            retard: RetardDeA::nouveau(canaux, retard_trames, retard_trames),
+            retard_supplementaire_s: 0.0,
             echantillons_refuses: 0,
             trames_produites: 0,
             latence_a: None,
@@ -372,16 +559,37 @@ impl Recopieur {
         self.decalage_manuel_s = decalage_s;
     }
 
-    /// La compensation, bornée à ce que l'anneau de B peut tenir : on ne
-    /// retarde pas B de plus de deux consignes, on ne l'avance pas de plus
-    /// d'une.
-    fn compensation(&self) -> f64 {
+    /// Latence de A − latence de B + décalage manuel, bornée à ±200 ms (au-delà,
+    /// ce n'est plus une latence de carte, c'est une mesure folle).
+    fn compensation_propre(&self) -> f64 {
         let auto = match (self.latence_a, self.latence_b) {
             (Some(a), Some(b)) => a - b,
             _ => 0.0,
         };
-        let consigne = self.consigne_trames_b / self.cadence_b;
-        (auto + self.decalage_manuel_s).clamp(-consigne, 2.0 * consigne)
+        (auto + self.decalage_manuel_s).clamp(-RETARD_MAX_S, RETARD_MAX_S)
+    }
+
+    /// La compensation appliquée : la propre, plus le retard commun ajouté.
+    fn compensation(&self) -> f64 {
+        self.compensation_propre() + self.retard_supplementaire_s
+    }
+
+    /// Le retard commun, en plus de la consigne, qu'il faudrait pour que B
+    /// tienne sa période entière dans l'anneau malgré sa latence : 0 quand la
+    /// consigne suffit. Calculé sur la période que B annonce dès son premier
+    /// rappel.
+    pub fn retard_requis_s(&self, anneau: &dyn AnneauSecondaire) -> f64 {
+        let periode_b = (anneau.periode_annoncee() / self.canaux) as f64 / self.cadence_b;
+        let filtre = (COEFFICIENTS / 2) as f64 * self.rapport_nominal / self.cadence_b;
+        let disponible = self.consigne_trames_b / self.cadence_b + self.compensation_propre();
+        // 5 ms de marge comme le plancher de la consigne, 2 ms de plus pour
+        // que le plancher ne morde pas au millième près.
+        (periode_b + 0.005 + 0.002 + filtre - disponible).max(0.0)
+    }
+
+    /// Le retard commun ajouté par [`SortieMultiple`].
+    pub fn regler_le_retard_supplementaire(&mut self, retard_s: f64) {
+        self.retard_supplementaire_s = retard_s.max(0.0);
     }
 
     /// La consigne de remplissage de B, à copier dans le rappel de B pour son
@@ -420,15 +628,27 @@ impl Recopieur {
         }
     }
 
-    /// Une période de A : `periode` (entrelacée, déjà au volume) est recopiée
-    /// vers B, puis remplacée en place par sa version retardée — ce que A
-    /// doit réellement jouer.
+    /// Une période de A, une seule sortie B : `periode` (entrelacée) est
+    /// recopiée vers B, puis remplacée en place par sa version retardée — ce
+    /// que A doit réellement jouer.
     ///
     /// `latence_a_s` : la latence matérielle de A lue dans les horodatages de
     /// son rappel (`None` si le pilote ne la donne pas).
     pub fn recopier(
         &mut self,
         periode: &mut [f32],
+        anneau: &dyn AnneauSecondaire,
+        latence_a_s: Option<f64>,
+    ) {
+        self.recopier_vers_b(periode, anneau, latence_a_s);
+        self.retard.appliquer(periode);
+    }
+
+    /// Une période de A recopiée vers B, sans toucher à `periode` : la ligne à
+    /// retard de A est l'affaire de l'appelant ([`SortieMultiple`]).
+    pub fn recopier_vers_b(
+        &mut self,
+        periode: &[f32],
         anneau: &dyn AnneauSecondaire,
         latence_a_s: Option<f64>,
     ) {
@@ -445,7 +665,9 @@ impl Recopieur {
         self.latence_a = lisser(self.latence_a, mesure(latence_a_s), dt);
         self.latence_b = lisser(self.latence_b, mesure(anneau.latence_du_lecteur_s()), dt);
         self.compensation_s = self.compensation();
-        anneau.publier_l_avance_de_a(self.latence_a.unwrap_or(0.0) + self.decalage_manuel_s);
+        anneau.publier_l_avance_de_a(
+            self.latence_a.unwrap_or(0.0) + self.decalage_manuel_s + self.retard_supplementaire_s,
+        );
         // 1. Mesure de l'écart : l'avance de B (poussé mais pas encore
         //    entendu) AVANT cette période, contre la consigne.
         //    Tant que B n'a pas commencé à lire, l'anneau se remplit jusqu'au
@@ -465,17 +687,6 @@ impl Recopieur {
         // 2. Rééchantillonnage par blocs de BLOC_MAX trames.
         for bloc in periode[..trames * ch].chunks(BLOC_MAX * ch) {
             self.reechantillonner(bloc, pas, anneau);
-        }
-
-        // 3. Ligne à retard de A.
-        if !self.retard.is_empty() {
-            for s in periode[..trames * ch].iter_mut() {
-                std::mem::swap(&mut self.retard[self.index_retard], s);
-                self.index_retard += 1;
-                if self.index_retard == self.retard.len() {
-                    self.index_retard = 0;
-                }
-            }
         }
     }
 
@@ -567,23 +778,43 @@ pub fn decalage_manuel_s(sync_delay_a_ms: i64, sync_delay_b_ms: i64) -> f64 {
     (sync_delay_b_ms - sync_delay_a_ms) as f64 / 1000.0
 }
 
-/// La clé de réglage de la seconde sortie d'une zone. Valeur : l'identifiant
-/// d'une sortie locale (`local:<nom>`, comme `output_device_id`) ou son nom ;
-/// absente ou vide = pas de sortie double.
+/// La clé de réglage des sorties suiveuses d'une zone. Valeur : un tableau
+/// JSON d'identifiants de sorties locales (`local:<nom>`, comme
+/// `output_device_id`) ; absente ou vide = pas de sortie double.
 pub fn cle_de_zone(zone_id: i64) -> String {
     format!("zone_{zone_id}_sortie_double")
 }
 
-/// Le nom du périphérique B réglé sur la zone, préfixe `local:` retiré.
-pub fn seconde_sortie_de_zone(
+/// Les périphériques B réglés sur la zone, préfixe `local:` retiré.
+pub fn secondes_sorties_de_zone(
     db: &std::sync::Arc<dyn crate::db::backend::DbBackend>,
     zone_id: i64,
-) -> Option<String> {
+) -> Vec<String> {
     crate::db::settings_repo::SettingsRepo::with_backend(db.clone())
         .get(&cle_de_zone(zone_id))
         .ok()
         .flatten()
-        .and_then(|v| nom_de_peripherique(&v))
+        .map(|v| lire_la_valeur(&v))
+        .unwrap_or_default()
+}
+
+/// La valeur du réglage : un tableau JSON de sorties (plusieurs suiveurs), ou
+/// une seule sortie en texte (la forme de l'étape 2a).
+pub fn lire_la_valeur(valeur: &str) -> Vec<String> {
+    let mut noms: Vec<String> = match serde_json::from_str::<Vec<String>>(valeur.trim()) {
+        Ok(liste) => liste
+            .iter()
+            .filter_map(|v| nom_de_peripherique(v))
+            .collect(),
+        Err(_) => nom_de_peripherique(valeur).into_iter().collect(),
+    };
+    noms.dedup();
+    noms
+}
+
+/// La valeur écrite par la route de groupement : un tableau JSON.
+pub fn ecrire_la_valeur(sorties: &[String]) -> String {
+    serde_json::to_string(sorties).unwrap_or_else(|_| "[]".into())
 }
 
 /// `local:<nom>` ou `<nom>` vers `<nom>` ; vide vers `None`.
