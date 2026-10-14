@@ -1314,7 +1314,10 @@ const CANDIDATS_RG_WHERE: &str = "t.file_path IS NOT NULL AND t.file_path != '' 
 /// de [`CANDIDATS_RG_WHERE`] ne bougent pas. Voir
 /// [`crate::taches_de_fond::perimetre`].
 fn candidats_rg_where(backend: &Arc<dyn DbBackend>) -> String {
-    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(backend);
+    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::ReplayGain,
+    );
     format!("{CANDIDATS_RG_WHERE}{perimetre}")
 }
 
@@ -1353,7 +1356,10 @@ pub fn compter_les_reportees_par_chemin(backend: &Arc<dyn DbBackend>) -> i64 {
     // n'est plus du travail du tout. La compter ici ferait dire à la carte
     // « en attente d'un disque » pour un partage que l'utilisateur a retiré
     // des analyses — précisément le NAS démonté de l'exemple.
-    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(backend);
+    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::ReplayGain,
+    );
     let dans_le_perimetre = if perimetre.is_empty() {
         String::new()
     } else {
@@ -1960,7 +1966,10 @@ fn candidats_empreinte_where(backend: &Arc<dyn DbBackend>) -> String {
     } else {
         ""
     };
-    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(backend);
+    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::Empreintes,
+    );
     format!("{CANDIDATS_EMPREINTE_WHERE}{temoin}{perimetre}")
 }
 
@@ -2134,7 +2143,10 @@ fn candidats_dr_where(backend: &Arc<dyn DbBackend>) -> String {
     } else {
         ""
     };
-    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(backend);
+    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::PlageDynamique,
+    );
     format!("{CANDIDATS_DR_WHERE}{temoin}{perimetre}")
 }
 
@@ -2177,7 +2189,10 @@ pub fn compter_les_candidats_dr(backend: &Arc<dyn DbBackend>) -> i64 {
 /// `rg_skipped_oversized` (`dynamic_range_oversized`), sans fichier
 /// (`dynamic_range_without_file`). Aucune racine exclue : `0` sans requête.
 pub fn compter_les_sans_dr_hors_perimetre(backend: &Arc<dyn DbBackend>) -> i64 {
-    let hors = crate::taches_de_fond::perimetre::clause_hors_perimetre_decodage(backend);
+    let hors = crate::taches_de_fond::perimetre::clause_hors_perimetre_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::PlageDynamique,
+    );
     if hors.is_empty() {
         return 0;
     }
@@ -2242,7 +2257,10 @@ impl PistesTraiteesDr {
 /// Voir [`PistesTraiteesDr`]. `None` sur erreur de requête : la route publie
 /// alors les anciens champs seuls, et le client garde son calcul d'avant.
 pub fn compter_les_pistes_traitees_dr(backend: &Arc<dyn DbBackend>) -> Option<PistesTraiteesDr> {
-    let hors = crate::taches_de_fond::perimetre::clause_hors_perimetre_decodage(backend);
+    let hors = crate::taches_de_fond::perimetre::clause_hors_perimetre_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::PlageDynamique,
+    );
     // Sans racine exclue, rien n'est hors périmètre : un terme toujours faux.
     let hors = if hors.is_empty() {
         " AND 1 = 0".to_string()

@@ -91,7 +91,10 @@ static EN_COURS: AtomicBool = AtomicBool::new(false);
 /// Le prédicat des mesures périmées, sur `tracks t`, périmètre compris. Un
 /// seul texte pour le comptage et pour la sélection.
 fn perimees_where(backend: &Arc<dyn DbBackend>) -> String {
-    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(backend);
+    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::ReplayGain,
+    );
     format!(
         "t.file_path IS NOT NULL AND t.file_path != '' \
          AND EXISTS (SELECT 1 FROM track_metadata s WHERE s.track_id = t.id \

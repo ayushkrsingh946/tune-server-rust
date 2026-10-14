@@ -30,12 +30,31 @@ comportement d'avant.
 
 | Portée | Dossiers | Genres |
 |---|---|---|
-| Toutes les passes (ReplayGain, plage dynamique, empreintes, CLAP) | `background_analysis_excluded_roots` (étape 1 : racines **et sous-dossiers**) | `background_analysis_excluded_genres` (**étape 1, nouveau**) |
-| CLAP seul | (étape 2, si demandé) | `audio_embedding_genres_included` / `_excluded` (#6198, livré) |
-| ReplayGain seul, plage dynamique seule | (étape 2, si demandé) | (étape 2, si demandé) |
+| Périmètre commun (toutes les passes) | `background_analysis_excluded_roots` (étape 1 : racines **et sous-dossiers**) | `background_analysis_excluded_genres` (étape 1) |
+| Une passe à part (étape 2) | `background_analysis_scope_by_pass.<passe>.excluded_roots` | `background_analysis_scope_by_pass.<passe>.excluded_genres` |
+| CLAP seul, en plus | — | `audio_embedding_genres_included` / `_excluded` (#6198, livré) |
 
 Une piste est analysée par une passe si elle passe TOUTES les clauses qui
 s'appliquent à cette passe.
+
+### Périmètre par passe (étape 2, décision de Bertrand du 13/10)
+
+`background_analysis_scope_by_pass` est un objet dont les clés sont les
+passes : `replaygain` (gain de piste et d'album, crêtes, remesures),
+`dynamic_range`, `fingerprints`, `audio_embedding`. Chaque passe peut porter
+`excluded_roots` et `excluded_genres`.
+
+- Un champ **absent** (ou `null`) **hérite** : du périmètre commun, et, pour
+  les **empreintes, du ReplayGain** (elles décodent avec lui ; décision du
+  13/10 : on garde).
+- Un tableau, **même vide**, **remplace** la valeur héritée pour cette passe :
+  `{"replaygain": {"excluded_roots": []}}` garde le ReplayGain sur le NAS
+  exclu des autres passes.
+- Vide (`{}`, le défaut) : tout hérite, le comportement de l'étape 1.
+- Le moteur résout le périmètre d'une passe par `perimetre::perimetre_de` ;
+  chaque prédicat de passe (sélection et jauge) prend la clause de SA passe
+  (`clause_decodage(backend, Passe::…)`), et la page Santé compte le « hors
+  périmètre » de la plage dynamique sur le périmètre de la plage dynamique.
 
 ### Dossiers
 
@@ -60,13 +79,19 @@ s'appliquent à cette passe.
 - Une piste SANS genre n'est jamais écartée par une liste d'exclusion. (Avec la
   liste « Réserver aux genres » du CLAP, une piste sans genre n'est pas
   analysée : l'écran le dit.)
-- **Conséquence sur le gain d'album.** Le gain d'album n'est calculé que
-  lorsque TOUTES les pistes de l'album ont leur gain de piste (garde de
-  complétude de `analyze_album_batch`, une moyenne partielle n'est pas une
-  moyenne). Une piste d'un genre écarté du ReplayGain prive donc son album de
-  gain d'album. Sur un album d'un seul genre, c'est sans effet (tout l'album
-  est écarté). Sur une compilation aux genres mêlés, l'album n'aura qu'un gain
-  de piste. Voir les décisions ouvertes.
+- **Le genre se juge À L'ALBUM** (décision de Bertrand du 13/10). Une piste
+  d'un album qui porte un genre (`albums.genre` ou `albums.genres`) est jugée
+  sur le genre de son album : un album dont le genre n'est pas exclu est
+  analysé **en entier**, même ses pistes d'un genre exclu, et son gain
+  d'album reste calculable (la garde de complétude de `analyze_album_batch`
+  trouve toutes ses pistes). Un album d'un genre exclu sort en entier. Une
+  piste d'un album SANS genre d'album n'est JAMAIS exclue par une règle de
+  genre (décision du 13/10, pour que le gain d'album reste calculable). Seule
+  une piste sans album est jugée sur ses propres genres. Vaut pour les listes d'exclusion du périmètre (commun et
+  par passe) ; les deux listes du CLAP (#6198) restent jugées sur la piste.
+- **Avertissement** (décision du 13/10) : quand un genre est exclu du
+  ReplayGain, l'écran affiche sous le réglage « Ces pistes seront lues sans
+  normalisation du volume. »
 
 ### Où il se règle
 
@@ -77,13 +102,25 @@ s'appliquent à cette passe.
   de migration**.
 - Changer les dossiers ou les genres de toutes les passes referme la campagne
   ReplayGain en cours : son total avait été compté sur l'ancien périmètre.
+- **Étape 3** : `GET /system/analysis-scope/counts` rend, pour chaque entrée
+  du périmètre commun et des réglages propres de chaque passe, le nombre de
+  pistes (avec fichier) qu'elle désigne à elle seule :
+  `{"common": {"excluded_roots": [{"value", "tracks"}], "excluded_genres": [...]},
+  "by_pass": {"<passe>": {...}}}`. Une entrée mal orthographiée se lit 0. Un
+  seul parcours de `tracks` par liste (`SUM(CASE …)` par entrée), hors de
+  l'exécuteur. Les genres se comptent à l'album, comme ils s'appliquent.
 - Web : Réglages › Bibliothèque, sous la liste des dossiers.
   - une case « Analyses de fond » par racine (rc3) ;
   - **étape 1** : « Dossiers exclus des analyses », la liste des sous-dossiers
     exclus, chacun avec « Réinclure », et un champ pour en ajouter un ;
   - **étape 1** : « Genres exclus de toutes les analyses », un champ à
     virgules ;
-  - les deux champs du CLAP (#6198).
+  - les deux champs du CLAP (#6198) ;
+  - **étape 2** : « Périmètre par analyse », une case « Comme le périmètre
+    commun » (« Comme le ReplayGain » pour les empreintes) par passe et par
+    champ ; décochée, un champ à la passe ;
+  - **étape 3** : « Pistes retirées : N » à côté de chaque entrée exclue,
+    recompté après chaque réglage ; rien si le serveur n'a pas la route.
 
 ## Ce qui arrive aux résultats déjà calculés
 
@@ -111,25 +148,26 @@ demande.
 
 ## Étapes
 
-1. **Étape 1 (ce lot).** Exclusion par dossier (racine ou sous-dossier) et par
+1. **Étape 1 (livrée, #6297 / web#2170).** Exclusion par dossier (racine ou sous-dossier) et par
    genre, appliquée par les trois passes (et les empreintes), avec son réglage
    web. Témoins : sélection, compteurs, partition dedans/dehors, passes réelles
    sur un vrai fichier, chacun avec sa contre-épreuve.
-2. **Étape 2 (sur décision).** Périmètre PAR PASSE : par exemple garder le
-   ReplayGain sur le NAS mais pas le CLAP. Le testeur n'a pas répondu à cette
-   question (#5593, commentaire du 01/10).
-3. **Étape 3 (sur décision).** Afficher, à côté de chaque entrée, combien de
-   pistes elle exclut (une route de comptage), pour qu'une entrée mal
-   orthographiée se voie.
+2. **Étape 2 (go du 13/10, ce lot).** Périmètre PAR PASSE, le commun par
+   défaut ; genre jugé à l'album ; avertissement « sans normalisation ».
+3. **Étape 3 (go du 13/10, ce lot).** Combien de pistes chaque entrée retire
+   (`GET /system/analysis-scope/counts`).
 
-## Décisions laissées à Bertrand
+## Décisions de Bertrand (13/10)
 
-- Le genre écarté des passes de lecture (ReplayGain, plage dynamique) : faut-il
-  un avertissement dans l'écran (« ces pistes seront lues sans
-  normalisation ») ? Aujourd'hui le texte d'aide le dit en une phrase.
-- Le gain d'album d'une compilation aux genres mêlés (voir plus haut) : on le
-  laisse manquer, ou le genre se juge à l'album (tout l'album écarté si une
-  majorité de pistes l'est) ?
-- Les empreintes suivent les dossiers et les genres comme le ReplayGain, par
-  cohérence avec les racines de la rc3. À garder ?
-- L'étape 2 (périmètre par passe) et l'étape 3 (comptage par entrée).
+- Le genre se juge à l'album (voir « Genres »).
+- Un avertissement visible quand un genre est exclu du ReplayGain.
+- Étape 2 (par passe, le commun par défaut) et étape 3 (comptage) : go.
+- Les empreintes suivent le ReplayGain : on garde.
+
+## Décisions de Bertrand (13/10, suite)
+
+- Une piste d'un album sans genre d'album n'est jamais exclue par une règle
+  de genre.
+- « Pistes retirées » compte les pistes que chaque entrée DÉSIGNE : une piste
+  désignée par deux entrées compte deux fois. Le texte d'aide de l'écran le
+  dit.

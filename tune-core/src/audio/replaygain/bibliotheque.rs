@@ -75,9 +75,15 @@ pub fn compter_la_bibliotheque_replaygain(
     // #5593 — dans le PÉRIMÈTRE réglé : une racine exclue sort des éligibles
     // comme des candidats, sinon `eligibles - analysees` annoncerait pour
     // toujours un reste que la passe ne fera jamais.
-    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(backend);
+    let perimetre = crate::taches_de_fond::perimetre::clause_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::ReplayGain,
+    );
     // Le complément : un terme toujours faux sans racine exclue.
-    let hors = crate::taches_de_fond::perimetre::clause_hors_perimetre_decodage(backend);
+    let hors = crate::taches_de_fond::perimetre::clause_hors_perimetre_decodage(
+        backend,
+        crate::taches_de_fond::perimetre::Passe::ReplayGain,
+    );
     let hors = if hors.is_empty() {
         " AND 1 = 0".to_string()
     } else {
