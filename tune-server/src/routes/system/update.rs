@@ -952,7 +952,33 @@ fn homebrew_mismatch_result(installation: &HomebrewInstallation, current: &str) 
 ///
 /// Les CINQ archives du moissonneur couvrent linux x86_64 et aarch64, macOS
 /// arm64 et x86_64, Windows x86_64 : toutes les plateformes étaient touchées.
-const PREFIXE_ARCHIVE_SERVEUR: &str = "tune-server";
+const PREFIXE_ARCHIVE_SERVEUR: &str = "tune-server-";
+
+/// L'archive est-elle celle du binaire PUBLIC, et pas celle d'une variante
+/// (binaire composite) dont le nom commence lui aussi par `tune-server-` ?
+///
+/// Le préfixe seul ne suffit pas : `tune-server-<variante>-v1.0.0-…-linux-…`
+/// le porte aussi, et une variante ne doit jamais remplacer le binaire public
+/// (ni l'inverse) au hasard de l'ordre alphabétique — le même mécanisme que
+/// l'incident du moissonneur. Après `tune-server-`, le binaire public n'a que
+/// deux formes :
+/// - `v<chiffre>…` : l'archive versionnée (`tune-server-v0.9.153-linux-x86_64.tar.gz`) ;
+/// - `<système>-…` : l'alias stable (`tune-server-linux-x86_64.tar.gz`), créé
+///   par `scripts/creer-alias-actifs-release.sh` et listé dans `SHA256SUMS`.
+///
+/// Tout autre segment (un nom de variante) est refusé. `name` est en minuscules.
+fn est_archive_du_serveur_public(name: &str) -> bool {
+    let Some(reste) = name.strip_prefix(PREFIXE_ARCHIVE_SERVEUR) else {
+        return false;
+    };
+    let mut octets = reste.bytes();
+    let versionnee =
+        octets.next() == Some(b'v') && octets.next().is_some_and(|c| c.is_ascii_digit());
+    let alias = ["linux-", "macos-", "windows-"]
+        .iter()
+        .any(|systeme| reste.starts_with(systeme));
+    versionnee || alias
+}
 
 /// Find the extractable archive asset (tar.gz or zip) for the current platform.
 /// Excludes .dmg and .exe installers — we want the raw archive containing the binary + web/.
@@ -970,7 +996,7 @@ fn find_archive_asset(release: &ReleaseInfo) -> Option<&ReleaseAsset> {
 
         // L'archive DU SERVEUR, et pas un autre binaire publié sur la même
         // release (voir `PREFIXE_ARCHIVE_SERVEUR`).
-        if !name.starts_with(PREFIXE_ARCHIVE_SERVEUR) {
+        if !est_archive_du_serveur_public(&name) {
             return false;
         }
 
@@ -1147,7 +1173,10 @@ mod no_auto_update_tests_6068 {
 
 #[cfg(test)]
 mod update_availability_tests {
-    use super::{HomebrewInstallation, UpdateBlame, find_archive_asset, update_release_payload};
+    use super::{
+        HomebrewInstallation, UpdateBlame, est_archive_du_serveur_public, find_archive_asset,
+        update_release_payload,
+    };
     use std::path::PathBuf;
     use tune_core::updater::{ReleaseAsset, ReleaseInfo};
 
@@ -1339,6 +1368,82 @@ mod update_availability_tests {
         // Ni l'une ni l'autre n'accuse la signature : le fichier est absent de
         // la liste, pas contredit par elle.
         assert_ne!(hors_signature, UpdateBlame::Untrusted.user_message());
+    }
+
+    /// Les archives d'un binaire composite (une variante du serveur) commencent
+    /// elles aussi par `tune-server-`. Placées dans une release, elles passent
+    /// AVANT `tune-server-linux-…` et `tune-server-v…` dans l'ordre
+    /// alphabétique : le binaire public ne doit jamais les prendre.
+    #[test]
+    fn l_archive_d_une_variante_n_est_jamais_prise_pour_le_binaire_public() {
+        let mut noms: Vec<String> = Vec::new();
+        for variante in ["aaa", "composite", "module", "ld"] {
+            for plateforme in [
+                "linux-aarch64-musl.tar.gz",
+                "linux-aarch64.tar.gz",
+                "linux-x86_64-musl.tar.gz",
+                "linux-x86_64.tar.gz",
+                "macos-aarch64.tar.gz",
+                "macos-x86_64.tar.gz",
+                "windows-x86_64.zip",
+            ] {
+                noms.push(format!("tune-server-{variante}-v1.0.0-b1-{plateforme}"));
+                noms.push(format!("tune-server-{variante}-{plateforme}"));
+            }
+        }
+        let mut avec_public = noms.clone();
+        avec_public.extend(release_v0_9_153().assets.into_iter().map(|a| a.name));
+        avec_public.sort();
+        let refs: Vec<&str> = avec_public.iter().map(String::as_str).collect();
+        if let Some(asset) = find_archive_asset(&release_avec(&refs)) {
+            assert!(
+                est_archive_du_serveur_public(&asset.name.to_lowercase()),
+                "archive retenue : {}",
+                asset.name
+            );
+            assert!(
+                asset.name.starts_with("tune-server-v")
+                    || asset.name.starts_with("tune-server-linux-"),
+                "archive retenue : {}",
+                asset.name
+            );
+        }
+
+        // Une release qui ne porte QUE des archives de variante n'offre rien.
+        let refs: Vec<&str> = noms.iter().map(String::as_str).collect();
+        let seule = release_avec(&refs);
+        assert!(
+            find_archive_asset(&seule).is_none(),
+            "archive retenue : {:?}",
+            find_archive_asset(&seule).map(|a| &a.name)
+        );
+        let payload = update_release_payload("0.9.152", &seule, None);
+        assert_eq!(payload["update_available"], false);
+        assert_eq!(payload["unavailable_reason"], "no_compatible_asset");
+    }
+
+    #[test]
+    fn les_deux_formes_du_binaire_public_restent_reconnues() {
+        for n in [
+            "tune-server-v0.9.153-linux-x86_64.tar.gz",
+            "tune-server-v1.0.0-rc5-windows-x86_64.zip",
+            "tune-server-linux-aarch64-musl.tar.gz",
+            "tune-server-macos-aarch64.tar.gz",
+            "tune-server-windows-x86_64.zip",
+        ] {
+            assert!(est_archive_du_serveur_public(n), "{n} doit être reconnue");
+        }
+        for n in [
+            "tune-server-composite-v1.0.0-b1-linux-x86_64.tar.gz",
+            "tune-server-variante-linux-x86_64.tar.gz",
+            "tune-server-vx-linux-x86_64.tar.gz",
+            "tune-server-v-linux-x86_64.tar.gz",
+            "tune-server_0.9.153_amd64.deb",
+            "tune-serverlinux-x86_64.tar.gz",
+            "moissonneur-roon-v0.9.153-linux-x86_64.tar.gz",
+        ] {
+            assert!(!est_archive_du_serveur_public(n), "{n} doit être refusée");
+        }
     }
 
     /// Le témoin : une release qui ne porte QUE le moissonneur n'offre aucune
