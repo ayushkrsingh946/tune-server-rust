@@ -4685,7 +4685,7 @@ impl AlbumRepo {
 ///     découpe par `json_array_contains_lower`. Un contenu qui n'est pas un
 ///     tableau de chaînes ne rend rien, comme `json_each` sur une valeur
 ///     illisible.
-fn jetons_de_genre(genre: Option<&str>, genres_json: Option<&str>) -> Vec<String> {
+pub(crate) fn jetons_de_genre(genre: Option<&str>, genres_json: Option<&str>) -> Vec<String> {
     let mut jetons = Vec::new();
     if let Some(brut) = genre {
         let decoupe = brut
