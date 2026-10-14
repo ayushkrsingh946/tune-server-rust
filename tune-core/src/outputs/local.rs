@@ -696,7 +696,7 @@ pub struct LocalOutput {
     /// #6132 — la seconde sortie de la zone qui joue ici (nom du périphérique
     /// B), ou `None`. Posée par piste par l'orchestrateur depuis
     /// `zone_{id}_sortie_double`, lue une fois par `play_url`.
-    seconde_sortie: std::sync::Mutex<Option<crate::outputs::sortie_double::SecondeSortieDemandee>>,
+    seconde_sortie: std::sync::Mutex<Vec<crate::outputs::sortie_double::SecondeSortieDemandee>>,
     /// Optional headphone crossfeed effect, applied AFTER the convolver on the
     /// local (DAC) output only. Gated by the same `pure_bypass` (skipped in
     /// PURE) and only when the stream is stereo. Set per-play by the
@@ -1243,7 +1243,7 @@ impl LocalOutput {
             convolver: Arc::new(std::sync::Mutex::new(None)),
             pure_bypass: Arc::new(AtomicBool::new(false)),
             strict_bitperfect: Arc::new(AtomicBool::new(false)),
-            seconde_sortie: std::sync::Mutex::new(None),
+            seconde_sortie: std::sync::Mutex::new(Vec::new()),
             mono_downmix: Arc::new(AtomicBool::new(false)),
             reaffectation: Arc::new(CreneauReaffectation::vide()),
             disposition: Arc::new(std::sync::Mutex::new(None)),
@@ -1540,14 +1540,17 @@ impl LocalOutput {
     /// #6132 — la seconde sortie (sortie double) de la zone qui va jouer :
     /// le nom d'un autre périphérique local, ou `None`. Prise en compte à la
     /// prochaine ouverture du périphérique.
-    pub fn set_seconde_sortie(
+    pub fn set_secondes_sorties(
         &self,
-        demande: Option<crate::outputs::sortie_double::SecondeSortieDemandee>,
+        demandes: Vec<crate::outputs::sortie_double::SecondeSortieDemandee>,
     ) {
         *self
             .seconde_sortie
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = demande.filter(|d| !d.nom.trim().is_empty());
+            .unwrap_or_else(|e| e.into_inner()) = demandes
+            .into_iter()
+            .filter(|d| !d.nom.trim().is_empty())
+            .collect();
     }
 
     /// #6132 — le curseur de volume de cette sortie (millièmes), celui que
@@ -1558,7 +1561,7 @@ impl LocalOutput {
         self.user_volume.clone()
     }
 
-    pub fn seconde_sortie(&self) -> Option<crate::outputs::sortie_double::SecondeSortieDemandee> {
+    pub fn secondes_sorties(&self) -> Vec<crate::outputs::sortie_double::SecondeSortieDemandee> {
         self.seconde_sortie
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -5272,7 +5275,7 @@ impl OutputTarget for LocalOutput {
         // l'orchestrateur pose avant `play_url`.
         let strict_bitperfect = self.strict_bitperfect.load(Ordering::Relaxed);
         // #6132 — lue UNE fois par piste, comme `strict_bitperfect`.
-        let seconde_sortie = self.seconde_sortie();
+        let seconde_sortie = self.secondes_sorties();
         let mono_downmix = self.mono_downmix.clone();
         let reaffectation = self.reaffectation.clone();
         let disposition = self.disposition.clone();
@@ -5513,7 +5516,7 @@ impl OutputTarget for LocalOutput {
                 info!("local_audio_non_wav_stream_detected_decoding");
                 // #6132 — la sortie double n'est branchée que sur le chemin
                 // PCM partagé (`BackendCpal`) ; dit plutôt que tu.
-                if let Some(nom) = seconde_sortie.as_ref().map(|d| d.nom.as_str()) {
+                for nom in seconde_sortie.iter().map(|d| d.nom.as_str()) {
                     warn!(
                         device = %device_name,
                         seconde_sortie = %nom,
@@ -6195,8 +6198,13 @@ impl OutputTarget for LocalOutput {
             // #6132 — la sortie double n'existe que sur le chemin partagé.
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if bras != enchainement_exclusif::BrasDeLecture::CpalPartage
-                && let Some(nom) = seconde_sortie.as_ref().map(|d| d.nom.as_str())
+                && !seconde_sortie.is_empty()
             {
+                let nom = seconde_sortie
+                    .iter()
+                    .map(|d| d.nom.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 warn!(
                     device = %device_name,
                     seconde_sortie = %nom,
@@ -6397,9 +6405,9 @@ impl OutputTarget for LocalOutput {
             // #6132 — la sortie double : B s'ouvre et la recopie s'installe
             // AVANT le démarrage de A, pour que la ligne à retard de A soit
             // en place dès sa première période.
-            if let Some(demande) = seconde_sortie.as_ref() {
-                backend.brancher_la_seconde_sortie(
-                    demande,
+            if !seconde_sortie.is_empty() {
+                backend.brancher_les_secondes_sorties(
+                    &seconde_sortie,
                     strict_bitperfect,
                     sortie_double_locale::ReglagesDeA {
                         volume: volume.clone(),

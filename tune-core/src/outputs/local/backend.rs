@@ -386,55 +386,66 @@ pub(super) struct BackendCpal<'a> {
     /// #6132 — A a-t-il été ouvert par le rappel `f32` qui recopie ? Faux
     /// après la cascade entière (i32/i16).
     recopie_possible: bool,
-    /// #6132 — la seconde sortie, vivante tant que le backend l'est.
-    seconde: Option<super::sortie_double_locale::SecondeSortie>,
+    /// #6132 — les sorties suiveuses, vivantes tant que le backend l'est.
+    secondes: Option<super::sortie_double_locale::SecondesSorties>,
 }
 
 impl BackendCpal<'_> {
-    /// #6132 — ouvrir la seconde sortie `nom` et y recopier ce que A joue.
+    /// #6132 — ouvrir les sorties suiveuses et y recopier ce que A joue,
+    /// chacune corrigée de sa dérive, le retard commun réglé sur la plus
+    /// lente.
     ///
     /// Appelé par `play_url` après l'ouverture et avant le démarrage de A :
-    /// la ligne à retard de A est en place avant sa première période. Un
-    /// refus est journalisé et A joue seul — jamais de silence pour cause de
-    /// seconde sortie.
-    pub(super) fn brancher_la_seconde_sortie(
+    /// la ligne à retard de A est en place avant sa première période. Une
+    /// suiveuse refusée est journalisée et les autres jouent — jamais de
+    /// silence sur A pour cause de suiveuse.
+    pub(super) fn brancher_les_secondes_sorties(
         &mut self,
-        demande: &crate::outputs::sortie_double::SecondeSortieDemandee,
+        demandes: &[crate::outputs::sortie_double::SecondeSortieDemandee],
         strict_bitperfect: bool,
         reglages_a: super::sortie_double_locale::ReglagesDeA,
     ) {
-        use super::sortie_double_locale::{ouvrir_la_seconde_sortie, refus_prealable};
-        let nom = demande.nom.as_str();
-        let hote = self.host.id().name();
-        let refus = refus_prealable(
-            hote,
-            strict_bitperfect,
-            self.recopie_possible,
-            &self.device_name,
-            nom,
-        );
-        let resultat = match refus {
-            Some(r) => Err(r),
-            None => ouvrir_la_seconde_sortie(
-                &self.host,
-                demande,
-                self.sortie.cadence,
-                self.sortie.canaux,
-                reglages_a,
-                &self.recopie,
-            ),
+        use super::sortie_double_locale::{
+            installer_les_secondes_sorties, ouvrir_la_seconde_sortie, refus_prealable,
         };
-        match resultat {
-            Ok(seconde) => self.seconde = Some(seconde),
-            Err(refus) => warn!(
-                device = %self.device_name,
-                seconde_sortie = %nom,
-                backend = hote,
-                motif = refus.code(),
-                detail = ?refus,
-                "sortie_double_refusee — la zone joue sur sa sortie seule"
-            ),
+        let hote = self.host.id().name();
+        let mut ouvertes = Vec::new();
+        for demande in demandes {
+            let nom = demande.nom.as_str();
+            let resultat = match refus_prealable(
+                hote,
+                strict_bitperfect,
+                self.recopie_possible,
+                &self.device_name,
+                nom,
+            ) {
+                Some(r) => Err(r),
+                None => ouvrir_la_seconde_sortie(
+                    &self.host,
+                    demande,
+                    self.sortie.cadence,
+                    self.sortie.canaux,
+                    reglages_a.clone(),
+                ),
+            };
+            match resultat {
+                Ok(ouverte) => ouvertes.push(ouverte),
+                Err(refus) => warn!(
+                    device = %self.device_name,
+                    seconde_sortie = %nom,
+                    backend = hote,
+                    motif = refus.code(),
+                    detail = ?refus,
+                    "sortie_double_refusee — la zone joue sans cette sortie"
+                ),
+            }
         }
+        self.secondes = installer_les_secondes_sorties(
+            &self.recopie,
+            self.sortie.canaux,
+            self.sortie.cadence,
+            ouvertes,
+        );
     }
 
     /// #4953 — le périphérique a-t-il prouvé, à cette ouverture, qu'il suit
@@ -956,7 +967,7 @@ impl<'a> BackendLocal<'a> for BackendCpal<'a> {
             host,
             recopie,
             recopie_possible,
-            seconde: None,
+            secondes: None,
         })
     }
 

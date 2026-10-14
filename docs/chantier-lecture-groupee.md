@@ -111,7 +111,7 @@ diffère d'une carte à l'autre (quelques ms). Voir les décisions.
 5. Refus en « bit-perfect strict », acceptation en mode PURE : maintenus.
 6. Mode exclusif et flux compressé : **après** l'étape 2 (étape 2c ci-dessous).
 
-## Étape 2a — groupe de deux zones locales (serveur)
+## Étape 2a — groupe de deux zones locales (serveur) : livrée (#6342)
 
 - **Route de groupement** (`POST /zones/group`, `PATCH /zones/groups/{id}`,
   `DELETE`) : quand le meneur est une zone locale et qu'un autre membre est une
@@ -146,6 +146,37 @@ diffère d'une carte à l'autre (quelques ms). Voir les décisions.
   maître + écarts par membre) agit donc sur les deux sorties.
 - **DoP** : B se tait (un DoP rééchantillonné n'est plus du DSD).
 
+## Décisions de Bertrand du 14/10 (après #6342)
+
+1. Plusieurs zones locales suiveuses par groupe : trois cartes ou plus,
+   chacune corrigée de sa dérive.
+2. Une carte plus lente de plus de 25 ms : le retard commun s'adapte
+   automatiquement à la plus lente.
+3. Meneur réseau qui synchronise aussi les zones locales : étape 2b.
+4. Les groupes enregistrés avant cette version sont recalculés au démarrage.
+
+## Étape 2a bis — trois cartes ou plus, retard commun adaptatif (serveur)
+
+- **Plusieurs suiveuses** : `choisir_les_sorties_doubles` retient chaque
+  autre membre local de la machine (une recopie par périphérique distinct).
+  `zone_{meneur}_sortie_double` devient un tableau JSON (la forme à une
+  sortie de l'étape 2a reste lue). Une [`SortieMultiple`] sert toutes les
+  suiveuses depuis le rappel de A : un recopieur par suiveuse (sa dérive, sa
+  latence, son volume), UNE ligne à retard pour A.
+- **Retard commun adaptatif** : il vaut la consigne (40 ms) tant qu'elle
+  suffit. Si une carte a trop de latence pour être nourrie à temps (au-delà
+  d'environ 25 ms de plus que A), il grandit jusqu'à ce qu'elle tienne sa
+  période entière, borné à 40 + 200 ms. Il est réglé pendant le silence de
+  départ — les latences sont lues dès les premiers rappels, chaque B publie
+  sa période avant même de lire — puis figé quand le premier échantillon réel
+  sort de A, parce qu'un changement en cours d'écoute s'entendrait. Le
+  rappel de B ne part jamais sous une période plus 5 ms, même avant que le
+  retard commun soit réglé.
+- **Recalcul au démarrage** : `recalculer_les_sorties_doubles` repasse chaque
+  groupe enregistré et pose ses suiveuses (ASIO : retirées, le groupe reste
+  un groupe de volume). Sortie pas encore enregistrée au démarrage : le
+  backend local réglé pour la machine décide.
+
 ## Étape 2b — lecture groupée avec des membres réseau (serveur)
 
 1. **Propager la lecture d'un groupe.** À la lecture sur le meneur, les suiveurs
@@ -153,6 +184,9 @@ diffère d'une carte à l'autre (quelques ms). Voir les décisions.
    reprise, saut, suivante). Le groupe devient un état du transport, pas
    seulement une liste dans `zone_groups`. La zone suiveuse locale d'une
    sortie double doit aussi s'afficher « en groupe avec » le meneur.
+   **Meneur réseau** (décision du 14/10) : ses membres locaux de la machine
+   jouent aussi ensemble, synchronisés entre eux ; aujourd'hui seul un
+   meneur local porte la sortie double.
 2. **Transport par membre** : points de diffusion OAAT → groupe OAAT existant ;
    renderers indépendants (UPnP, AirPlay, Chromecast…) → départs alignés au
    mieux, sans garantie d'horloge, dit dans l'interface.
@@ -172,8 +206,9 @@ Décision du 13/10 : après l'étape 2.
   rappel natif, B en exclusif ou partagé ;
 - **flux compressé** (non-WAV, décodé dans la sortie) : le même branchement
   sur `build_compressed_f32_stream` ;
-- plus de deux sorties locales, adaptation des canaux, relevé dans l'API de
-  diagnostic.
+- adaptation des canaux, relevé dans l'API de diagnostic ;
+- retard commun réajusté en cours d'écoute (aujourd'hui figé au départ), par
+  exemple à la pause.
 
 ## Étape 3 — les écrans (client web)
 

@@ -2121,7 +2121,7 @@ impl PlaybackOrchestrator {
                 // #6132 — la seconde sortie (zone groupée avec une autre zone
                 // locale), résolue AVANT de verrouiller la sortie de A : elle
                 // lit la sortie de B dans le registre.
-                let seconde_sortie = self.demande_de_seconde_sortie(zone_id, device_id).await;
+                let secondes_sorties = self.demandes_de_secondes_sorties(zone_id, device_id).await;
                 let output = output_arc.lock().await;
                 if let Some(local_output) = output
                     .as_any()
@@ -2136,7 +2136,7 @@ impl PlaybackOrchestrator {
                     );
                     // #6132 — la sortie double de la zone, posée à chaque
                     // lecture comme le strict : `play_url` la lit une fois.
-                    local_output.set_seconde_sortie(seconde_sortie);
+                    local_output.set_secondes_sorties(secondes_sorties);
                     // ReplayGain, applied by the output itself for a local DAC.
                     // A PURE zone is left strictly alone: applying a gain would
                     // multiply every sample and the path would no longer be
@@ -3860,23 +3860,22 @@ mod session_remplacee_ticket_134;
 
 #[cfg(feature = "local-audio")]
 impl PlaybackOrchestrator {
-    /// #6132 — la seconde sortie de la zone `zone_id` (sortie `device_id`),
-    /// telle que la route de groupement l'a posée
-    /// (`zone_{id}_sortie_double`), avec ce qui règle B : le curseur de
-    /// volume de la sortie de B (chaque membre garde le sien) et le décalage
-    /// manuel tiré des `sync_delay_ms` des deux zones.
-    pub(crate) async fn demande_de_seconde_sortie(
+    /// #6132 — les sorties suiveuses de la zone `zone_id` (sortie
+    /// `device_id`), telles que la route de groupement les a posées
+    /// (`zone_{id}_sortie_double`), avec ce qui règle chacune : le curseur de
+    /// volume de sa sortie (chaque membre garde le sien) et le décalage manuel
+    /// tiré des `sync_delay_ms` des deux zones.
+    pub(crate) async fn demandes_de_secondes_sorties(
         &self,
         zone_id: i64,
         device_id: &str,
-    ) -> Option<crate::outputs::sortie_double::SecondeSortieDemandee> {
+    ) -> Vec<crate::outputs::sortie_double::SecondeSortieDemandee> {
         use crate::outputs::sortie_double::{
-            SecondeSortieDemandee, decalage_manuel_s, seconde_sortie_de_zone,
+            SecondeSortieDemandee, decalage_manuel_s, secondes_sorties_de_zone,
         };
-        let nom = seconde_sortie_de_zone(&self.db, zone_id)?;
-        let id_b = format!("local:{nom}");
-        if id_b == device_id {
-            return None;
+        let noms = secondes_sorties_de_zone(&self.db, zone_id);
+        if noms.is_empty() {
+            return Vec::new();
         }
         let zones = crate::db::zone_repo::ZoneRepo::with_backend(self.db.clone())
             .list()
@@ -3888,20 +3887,27 @@ impl PlaybackOrchestrator {
                 .map(|z| i64::from(z.sync_delay_ms))
                 .unwrap_or(0)
         };
-        let decalage = decalage_manuel_s(delai(device_id), delai(&id_b));
-        let sortie_b = { self.outputs.lock().await.get(&id_b) };
-        let volume_utilisateur = match sortie_b {
-            Some(arc) => arc
-                .lock()
-                .await
-                .as_any()
-                .downcast_ref::<crate::outputs::local::LocalOutput>()
-                .map(|b| b.volume_utilisateur()),
-            None => None,
-        };
-        let mut demande = SecondeSortieDemandee::nommee(nom);
-        demande.volume_utilisateur = volume_utilisateur;
-        demande.decalage_manuel_s = decalage;
-        Some(demande)
+        let mut demandes = Vec::new();
+        for nom in noms {
+            let id_b = format!("local:{nom}");
+            if id_b == device_id {
+                continue;
+            }
+            let sortie_b = { self.outputs.lock().await.get(&id_b) };
+            let volume_utilisateur = match sortie_b {
+                Some(arc) => arc
+                    .lock()
+                    .await
+                    .as_any()
+                    .downcast_ref::<crate::outputs::local::LocalOutput>()
+                    .map(|b| b.volume_utilisateur()),
+                None => None,
+            };
+            let mut demande = SecondeSortieDemandee::nommee(nom);
+            demande.volume_utilisateur = volume_utilisateur;
+            demande.decalage_manuel_s = decalage_manuel_s(delai(device_id), delai(&id_b));
+            demandes.push(demande);
+        }
+        demandes
     }
 }

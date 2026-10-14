@@ -114,14 +114,24 @@ pub(crate) fn generic_group_synchronization_contract() -> Value {
 /// latences matérielles compensées par les horodatages du pilote. Les autres
 /// membres éventuels restent indépendants, et sont nommés.
 pub(crate) fn local_double_output_contract(group: &Value) -> Value {
-    let suiveur = group["sortie_double"]["suiveur_id"].as_i64();
     let leader = group["leader_id"].as_i64();
+    let mut synchronisees: Vec<i64> = leader.into_iter().collect();
+    synchronisees.extend(
+        group["sortie_double"]["suiveurs"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s["zone_id"].as_i64())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+    );
     let independants: Vec<i64> = group["zone_ids"]
         .as_array()
         .map(|a| {
             a.iter()
                 .filter_map(|v| v.as_i64())
-                .filter(|id| Some(*id) != suiveur && Some(*id) != leader)
+                .filter(|id| !synchronisees.contains(id))
                 .collect()
         })
         .unwrap_or_default();
@@ -131,7 +141,7 @@ pub(crate) fn local_double_output_contract(group: &Value) -> Value {
         "presentation_timestamps": false,
         "render_latency_calibrated": true,
         "accuracy_claim_ms": null,
-        "synchronized_zone_ids": [leader, suiveur],
+        "synchronized_zone_ids": synchronisees,
         "independent_zone_ids": independants,
         "alternative": "oaat",
     })
