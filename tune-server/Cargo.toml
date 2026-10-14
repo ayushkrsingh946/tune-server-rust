@@ -1646,3 +1646,9 @@ path = "tests/playlist_manager_alias_deprecies.rs"
 name = "pg_balises_6124"
 path = "tests/pg_balises_6124.rs"
 required-features = ["postgres"]
+
+# tune-web-client#902 — l'aperçu d'un instantané cloud résume sans rien
+# restaurer ni adopter la clé.
+[[test]]
+name = "apercu_sauvegarde_cloud_902"
+path = "tests/apercu_sauvegarde_cloud_902.rs"

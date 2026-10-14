@@ -208,6 +208,75 @@ pub(super) async fn snapshots(_admin: RequireAdmin, State(state): State<AppState
     }
 }
 
+/// Télécharge et ouvre un instantané : par la clé locale si c'est la sienne,
+/// sinon par le secret. N'écrit rien.
+async fn ouvrir(
+    state: &AppState,
+    settings: &SettingsRepo,
+    id: i64,
+    secret: Option<&str>,
+) -> Result<(Value, Option<sc::CleRetrouvee>), Response> {
+    let (_, blob) = match sc::telecharger(settings, &state.http_client, id).await {
+        Ok(x) => x,
+        Err(sc::ErreurSite::Http { statut: 404, .. }) => {
+            return Err(erreur(StatusCode::NOT_FOUND, "backup_not_found"));
+        }
+        Err(e) => return Err(erreur_site(e)),
+    };
+    let locale = match sc::cle_locale(settings) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "sauvegarde_cloud_cle_illisible");
+            None
+        }
+    };
+    match sc::dechiffrer(&blob, locale.as_ref(), secret) {
+        Ok(x) => Ok(x),
+        Err(sc::ErreurOuverture::SecretRequis) => {
+            Err(erreur(StatusCode::BAD_REQUEST, "secret_required"))
+        }
+        Err(sc::ErreurOuverture::MauvaisSecret) => {
+            Err(erreur(StatusCode::BAD_REQUEST, "wrong_secret"))
+        }
+        Err(sc::ErreurOuverture::Illisible(e)) => {
+            warn!(error = %e, "sauvegarde_cloud_illisible");
+            Err(erreur(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "backup_unreadable",
+            ))
+        }
+    }
+}
+
+// ── POST /system/config-backup/cloud/preview ────────────────────────
+
+#[derive(Deserialize)]
+pub(super) struct ApercuCorps {
+    id: i64,
+    /// Phrase de passe ou clé de secours, quand la clé locale n'ouvre pas.
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+/// Ouvre un instantané et dit ce qu'il contient, SANS rien restaurer ni
+/// adopter la clé (tune-web-client#902) : l'assistant de première
+/// installation le montre avant le geste « Restaurer ». Le secret, s'il faut,
+/// voyage dans le CORPS, n'est ni journalisé ni rendu.
+pub(super) async fn preview(
+    _admin: RequireAdmin,
+    State(state): State<AppState>,
+    Json(corps): Json<ApercuCorps>,
+) -> Response {
+    if let Err(r) = garde_premium(&state).await {
+        return r;
+    }
+    let settings = SettingsRepo::with_backend(state.backend.clone());
+    match ouvrir(&state, &settings, corps.id, corps.secret.as_deref()).await {
+        Ok((contenu, _)) => Json(json!({ "summary": sc::resumer(&contenu) })).into_response(),
+        Err(r) => r,
+    }
+}
+
 // ── POST /system/config-backup/cloud/restore ────────────────────────
 
 #[derive(Deserialize)]
@@ -230,34 +299,11 @@ pub(super) async fn restore(
         return r;
     }
     let settings = SettingsRepo::with_backend(state.backend.clone());
-    let (_, blob) = match sc::telecharger(&settings, &state.http_client, corps.id).await {
-        Ok(x) => x,
-        Err(sc::ErreurSite::Http { statut: 404, .. }) => {
-            return erreur(StatusCode::NOT_FOUND, "backup_not_found");
-        }
-        Err(e) => return erreur_site(e),
-    };
-    let locale = match sc::cle_locale(&settings) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "sauvegarde_cloud_cle_illisible");
-            None
-        }
-    };
-    let (contenu, retrouvee) = match sc::dechiffrer(&blob, locale.as_ref(), corps.secret.as_deref())
-    {
-        Ok(x) => x,
-        Err(sc::ErreurOuverture::SecretRequis) => {
-            return erreur(StatusCode::BAD_REQUEST, "secret_required");
-        }
-        Err(sc::ErreurOuverture::MauvaisSecret) => {
-            return erreur(StatusCode::BAD_REQUEST, "wrong_secret");
-        }
-        Err(sc::ErreurOuverture::Illisible(e)) => {
-            warn!(error = %e, "sauvegarde_cloud_illisible");
-            return erreur(StatusCode::UNPROCESSABLE_ENTITY, "backup_unreadable");
-        }
-    };
+    let (contenu, retrouvee) =
+        match ouvrir(&state, &settings, corps.id, corps.secret.as_deref()).await {
+            Ok(x) => x,
+            Err(r) => return r,
+        };
     let rapport = match sc::restaurer(&state.backend, &contenu, corps.mode) {
         Ok(r) => r,
         Err(e) => {

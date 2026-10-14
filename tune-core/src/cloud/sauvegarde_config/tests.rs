@@ -870,3 +870,57 @@ async fn rien_ne_part_sans_activation_ni_compte() {
         Issue::Rien("account_not_linked")
     );
 }
+
+// ── Aperçu (tune-web-client#902) ────────────────────────────────────
+
+/// Machine neuve, instantané ouvert par la phrase de passe : le résumé compte
+/// ce que la restauration apporterait, porte la date écrite DANS
+/// l'instantané, et ne rend jamais la valeur d'un jeton.
+#[test]
+fn le_resume_compte_le_contenu_sans_la_valeur_des_jetons() {
+    let source = machine_configuree();
+    let s = reglages(&source);
+    creer_la_cle(&s, PHRASE).unwrap();
+    let cle = cle_locale(&s).unwrap().unwrap();
+    let mut contenu = construire(&source).unwrap();
+    horodater(
+        &mut contenu,
+        Utc.with_ymd_and_hms(2026, 10, 12, 8, 30, 0).unwrap(),
+    );
+    let blob = chiffrer(&cle, &contenu).unwrap();
+
+    let (rouvert, _) = dechiffrer(&blob, None, Some(PHRASE)).unwrap();
+    let r = resumer(&rouvert);
+    assert_eq!(r.created_at.as_deref(), Some("2026-10-12T08:30:00Z"));
+    assert!(r.server_version.is_some());
+    assert_eq!(r.zones, 1);
+    assert_eq!(r.zone_names, vec!["Salon".to_string()]);
+    assert_eq!(r.playlists, 1);
+    assert_eq!(r.favorites, 1);
+    assert!(r.radios >= 1);
+    assert!(r.profiles >= 1);
+    assert_eq!(r.eq_presets, 1, "le préréglage HE R10P n'est pas compté");
+    assert_eq!(r.settings, rouvert["settings"].as_object().unwrap().len());
+    assert_eq!(r.service_tokens, vec!["discogs_token".to_string()]);
+    let texte = serde_json::to_string(&r).unwrap();
+    assert!(
+        !texte.contains("VOYAGE-discogs"),
+        "le résumé rend la valeur du jeton"
+    );
+    assert!(!texte.contains("SECRET-"));
+}
+
+/// Un contenu vide ou étranger se résume à zéro, sans paniquer.
+#[test]
+fn le_resume_d_un_contenu_vide_est_nul() {
+    assert_eq!(resumer(&json!({})), Resume::default());
+    assert_eq!(resumer(&json!("pas un objet")), Resume::default());
+    // Préréglages rangés en texte JSON ou en liste : comptés pareil.
+    let r = resumer(&json!({"settings": {"eq_presets": [{"name": "a"}, {"name": "b"}]}}));
+    assert_eq!(r.eq_presets, 2);
+    let r = resumer(&json!({"settings": {"eq_presets": "[{\"name\":\"a\"}]"}}));
+    assert_eq!(r.eq_presets, 1);
+    // Un jeton vide n'est pas annoncé.
+    let r = resumer(&json!({"service_tokens": {"discogs_token": "  "}}));
+    assert!(r.service_tokens.is_empty());
+}
