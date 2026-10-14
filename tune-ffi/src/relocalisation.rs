@@ -237,6 +237,7 @@ mod tests {
 
     fn base() -> SqliteDb {
         let db = SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
         tune_core::db::migrations::run_migrations(&db).unwrap();
         db
     }

@@ -632,7 +632,18 @@ mod tests {
     fn conteneur_deplace_puis_fichier_depose_vu_par_le_surveillant() {
         use tune_server::state::AppState;
         let _g = test_lock();
-        let tmp = tempfile::tempdir().unwrap();
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+            .with_test_writer()
+            .try_init();
+        // Sous `target/`, jamais sous `/tmp` : `is_tune_temp_file` écarte du
+        // scan tout ce qui vit dans le dossier temporaire du système.
+        let sous = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&sous).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("tune-ffi-conteneur-")
+            .tempdir_in(&sous)
+            .unwrap();
         let a = tmp.path().join("AAAA-1111");
         let b = tmp.path().join("BBBB-2222");
         let musique = |r: &std::path::Path| r.join("Documents/Music");
