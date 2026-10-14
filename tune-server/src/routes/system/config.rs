@@ -3943,7 +3943,9 @@ pub(super) async fn set_license(
             .into_response();
     }
 
-    let tier = crate::routes::cloud::validate_stored_license(&state).await;
+    let tier = crate::routes::cloud::validate_stored_license(&state)
+        .await
+        .tier;
     let premium = tier == tune_core::license::Tier::Premium;
     let ls = state.license.license_state().await;
     Json(json!({

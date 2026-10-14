@@ -666,7 +666,7 @@ mod tests {
         if premium {
             state
                 .license
-                .update_from_server(tune_core::license::Tier::Premium, None)
+                .update_from_server(tune_core::license::Tier::Premium, None, None)
                 .await;
         }
         let app = crate::routes::router_with_plugins(state.clone(), vec![]);
@@ -979,7 +979,7 @@ mod tests {
         let state = AppState::new(":memory:", 0, Default::default()).unwrap();
         state
             .license
-            .update_from_server(tune_core::license::Tier::Premium, None)
+            .update_from_server(tune_core::license::Tier::Premium, None, None)
             .await;
         let app = crate::routes::router_with_plugins(state.clone(), vec![]);
         let (status, corps) = installer_par_la_route(&app, "catalogue-essai-anonyme").await;

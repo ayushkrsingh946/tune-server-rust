@@ -308,7 +308,7 @@ mod tests {
             }
             // Une réponse Free ne rend rien.
             licence
-                .update_from_server(crate::license::Tier::Free, None)
+                .update_from_server(crate::license::Tier::Free, None, None)
                 .await;
             for id in PAYANTS {
                 assert!(!enabled(&s, id), "{id} rendu à un compte Free");
@@ -317,7 +317,7 @@ mod tests {
                 licence.set_account_premium(true, None).await;
             } else {
                 licence
-                    .update_from_server(crate::license::Tier::Premium, None)
+                    .update_from_server(crate::license::Tier::Premium, None, None)
                     .await;
             }
             for id in PAYANTS {

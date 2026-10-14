@@ -478,7 +478,7 @@ pub(crate) mod tests {
             // Retour du Premium par la licence, puis démarrage suivant.
             state
                 .license
-                .update_from_server(tune_core::license::Tier::Premium, None)
+                .update_from_server(tune_core::license::Tier::Premium, None, None)
                 .await;
             premium_plugins::migrate_for_account(&settings, state.license.is_premium().await)
                 .unwrap();
@@ -516,7 +516,7 @@ pub(crate) mod tests {
         if premium {
             state
                 .license
-                .update_from_server(tune_core::license::Tier::Premium, None)
+                .update_from_server(tune_core::license::Tier::Premium, None, None)
                 .await;
         }
         for id in ["crossfeed", "converter", "declick"] {
@@ -728,7 +728,7 @@ pub(crate) mod tests {
 
         state
             .license
-            .update_from_server(tune_core::license::Tier::Premium, None)
+            .update_from_server(tune_core::license::Tier::Premium, None, None)
             .await;
         let (status, reponse) = appel(
             &app,
@@ -772,7 +772,7 @@ pub(crate) mod tests {
             .unwrap();
         state
             .license
-            .update_from_server(tune_core::license::Tier::Premium, None)
+            .update_from_server(tune_core::license::Tier::Premium, None, None)
             .await;
         let app = crate::routes::router_with_plugins(state.clone(), vec![]);
         let (status, reponse) = appel(
