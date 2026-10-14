@@ -519,6 +519,30 @@ pub struct AuthStatus {
     pub expires_in: Option<u64>,
 }
 
+/// #6231 (Didier, fil 2128) — une recherche RESTREINTE à un genre.
+///
+/// Sur l'onglet Genres, la saisie ne filtrait que les nouveautés du genre ouvert,
+/// une liste courte. Cette recherche interroge le catalogue du service.
+///
+/// **Mesuré contre les API réelles le 13/10/2026** : ni `/album/search` ni
+/// `/catalog/search` de Qobuz, ni `/search/album` de Deezer n'acceptent de filtre
+/// de genre (`genre_id`, `genre_ids`, `genre` : résultats identiques). Mais les
+/// deux services disent le genre de CHAQUE album rendu (Qobuz `genre.path`,
+/// Deezer `genre_id`). Tune garde donc, parmi les résultats de la recherche du
+/// service, les albums du genre : `genre_filter = "results"`, et `examined`
+/// dit sur combien de résultats. Un service qui ne dit pas le genre de ses
+/// albums (Tidal, Spotify…) répond [`TuneError::Unsupported`], c'est-à-dire un
+/// 501 que l'écran affiche au lieu de filtrer en silence.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RechercheDansUnGenre {
+    pub albums: Vec<StreamAlbum>,
+    /// Résultats de la recherche du service examinés pour en tirer `albums`.
+    pub examined: usize,
+    /// Comment le genre est appliqué. `"results"` : sur les résultats de la
+    /// recherche du service, d'après le genre que le service donne à chaque album.
+    pub genre_filter: &'static str,
+}
+
 #[async_trait::async_trait]
 pub trait StreamingService: Send + Sync {
     fn as_any(&self) -> &dyn std::any::Any;
@@ -744,6 +768,20 @@ pub trait StreamingService: Send + Sync {
     ) -> Result<Vec<StreamAlbum>, TuneError> {
         let _ = (genre_id, limit);
         Ok(vec![])
+    }
+    /// #6231 — chercher `query` dans le catalogue, restreint au genre
+    /// `genre_id` (voir [`RechercheDansUnGenre`]). Par défaut : non pris en
+    /// charge, ce que l'écran doit DIRE.
+    async fn search_genre_albums(
+        &self,
+        genre_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<RechercheDansUnGenre, TuneError> {
+        let _ = (genre_id, query, limit);
+        Err(TuneError::Unsupported(
+            "genre search not supported for this service".into(),
+        ))
     }
     /// Une rubrique éditoriale (`section_id`, un identifiant de
     /// [`get_featured_sections`](Self::get_featured_sections)) restreinte à un

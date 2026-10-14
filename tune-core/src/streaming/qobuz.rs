@@ -360,6 +360,11 @@ const CATEGORIES_RECHERCHE: [&str; 4] = ["tracks", "albums", "artists", "playlis
 /// grand `limit`.
 const TAILLE_PAGE_RECHERCHE: usize = 50;
 
+/// #6231 — pages de `/album/search` examinées au plus pour une recherche dans
+/// un genre (6 × 50 = 300 résultats). Qobuz ne filtre pas par genre : au-delà,
+/// la recherche coûterait trop d'allers-retours pour une saisie au clavier.
+const PAGES_RECHERCHE_GENRE: usize = 6;
+
 /// Plafond d'une recherche « Tous » (#2160).
 ///
 /// « Tous » ne peut pas vouloir dire « tout le catalogue » : une requête
@@ -1640,6 +1645,34 @@ impl QobuzService {
             .unwrap_or(&[])
     }
 
+    /// #6231 — l'album appartient-il au genre `genre_id` ? Qobuz donne à
+    /// chaque album son genre et la lignée de ce genre (`genre.path`, du plus
+    /// large au plus fin : `[112, 119]` pour Pop/Rock › Rock). Un genre parent
+    /// couvre donc ses sous-genres.
+    fn album_du_genre(item: &serde_json::Value, genre_id: &str) -> bool {
+        let genre = &item["genre"];
+        let egal = |v: &serde_json::Value| {
+            v.as_u64().map(|n| n.to_string()).as_deref() == Some(genre_id)
+                || v.as_str() == Some(genre_id)
+        };
+        egal(&genre["id"])
+            || genre["path"]
+                .as_array()
+                .is_some_and(|chemin| chemin.iter().any(egal))
+    }
+
+    /// #6231 — les albums d'une page de `/album/search` qui appartiennent au
+    /// genre, et le nombre de résultats examinés.
+    fn albums_du_genre(page: &serde_json::Value, genre_id: &str) -> (Vec<StreamAlbum>, usize) {
+        let items = Self::elements(page, "albums");
+        let albums = items
+            .iter()
+            .filter(|i| Self::album_du_genre(i, genre_id))
+            .map(Self::map_album)
+            .collect();
+        (albums, items.len())
+    }
+
     /// Ce qu'une page rend pour une catégorie, et ce que Qobuz annonce en tout.
     fn compte_et_total(data: &serde_json::Value, categorie: &str) -> (usize, usize) {
         (
@@ -2663,6 +2696,52 @@ impl StreamingService for QobuzService {
             .await
     }
 
+    /// #6231 — la recherche du catalogue, restreinte au genre. Qobuz ignore
+    /// tout filtre de genre sur `/album/search` (mesuré le 13/10/2026 :
+    /// `genre_id`, `genre_ids`, `genre` rendent la même liste) : on garde les
+    /// albums du genre parmi ses résultats, page par page, jusqu'à `limit`
+    /// albums ou [`PAGES_RECHERCHE_GENRE`] pages examinées.
+    async fn search_genre_albums(
+        &self,
+        genre_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<RechercheDansUnGenre, TuneError> {
+        let voulu = limit.clamp(1, TAILLE_PAGE_DETAIL);
+        let mut albums: Vec<StreamAlbum> = Vec::new();
+        let mut examined = 0usize;
+        for rang in 0..PAGES_RECHERCHE_GENRE {
+            let page = self
+                .api_get_page(
+                    "/album/search",
+                    &[("query", query)],
+                    rang * TAILLE_PAGE_RECHERCHE,
+                    TAILLE_PAGE_RECHERCHE,
+                )
+                .await?;
+            let (trouves, vus) = Self::albums_du_genre(&page, genre_id);
+            examined += vus;
+            albums.extend(trouves);
+            let total = page["albums"]["total"].as_u64().unwrap_or(0) as usize;
+            if albums.len() >= voulu || vus < TAILLE_PAGE_RECHERCHE || examined >= total {
+                break;
+            }
+        }
+        dedoublonner_par_id(&mut albums, |a| a.id.as_str());
+        albums.truncate(voulu);
+        info!(
+            genre_id,
+            examined,
+            found = albums.len(),
+            "qobuz_genre_search"
+        );
+        Ok(RechercheDansUnGenre {
+            albums,
+            examined,
+            genre_filter: "results",
+        })
+    }
+
     /// Une rubrique éditoriale — palmarès, distinctions de la presse,
     /// discothèque idéale, Qobuzissimes… — restreinte à un genre (#3481).
     ///
@@ -3513,6 +3592,38 @@ fn md5_hex(input: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #6231 — la forme RÉELLE de `/album/search` (relevée le 13/10/2026,
+    /// « roxy music ») : chaque album porte `genre.id` et `genre.path`.
+    #[test]
+    fn recherche_dans_un_genre_6231_garde_les_albums_du_genre_et_de_ses_sous_genres() {
+        let page = json!({"albums": {"total": 3, "items": [
+            {"id": "a1", "title": "Avalon", "artist": {"name": "Roxy Music"},
+             "genre": {"id": 119, "name": "Rock", "path": [112, 119]}},
+            {"id": "a2", "title": "Kind of Blue", "artist": {"name": "Miles Davis"},
+             "genre": {"id": 80, "name": "Jazz", "path": [80]}},
+            {"id": "a3", "title": "Sans genre", "artist": {"name": "X"}}
+        ]}});
+        // Le genre fin.
+        let (rock, vus) = QobuzService::albums_du_genre(&page, "119");
+        assert_eq!(vus, 3, "tous les résultats sont examinés");
+        assert_eq!(
+            rock.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["a1"]
+        );
+        // Le genre parent couvre son sous-genre (Pop/Rock › Rock).
+        let (pop_rock, _) = QobuzService::albums_du_genre(&page, "112");
+        assert_eq!(pop_rock.len(), 1);
+        assert_eq!(pop_rock[0].title, "Avalon");
+        // CONTRE-ÉPREUVE : un autre genre n'attrape pas Roxy Music.
+        let (jazz, _) = QobuzService::albums_du_genre(&page, "80");
+        assert_eq!(
+            jazz.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["a2"]
+        );
+        let (rien, _) = QobuzService::albums_du_genre(&page, "64");
+        assert!(rien.is_empty(), "un album sans genre n'est d'aucun genre");
+    }
 
     #[test]
     fn search_playlists_read_from_the_search_payload() {
