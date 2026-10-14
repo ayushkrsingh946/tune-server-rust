@@ -30,11 +30,11 @@
 //!    RÉSOLUTION aboutit — et elle le dit au journal, au niveau `INFO`, avec
 //!    l'URL retenue. Un banc ne peut pas prouver qu'un DAC a fait du bruit ;
 //!    il peut prouver que Tune a cessé de chercher un fichier qui n'existe pas.
-//! 3. **OAAT mord toujours.** C'est la garde la plus importante de ce lot :
-//!    brancher la lecture ne doit surtout pas rouvrir un chemin vers le
-//!    silence. La quatrième zone reçoit la même piste et se voit refuser, avec
-//!    son motif — alors même que le journal prouve que l'URL a bien été
-//!    trouvée pour elle aussi.
+//! 3. **OAAT ne joue jamais un silence.** C'est la garde la plus importante
+//!    de ce lot : brancher la lecture ne doit surtout pas rouvrir un chemin
+//!    vers le silence. Depuis #4201 (phase 3a), Tune décode en WAV une piste
+//!    dont la fréquence est connue : la quatrième zone ne la refuse plus. La
+//!    même piste, fréquence effacée, se voit refuser, avec son motif.
 //!
 //! # Pourquoi un binaire à lui seul, et un seul test dedans
 //!
@@ -355,17 +355,49 @@ async fn une_piste_indexee_se_joue_et_oaat_refuse_toujours() {
         "le manque de ReplayGain est un défaut de la sortie LOCALE — {dits_reseau}"
     );
 
-    // --- 4. OAAT : le refus MORD TOUJOURS ---
+    // --- 4. OAAT : décodée si la fréquence est connue, refusée sinon ---
     //
-    // La garde la plus importante de ce lot. Brancher la lecture ne doit pas
-    // rouvrir le chemin du silence.
+    // Depuis #4201 (phase 3a), une piste dont la fréquence est connue est
+    // décodée par Tune en WAV pour OAAT : elle n'est plus refusée. Le banc
+    // publie `sampleFrequency="44100"`, que l'indexation pose dans
+    // `tracks.sample_rate`. La garde de #2219 reste entière pour le cas où
+    // Tune ne saurait pas décoder : sans fréquence, OAAT refuse toujours,
+    // avec son motif, plutôt que de jouer un silence.
+    let motif_du_refus = ["OAAT", "WAV", "silence"];
+    let (statut, corps) = jouer(&app, 4, track_id).await;
+    assert_eq!(
+        statut,
+        StatusCode::OK,
+        "fréquence connue : la demande OAAT ne doit plus être refusée — {corps}"
+    );
+    assert!(
+        !corps.contains("n'aurait produit qu'un silence"),
+        "fréquence connue : OAAT ne doit plus refuser la piste indexée, Tune \
+         la décode en WAV (#4201, phase 3a) — statut {statut}, corps {corps}"
+    );
+    // Le banc n'a pas de point de sortie OAAT à joindre : la lecture va
+    // jusqu'à la sortie et s'arrête là, pas au refus de la piste.
+    let oaat: Value = serde_json::from_str(&corps).expect("JSON");
+    assert_eq!(
+        oaat["current_track"]["sample_rate"],
+        json!(44100),
+        "la fréquence qui ouvre le décodage doit être celle de l'indexation — {corps}"
+    );
+
+    // Même piste, fréquence inconnue : le refus MORD TOUJOURS.
+    etat.backend
+        .execute_batch(&format!(
+            "UPDATE tracks SET sample_rate = NULL WHERE id = {track_id}"
+        ))
+        .expect("fréquence effacée");
     let (statut, corps) = jouer(&app, 4, track_id).await;
     assert!(
         statut.is_client_error() || statut.is_server_error(),
-        "OAAT doit continuer de REFUSER une piste indexée : la brancher ne \
-         doit pas rouvrir un chemin vers le silence (statut {statut}, corps {corps})"
+        "fréquence inconnue : OAAT doit continuer de REFUSER une piste \
+         indexée, sans quoi le chemin vers le silence se rouvre (statut \
+         {statut}, corps {corps})"
     );
-    for attendu in ["OAAT", "WAV", "silence"] {
+    for attendu in motif_du_refus {
         assert!(
             corps.contains(attendu),
             "le motif du refus OAAT doit toujours dire « {attendu} » — corps {corps}"
@@ -394,9 +426,10 @@ async fn une_piste_indexee_se_joue_et_oaat_refuse_toujours() {
         .lines()
         .filter(|l| l.contains("upnp_url_de_lecture_lue_dans_l_instantane"))
         .collect();
-    assert_eq!(
-        lues.len(),
-        4,
+    // Cinq demandes sur quatre zones : OAAT est demandée deux fois (avec
+    // puis sans fréquence). Chaque zone doit avoir sa trace, ci-dessous.
+    assert!(
+        lues.len() >= 4,
         "les QUATRE zones doivent avoir retrouvé l'adresse dans l'instantané — \
          y compris celle qui refuse ensuite, sans quoi on ne saurait pas si \
          OAAT refuse pour la bonne raison.\njournal :\n{journal}"

@@ -1,6 +1,58 @@
 # Unifier les serveurs multimédia UPnP et la bibliothèque
 
-## Suite du 15 septembre 2026 — #4201 (code en préparation, non livré)
+## État au 13 octobre 2026 — où en est la découpe
+
+| Phase | État | Où |
+|---|---|---|
+| 0 — mesurer | faite | `docs/mesures/2219-serveurs-tiers-parcourus.md`, `2219-pourquoi-les-sonos-manquent.md` |
+| 1 — registre durable | livrée (0.9.150) | `media_servers` |
+| 2 — source indexée | livrée (0.9.150 → 0.9.153) | `indexation_upnp.rs`, PR #4205, web #1046 |
+| 3 — la lecture | **en cours** : étape 3a ci-dessous | `resolve_direct.rs` |
+| 4 — réconciliation | livrée (0.9.152/0.9.153) | `synchronisation_upnp.rs`, PR #4205 ; bilan `upnp_import` de `GET /library/stats` (#4944) |
+| 5 — doublons | non commencée — **attend D1** | — |
+
+Les décisions D1bis, D2 et D4 sont tranchées. D1 (doublons), D3 (plafonds :
+partiellement réglée par les abonnements à des conteneurs), D5 et D6 restent
+sur la table ; D5 a été réalisée côté Tune par le lot 5 (`SystemUpdateID`
+persistant), D6 n'a pas été faite.
+
+### Phase 3, étape 3a — décodage en WAV vers la sortie locale et OAAT (13/10)
+
+Branche `chantier/bibliotheque-upnp`. Une piste de serveur multimédia dont la
+**fréquence d'échantillonnage est connue** (DIDL de la demande, ou
+`tracks.sample_rate` posé par l'indexation) est décodée par Tune en WAV, à la
+position demandée, dans deux cas (`doit_decoder_la_piste_upnp_en_wav`) :
+
+- **sortie locale après un saut** : le saut reprenait la piste au début ; il
+  reprend à la position. Une lecture depuis le début garde le chemin de
+  `LocalOutput`, inchangé ;
+- **OAAT** : la piste joue au lieu d'être refusée. Un WAV publié tel quel
+  passe toujours brut.
+
+Le bras est celui de Qobuz et Tidal vers ces sorties
+(`resoudre_flux_local_ou_oaat`) : plafond de fréquence de la zone, règle
+bit-perfect stricte, niveaux mesurés, décodage par plages pour un FLAC (repli
+par fichier temporaire si le serveur ne répond pas `206`). L'égaliseur n'est
+pas appliqué dans le flux : la sortie locale le pose déjà dans son callback.
+
+Sans fréquence connue, rien ne change : refus motivé sur OAAT, reprise au début
+en local. Les textes de D4 (`verdict_upnp.rs`) le disent désormais.
+
+Témoins : `tune-core/src/orchestrator/lecture_upnp_wav_4201_tests.rs` (faux
+serveur multimédia avec `Range`, FLAC de 10 s doux puis fort ; saut à 5 s en
+local, lecture OAAT entière, refus OAAT sans fréquence).
+
+### Reste de la phase 3
+
+- **3b — DSP sur les sorties réseau et navigateur** : faire passer la piste par
+  le relais WAV quand un DSP est actif sur la zone (le portage de #2863, déjà
+  fait pour la radio et le DSF distant) ;
+- **3c — fréquence inconnue** : la lire dans l'en-tête du flux, comme la durée
+  (`duree_du_flux_2062.rs`), pour que 3a couvre aussi ces serveurs ;
+- **ReplayGain** sans fichier local : aucune source de gain n'est définie
+  pour une piste distante. C'est une décision de produit, pas une étape.
+
+## Suite du 15 septembre 2026 — #4201 (livré depuis, voir ci-dessus)
 
 La 0.9.150 contient le registre, l’indexation additive, la lecture des pistes
 indexées, les plafonds et le filtre Source. Les phases ci-dessous décrivent

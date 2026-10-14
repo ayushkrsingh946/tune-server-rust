@@ -374,6 +374,123 @@ impl PlaybackOrchestrator {
             .filter(|f| !f.trim().is_empty())
     }
 
+    /// #4201, phase 3 — de quoi décoder une piste de serveur multimédia en WAV :
+    /// son codec, sa fréquence et sa profondeur.
+    ///
+    /// La fréquence vient de la demande (le DIDL que le client a lu) ou, à
+    /// défaut, de la ligne indexée (`tracks.sample_rate`, posée par
+    /// l'indexation). Sans elle, `None` : le WAV de sortie se dimensionne sur
+    /// cette fréquence, et la deviner ferait mentir le chemin du signal — ou
+    /// rééchantillonner un 24/96 en 44,1 sans le dire. L'appelant garde alors
+    /// le chemin d'avant (le refus motivé sur OAAT, la reprise au début en
+    /// local), qui ne prétend rien.
+    ///
+    /// La profondeur inconnue vaut 24 bits : elle ne sert qu'au WAV OAAT, où
+    /// elle est plafonnée de toute façon, et 24 bits contiennent un 16 bits
+    /// sans perte.
+    pub(super) fn qualite_d_une_piste_upnp_a_decoder(
+        &self,
+        req: &PlayRequest,
+        mime_type: &str,
+    ) -> Option<crate::streaming::traits::StreamQuality> {
+        use crate::db::backend::ToSqlValue;
+        let codec = codec_d_un_mime_upnp(mime_type)?;
+        let ligne = req.track_id.and_then(|id| {
+            self.db
+                .query_one(
+                    "SELECT sample_rate, bit_depth FROM tracks WHERE id = ?",
+                    &[&id as &dyn ToSqlValue],
+                )
+                .ok()
+                .flatten()
+        });
+        let colonne = |i: usize| {
+            ligne
+                .as_ref()
+                .and_then(|l| l.get(i))
+                .and_then(|v| v.as_i64())
+                .filter(|v| *v > 0)
+        };
+        let sample_rate = req
+            .sample_rate
+            .filter(|sr| *sr > 0)
+            .or_else(|| colonne(0).and_then(|v| u32::try_from(v).ok()))?;
+        let bit_depth = req
+            .bit_depth
+            .filter(|bd| *bd > 0)
+            .or_else(|| colonne(1).and_then(|v| u16::try_from(v).ok()))
+            .unwrap_or(24);
+        Some(crate::streaming::traits::StreamQuality {
+            codec: codec.to_string(),
+            sample_rate,
+            bit_depth,
+            bitrate: None,
+            channels: 2,
+        })
+    }
+
+    /// #4201, phase 3 — décoder une piste de serveur multimédia en WAV pour
+    /// une sortie locale ou OAAT, à la position demandée.
+    ///
+    /// C'est le bras que Qobuz et Tidal prennent déjà vers ces deux sorties
+    /// (`resoudre_flux_local_ou_oaat`) : WAV plafonné à la fréquence de la
+    /// zone, règle bit-perfect stricte, décodage par plages pour un FLAC (repli
+    /// par fichier temporaire si le serveur ne répond pas `206`), `seek_ms`
+    /// honoré par le décodeur, niveaux mesurés. L'égaliseur n'y est PAS
+    /// appliqué : la sortie locale le pose dans son callback, et l'appliquer
+    /// ici le ferait entendre deux fois (#5119).
+    async fn decoder_la_piste_upnp_en_wav(
+        &self,
+        req: &PlayRequest,
+        audio_url: &str,
+        mime_type: &str,
+        qualite: crate::streaming::traits::StreamQuality,
+        is_local_output: bool,
+        piste: PisteResolue,
+    ) -> Result<ResolvedStream, String> {
+        info!(
+            zone_id = req.zone_id,
+            track_id = ?req.track_id,
+            url = %audio_url,
+            mime = mime_type,
+            codec = %qualite.codec,
+            sample_rate = qualite.sample_rate,
+            seek_ms = ?req.seek_ms,
+            sortie = if is_local_output { "locale" } else { "oaat" },
+            "upnp_decodee_en_wav_4201"
+        );
+        let source_sr = qualite.sample_rate;
+        let source_bd = qualite.bit_depth;
+        let flux = crate::streaming::StreamUrl {
+            url: audio_url.to_string(),
+            mime_type: mime_type.to_string(),
+            quality: qualite,
+            expires_at: None,
+            headers: Vec::new(),
+        };
+        let (url, stream_id, out_mime, _taille) = self
+            .resoudre_flux_local_ou_oaat(req, "upnp", &flux, is_local_output)
+            .await?;
+        Ok(ResolvedStream {
+            url,
+            mime_type: out_mime,
+            title: piste.title,
+            artist: piste.artist,
+            album: piste.album,
+            duration_ms: piste.duration_ms,
+            source: "upnp".into(),
+            cover_url: piste.cover_url,
+            stream_id,
+            file_size: None,
+            // Le chemin du signal annonce la SOURCE, comme pour un service.
+            sample_rate: Some(source_sr),
+            bit_depth: Some(u32::from(source_bd)),
+            channels: None,
+            origin_url: Some(audio_url.to_string()),
+            bitrate_kbps: None,
+        })
+    }
+
     /// **#4323 — une URI qui désigne une piste de NOTRE bibliothèque doit
     /// retrouver son `track_id`, et donc son vrai titre.**
     ///
@@ -751,10 +868,26 @@ impl PlaybackOrchestrator {
         // contient tout aussi bien. Le témoin exige désormais une PHRASE
         // entière (`temoins_du_refus_oaat`, et le banc de route), ce qui est le
         // seul contrôle qui aurait rougi.
+        //
+        // #4201, phase 3 — le refus ne vaut plus que pour la piste que Tune ne
+        // sait pas décoder : une piste dont la fréquence est connue part en WAV
+        // vers OAAT par `decoder_la_piste_upnp_en_wav`, plus bas.
+        let decodage_upnp_en_wav = if source == "upnp"
+            && doit_decoder_la_piste_upnp_en_wav(
+                is_local_output,
+                is_oaat_output,
+                est_du_wav(mime_type),
+                req.seek_ms,
+            ) {
+            self.qualite_d_une_piste_upnp_a_decoder(req, mime_type)
+        } else {
+            None
+        };
         if source == "upnp"
             && !crate::orchestrator::verdict_upnp::SortieD4::Oaat.joue_un_flux_compresse()
             && is_oaat_output
             && !est_du_wav(mime_type)
+            && decodage_upnp_en_wav.is_none()
         {
             let titre = req.title.as_deref().unwrap_or("cette piste");
             return Err(crate::orchestrator::verdict_upnp::motif_du_refus_oaat(
@@ -833,6 +966,27 @@ impl PlaybackOrchestrator {
         } else {
             duration_ms
         };
+
+        // #4201, phase 3 — une piste de serveur multimédia vers une sortie
+        // locale avec une position, ou vers OAAT.
+        if let Some(qualite) = decodage_upnp_en_wav {
+            return self
+                .decoder_la_piste_upnp_en_wav(
+                    req,
+                    audio_url,
+                    mime_type,
+                    qualite,
+                    is_local_output,
+                    PisteResolue {
+                        title,
+                        artist,
+                        album,
+                        cover_url,
+                        duration_ms,
+                    },
+                )
+                .await;
+        }
 
         // La sortie locale applique déjà l'EQ dans son callback : le refaire
         // ici colorerait le signal deux fois. OAAT, DLNA et navigateur
@@ -2085,6 +2239,62 @@ fn supprimer_a_la_fin_de_la_session(
         let _ = std::fs::remove_file(&chemin);
         debug!(stream_id = %session_id, chemin = %chemin, "dsd_upnp_fichier_temporaire_supprime");
     });
+}
+
+/// Ce que la lecture d'une piste a déjà établi, et que le bras décodé rend tel
+/// quel dans son [`ResolvedStream`].
+struct PisteResolue {
+    title: String,
+    artist: Option<String>,
+    album: Option<String>,
+    cover_url: Option<String>,
+    duration_ms: Option<i64>,
+}
+
+/// #4201, phase 3 — une piste de serveur multimédia doit-elle être DÉCODÉE en
+/// WAV par Tune plutôt que remise telle quelle à la sortie ?
+///
+/// Deux cas, et deux seulement :
+///
+/// - **OAAT**, qui ne lit que du PCM en WAV : tout flux qui n'en est pas déjà,
+///   et un WAV qu'on reprend à une position (servi brut, il repartirait de
+///   l'octet 0) ;
+/// - **la sortie locale avec une position** : `LocalOutput` décode lui-même
+///   l'URL distante, mais depuis le début — un saut à 2:00 relançait la piste.
+///   Le décodeur de Tune, lui, démarre à l'offset demandé, comme pour une
+///   piste Qobuz ou Tidal sur la même sortie.
+///
+/// Une lecture locale depuis le début ne change pas : `LocalOutput` garde son
+/// chemin, sans décodage de plus. Réseau et navigateur ne sont pas concernés.
+pub(crate) fn doit_decoder_la_piste_upnp_en_wav(
+    sortie_locale: bool,
+    sortie_oaat: bool,
+    deja_en_wav: bool,
+    seek_ms: Option<u64>,
+) -> bool {
+    let avec_position = seek_ms.is_some_and(|ms| ms > 0);
+    (sortie_oaat && (!deja_en_wav || avec_position)) || (sortie_locale && avec_position)
+}
+
+/// Le codec que le décodeur de Tune doit attendre pour un MIME de serveur
+/// multimédia. `None` pour le DSD (il a ses bras à lui) et pour ce qu'on ne
+/// sait pas nommer : l'appelant garde alors son chemin d'avant.
+pub(crate) fn codec_d_un_mime_upnp(mime: &str) -> Option<&'static str> {
+    let base = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "audio/flac" | "audio/x-flac" => Some("flac"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac" => Some("m4a"),
+        "audio/aiff" | "audio/x-aiff" => Some("aiff"),
+        "audio/ogg" => Some("ogg"),
+        _ if est_du_wav(&base) => Some("wav"),
+        _ => None,
+    }
 }
 
 /// Ce flux est-il déjà du PCM en conteneur WAV ?
