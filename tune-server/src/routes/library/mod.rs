@@ -26,6 +26,7 @@ mod edition_balises;
 mod enrich;
 // Lot 1 de l'enrichissement d'après MetaRust, de Xavier Joly (#4805).
 mod enrichissement_metarust;
+mod passes_metarust;
 // #5469 — les passes que `crate::reprise_des_passes` sait relancer.
 pub(crate) use artwork::{demarrer_images_artistes, demarrer_pochettes_albums};
 pub(crate) use enrich::demarrer_enrich_all;
@@ -682,6 +683,15 @@ pub fn router() -> Router<AppState> {
         .route("/tracks/{id}/lyrics", get(tracks::track_lyrics))
         .route("/ratings/export", get(ratings::export_ratings))
         .route("/ratings/import", post(ratings::import_ratings))
+        // Lot 2 de l'enrichissement d'après MetaRust (#4805) : les passes de
+        // lot, à la main. Suspendues par la tâche de fond `enrichment`.
+        .route("/bpm-all", post(passes_metarust::bpm_lot_start))
+        .route("/bpm-all/status", get(passes_metarust::bpm_lot_status))
+        .route("/discogs-all", post(passes_metarust::discogs_lot_start))
+        .route(
+            "/discogs-all/status",
+            get(passes_metarust::discogs_lot_status),
+        )
         .route("/enrich-all", post(enrich::enrich_all_library))
         .route("/enrich-all/status", get(enrich::enrich_all_status))
         // #4805 — le pilote de lot de l'identification. Le travail par album
