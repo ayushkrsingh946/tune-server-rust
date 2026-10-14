@@ -662,6 +662,13 @@ impl PositionPoller {
                     RADIO_POLL_INTERVAL_SECS,
                 )
             {
+                // #6233 — une sortie locale n'a pas de SOAP à ménager : son
+                // contrat de signal (PURE, bit-perfect) est relu à chaque
+                // tour, le reste du sondage radio garde son rythme.
+                if contrat_radio_locale_6233::contrat_relu_entre_deux_sondages_radio(&device_id) {
+                    self.relire_le_contrat_local_entre_deux_sondages_radio(zone_id, &device_id, ps)
+                        .await;
+                }
                 continue;
             }
 
