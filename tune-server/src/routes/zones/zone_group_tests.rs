@@ -1,6 +1,6 @@
 use super::{
-    CreateGroup, GroupRefusal, choisir_les_sorties_doubles, recalculer_les_sorties_doubles,
-    refus_asio, validate_group,
+    CreateGroup, GroupRefusal, choisir_les_sorties_doubles, porteur_du_groupe,
+    recalculer_les_sorties_doubles, refus_asio, validate_group,
 };
 use tune_core::db::zone_repo::Zone;
 
@@ -262,5 +262,73 @@ async fn les_groupes_d_avant_sont_recalcules_au_demarrage() {
     assert_eq!(
         groupes[0]["name"], "Maison",
         "le groupe n'est pas refait, seulement complété"
+    );
+}
+
+/// #6132 étape 2b — meneur réseau : le premier membre local porte la sortie
+/// double et sert les autres zones locales, synchronisées entre elles.
+#[test]
+fn un_meneur_reseau_confie_la_sortie_double_au_premier_local() {
+    let zones = vec![
+        zone(1, "Salon", Some("local:DAC A")),
+        zone(2, "Bureau", Some("local:DAC B")),
+        zone(3, "Cuisine", Some("dlna:uuid-1")),
+    ];
+    assert_eq!(porteur_du_groupe(3, &[3, 2, 1], &zones), Some(2));
+    assert_eq!(porteur_du_groupe(1, &[1, 3, 2], &zones), Some(1));
+    assert_eq!(porteur_du_groupe(3, &[3], &zones), None);
+    assert_eq!(
+        choisir_les_sorties_doubles(2, &[3, 2, 1], &zones),
+        vec![(1, "local:DAC A".to_string())]
+    );
+}
+
+/// #6132 étape 2b — au démarrage, un groupe au meneur réseau et à deux zones
+/// locales reçoit sa sortie double sur le porteur local.
+#[tokio::test]
+async fn un_groupe_au_meneur_reseau_est_recalcule_sur_son_porteur() {
+    use tune_core::db::settings_repo::SettingsRepo;
+    use tune_core::db::zone_repo::ZoneRepo;
+    let state =
+        crate::state::AppState::new(":memory:", 0, crate::config::TuneConfig::default()).unwrap();
+    let repo = ZoneRepo::with_backend(state.backend.clone());
+    let cuisine = repo
+        .create("Cuisine", Some("dlna"), Some("dlna:uuid-1"))
+        .unwrap();
+    let salon = repo
+        .create("Salon", Some("local"), Some("local:DAC A"))
+        .unwrap();
+    let bureau = repo
+        .create("Bureau", Some("local"), Some("local:DAC B"))
+        .unwrap();
+    let settings = SettingsRepo::with_backend(state.backend.clone());
+    settings
+        .set(
+            "zone_groups",
+            &serde_json::json!([{ "id": 1, "group_id": "1", "name": "Réseau",
+                "leader_id": cuisine, "zone_ids": [cuisine, salon, bureau] }])
+            .to_string(),
+        )
+        .unwrap();
+    recalculer_les_sorties_doubles(&state).await;
+    assert_eq!(
+        tune_core::outputs::sortie_double::secondes_sorties_de_zone(&state.backend, salon),
+        vec!["DAC B".to_string()]
+    );
+    assert!(
+        tune_core::outputs::sortie_double::secondes_sorties_de_zone(&state.backend, cuisine)
+            .is_empty()
+    );
+    let groupes: Vec<serde_json::Value> =
+        serde_json::from_str(&settings.get("zone_groups").unwrap().unwrap()).unwrap();
+    assert_eq!(
+        groupes[0]["sortie_double"]["porteur_id"],
+        serde_json::json!(salon)
+    );
+    // Le meneur réseau entraîne le porteur ; le bureau joue par lui.
+    let zones = repo.list().unwrap();
+    assert_eq!(
+        tune_core::zones::groupe_de_lecture::zones_entrainees(&groupes, cuisine, &zones),
+        vec![(salon, "local:DAC A".to_string())]
     );
 }

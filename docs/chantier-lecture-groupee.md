@@ -179,24 +179,38 @@ diffère d'une carte à l'autre (quelques ms). Voir les décisions.
 
 ## Étape 2b — lecture groupée avec des membres réseau (serveur)
 
-1. **Propager la lecture d'un groupe.** À la lecture sur le meneur, les suiveurs
-   réseau suivent : même élément, même position, mêmes commandes (pause,
-   reprise, saut, suivante). Le groupe devient un état du transport, pas
-   seulement une liste dans `zone_groups`. La zone suiveuse locale d'une
-   sortie double doit aussi s'afficher « en groupe avec » le meneur.
-   **Meneur réseau** (décision du 14/10) : ses membres locaux de la machine
-   jouent aussi ensemble, synchronisés entre eux ; aujourd'hui seul un
-   meneur local porte la sortie double.
-2. **Transport par membre** : points de diffusion OAAT → groupe OAAT existant ;
-   renderers indépendants (UPnP, AirPlay, Chromecast…) → départs alignés au
-   mieux, sans garantie d'horloge, dit dans l'interface.
-3. **Brancher ce qui est enregistré sans consommateur** : `calibrate_group`
-   (501), `GroupManager` (sans appelant), `sync_delay_ms` pour les membres
-   réseau.
-4. **Une seule famille de routes** : `/zone-manager/groups` écrit le même
-   réglage que `/zones/group` sans validation ni contrôle Premium ; la ramener
-   sur la validation commune ou la retirer.
-5. `docs/getting-started` : le chemin « Groupes de zones » n'existe plus.
+Décision du 14/10 : la partie serveur d'abord, PR séparée.
+
+Livré :
+
+- **Les membres suivent le meneur.** `tune-server/src/lecture_groupee.rs`
+  s'abonne aux évènements de lecture et rejoue ceux d'une zone meneuse sur
+  les zones qu'elle entraîne : `started` et `track_changed` → la même piste à
+  la même position, `paused`, `resumed`, `stopped`, `seek`. Écouter les
+  évènements couvre toutes les entrées de lecture (route, file, sondeur en
+  fin de piste, enchaînement sans blanc, réveil, assistant). Une suiveuse
+  n'entraîne personne ; le volume reste par zone.
+- **Qui est entraîné** (`tune_core::zones::groupe_de_lecture`) : tous les
+  membres sauf le meneur, les zones locales servies par une sortie double et
+  les zones sans sortie. Les renderers réseau suivent en indépendants :
+  départs alignés au mieux, sans garantie d'horloge.
+- **Meneur réseau** (décision du 13/10) : le premier membre local devient le
+  PORTEUR de la sortie double (`sortie_double.porteur_id`) ; le meneur
+  l'entraîne, et il sert les autres zones locales, synchronisées entre elles.
+- **La zone se dit en groupe** : chaque charge utile de zone (liste, fiche,
+  retour de lecture, instantané du WebSocket) porte `groupe_de_lecture` :
+  `group_id`, `nom`, `meneur_id`, `role` (`meneur` / `suiveuse`),
+  `synchronisee` ; `null` hors groupe.
+
+Reste :
+
+- `calibrate_group` (501), `GroupManager` (sans appelant), `sync_delay_ms`
+  pour les membres réseau ;
+- une seule famille de routes (`/zone-manager/groups` sans validation) ;
+- `docs/getting-started` (chemin « Groupes de zones » disparu) ;
+- la file d'une zone suiveuse : si elle en a une, son sondeur peut encore
+  l'avancer à sa fin de piste, avant que le meneur ne la reprenne ;
+- l'écran (étape 3).
 
 ## Étape 2c — la sortie double hors du chemin partagé (serveur)
 

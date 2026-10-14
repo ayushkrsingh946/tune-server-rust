@@ -114,8 +114,12 @@ pub(crate) fn generic_group_synchronization_contract() -> Value {
 /// latences matérielles compensées par les horodatages du pilote. Les autres
 /// membres éventuels restent indépendants, et sont nommés.
 pub(crate) fn local_double_output_contract(group: &Value) -> Value {
-    let leader = group["leader_id"].as_i64();
-    let mut synchronisees: Vec<i64> = leader.into_iter().collect();
+    // Le porteur de la sortie double : le meneur local, ou — meneur réseau —
+    // le premier membre local, que le meneur entraîne (#6132 étape 2b).
+    let porteur = group["sortie_double"]["porteur_id"]
+        .as_i64()
+        .or_else(|| group["leader_id"].as_i64());
+    let mut synchronisees: Vec<i64> = porteur.into_iter().collect();
     synchronisees.extend(
         group["sortie_double"]["suiveurs"]
             .as_array()

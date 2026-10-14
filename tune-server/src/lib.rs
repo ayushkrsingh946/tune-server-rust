@@ -44,6 +44,8 @@ pub use tune_http_types::error;
 pub mod i18n;
 pub mod journal;
 mod lecture_bornee;
+/// #6132 étape 2b — les zones d'un groupe suivent la lecture de leur meneur.
+pub mod lecture_groupee;
 pub mod lien_de_partage;
 /// Rendre au système, à froid, la mémoire libre que garde l'allocateur.
 pub mod memoire_a_froid;

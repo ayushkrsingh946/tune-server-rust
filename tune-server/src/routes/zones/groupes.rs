@@ -68,6 +68,27 @@ pub(super) fn choisir_les_sorties_doubles(
     choisies
 }
 
+/// #6132 étape 2b — la zone qui PORTE la sortie double du groupe : le meneur
+/// s'il est local ; sinon (meneur réseau) le premier membre local, que le
+/// meneur entraîne et qui sert à son tour les autres zones locales,
+/// synchronisées entre elles.
+pub(super) fn porteur_du_groupe(leader_id: i64, zone_ids: &[i64], zones: &[Zone]) -> Option<i64> {
+    let est_locale = |id: i64| {
+        zones
+            .iter()
+            .find(|z| z.id == Some(id))
+            .and_then(|z| z.output_device_id.as_deref())
+            .is_some_and(|d| d.starts_with("local:") && d.len() > "local:".len())
+    };
+    if est_locale(leader_id) {
+        return Some(leader_id);
+    }
+    zone_ids
+        .iter()
+        .copied()
+        .find(|id| *id != leader_id && est_locale(*id))
+}
+
 /// #6132 — refuser la sortie double sous ASIO. `backend_meneur` et
 /// `backend_suiveur` sont les backends ouvrables des deux sorties
 /// ([`crate::routes::zones::backend_de_la_sortie_de_la_zone`]).
@@ -104,21 +125,21 @@ async fn backend_de_la_sortie(state: &AppState, sortie: Option<&str>) -> Option<
         .flatten()
 }
 
-/// #6132 — choisir les sorties suiveuses du groupe et vérifier qu'ASIO les
-/// permet : une seule zone locale sous ASIO, ni meneuse ni suiveuse.
+/// #6132 — choisir les sorties suiveuses du porteur et vérifier qu'ASIO les
+/// permet : une seule zone locale sous ASIO, ni porteuse ni suiveuse.
 async fn sorties_doubles_du_groupe(
     state: &AppState,
-    leader_id: i64,
+    porteur_id: i64,
     zone_ids: &[i64],
     zones: &[Zone],
 ) -> Result<Vec<(i64, String)>, GroupRefusal> {
-    let choisies = choisir_les_sorties_doubles(leader_id, zone_ids, zones);
+    let choisies = choisir_les_sorties_doubles(porteur_id, zone_ids, zones);
     if choisies.is_empty() {
         return Ok(choisies);
     }
     let sortie_meneur = zones
         .iter()
-        .find(|z| z.id == Some(leader_id))
+        .find(|z| z.id == Some(porteur_id))
         .and_then(|z| z.output_device_id.clone());
     let backend_meneur = backend_de_la_sortie(state, sortie_meneur.as_deref()).await;
     for (suiveur, sortie) in &choisies {
@@ -126,7 +147,7 @@ async fn sorties_doubles_du_groupe(
         if let Some(refus) = refus_asio(
             backend_meneur.as_deref(),
             backend_suiveur.as_deref(),
-            &nom_de_zone(zones, leader_id),
+            &nom_de_zone(zones, porteur_id),
             &nom_de_zone(zones, *suiveur),
         ) {
             return Err(refus);
@@ -140,12 +161,29 @@ async fn sorties_doubles_du_groupe(
 fn poser_la_sortie_double(
     settings: &tune_core::db::settings_repo::SettingsRepo,
     group: &mut Value,
-    leader_id: i64,
+    porteur_id: i64,
     choisies: Vec<(i64, String)>,
 ) {
-    let cle = tune_core::outputs::sortie_double::cle_de_zone(leader_id);
+    // Ce que CE groupe avait posé, il le retire : le porteur a pu changer
+    // (meneur réseau, composition modifiée). Un groupe qui n'avait rien posé
+    // ne touche à rien — une zone peut appartenir à deux groupes.
+    let ancien_porteur = group.get("sortie_double").map(|d| {
+        d["porteur_id"]
+            .as_i64()
+            .or_else(|| group["leader_id"].as_i64())
+    });
+    if let Some(Some(ancien)) = ancien_porteur
+        && ancien != porteur_id
+    {
+        settings
+            .delete(&tune_core::outputs::sortie_double::cle_de_zone(ancien))
+            .ok();
+    }
+    let cle = tune_core::outputs::sortie_double::cle_de_zone(porteur_id);
     if choisies.is_empty() {
-        settings.delete(&cle).ok();
+        if ancien_porteur.is_some() {
+            settings.delete(&cle).ok();
+        }
         if let Some(obj) = group.as_object_mut() {
             obj.remove("sortie_double");
         }
@@ -159,6 +197,7 @@ fn poser_la_sortie_double(
         )
         .ok();
     group["sortie_double"] = json!({
+        "porteur_id": porteur_id,
         "suiveurs": choisies
             .iter()
             .map(|(id, sortie)| json!({ "zone_id": id, "sortie": sortie }))
@@ -197,7 +236,8 @@ pub async fn recalculer_les_sorties_doubles(state: &AppState) {
         else {
             continue;
         };
-        let choisies = match sorties_doubles_du_groupe(state, leader_id, &zone_ids, &zones).await {
+        let porteur = porteur_du_groupe(leader_id, &zone_ids, &zones).unwrap_or(leader_id);
+        let choisies = match sorties_doubles_du_groupe(state, porteur, &zone_ids, &zones).await {
             Ok(choisies) => choisies,
             Err(refus) => {
                 warn!(?refus, leader_id, "sortie_double_recalcul_refusee");
@@ -205,7 +245,7 @@ pub async fn recalculer_les_sorties_doubles(state: &AppState) {
             }
         };
         poses += usize::from(!choisies.is_empty());
-        poser_la_sortie_double(&settings, group, leader_id, choisies);
+        poser_la_sortie_double(&settings, group, porteur, choisies);
     }
     if let Ok(texte) = serde_json::to_string(&groups) {
         settings.set("zone_groups", &texte).ok();
@@ -358,8 +398,8 @@ pub(super) async fn create_group(
         .leader_id
         .filter(|id| zone_ids.contains(id))
         .unwrap_or(zone_ids[0]);
-    let sortie_double = match sorties_doubles_du_groupe(&state, leader_id, &zone_ids, &zones).await
-    {
+    let porteur = porteur_du_groupe(leader_id, &zone_ids, &zones).unwrap_or(leader_id);
+    let sortie_double = match sorties_doubles_du_groupe(&state, porteur, &zone_ids, &zones).await {
         Ok(choix) => choix,
         Err(refusal) => return Ok(group_refusal_response(&refusal, &lang)),
     };
@@ -380,7 +420,7 @@ pub(super) async fn create_group(
         "leader_id": leader_id,
         "zone_ids": zone_ids,
     });
-    poser_la_sortie_double(&settings, &mut group, leader_id, sortie_double);
+    poser_la_sortie_double(&settings, &mut group, porteur, sortie_double);
     groups.push(group.clone());
 
     settings
@@ -441,13 +481,14 @@ pub(super) async fn patch_group(
                     .as_i64()
                     .or_else(|| zone_ids.first().copied())
                     .unwrap_or_default();
-                let choix =
-                    match sorties_doubles_du_groupe(&state, leader_id, zone_ids, &zones).await {
-                        Ok(choix) => choix,
-                        Err(refusal) => return Ok(group_refusal_response(&refusal, &lang)),
-                    };
+                let porteur = porteur_du_groupe(leader_id, zone_ids, &zones).unwrap_or(leader_id);
+                let choix = match sorties_doubles_du_groupe(&state, porteur, zone_ids, &zones).await
+                {
+                    Ok(choix) => choix,
+                    Err(refusal) => return Ok(group_refusal_response(&refusal, &lang)),
+                };
                 groups[i]["zone_ids"] = json!(zone_ids);
-                poser_la_sortie_double(&settings, &mut groups[i], leader_id, choix);
+                poser_la_sortie_double(&settings, &mut groups[i], porteur, choix);
             }
             let result = groups[i].clone();
             settings
@@ -607,9 +648,11 @@ pub(super) async fn delete_group(
         .filter(|g| g.get("id").and_then(|v| v.as_i64()) == Some(group_id))
     {
         if group.get("sortie_double").is_some()
-            && let Some(leader_id) = group["leader_id"].as_i64()
+            && let Some(porteur) = group["sortie_double"]["porteur_id"]
+                .as_i64()
+                .or_else(|| group["leader_id"].as_i64())
         {
-            poser_la_sortie_double(&settings, group, leader_id, Vec::new());
+            poser_la_sortie_double(&settings, group, porteur, Vec::new());
         }
     }
     groups.retain(|g| g.get("id").and_then(|v| v.as_i64()) != Some(group_id));

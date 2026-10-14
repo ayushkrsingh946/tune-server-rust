@@ -715,6 +715,17 @@ pub(crate) fn injecter_reglages_renderer(
         "dlna_play_delay_ms".into(),
         json!(repo.get_dlna_play_delay_ms(zone_id)),
     );
+    // #6132 étape 2b — la place de la zone dans un groupe de lecture : une
+    // zone suiveuse se dit « en groupe avec » son meneur, synchronisée (sortie
+    // double) ou non. Ici, parce que c'est le seul endroit que les QUATRE
+    // charges utiles de zone appellent (liste, fiche, retour de lecture,
+    // instantané du WebSocket) : pas de cinquième copie à la main.
+    let groupes = tune_core::zones::groupe_de_lecture::groupes_enregistres(&repo.base());
+    obj.insert(
+        "groupe_de_lecture".into(),
+        tune_core::zones::groupe_de_lecture::place_de_la_zone(&groupes, zone_id)
+            .unwrap_or(Value::Null),
+    );
 }
 
 /// La nature et l'identifiant de ce que l'auditeur a DEMANDÉ, dits au client.

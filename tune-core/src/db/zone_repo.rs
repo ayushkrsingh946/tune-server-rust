@@ -1125,6 +1125,12 @@ impl CreationDeZone {
 }
 
 impl ZoneRepo {
+    /// La base que ce dépôt lit : pour lire, à côté d'une zone, un réglage qui
+    /// la concerne (#6132 : sa place dans un groupe de lecture).
+    pub fn base(&self) -> Arc<dyn DbBackend> {
+        self.db.clone()
+    }
+
     pub fn new(db: SqliteDb) -> Self {
         Self { db: Arc::new(db) }
     }
