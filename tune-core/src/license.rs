@@ -264,6 +264,18 @@ pub struct LicenseState {
     /// and offline starts; refreshed by the cloud validation loop.
     #[serde(default)]
     pub modules: Vec<String>,
+    /// Modules payants portés par la **clé de licence** : ceux que le site
+    /// renvoie dans le verdict de validation de la clé (`modules`). Source
+    /// distincte de `modules` (le compte) : `set_modules` remplace la liste du
+    /// compte, et y ranger ceux de la clé les ferait effacer par la relecture
+    /// suivante d'un compte qui ne les a pas. Les deux sources s'unissent dans
+    /// [`modules_effectifs`]. Persistés sous `license_modules`.
+    ///
+    /// Décision du 14/10/2026 (D5) : un module de la clé est un achat à vie,
+    /// il reste valable hors ligne **sans limite** — la grâce de 14 jours de
+    /// la clé ne s'y applique pas.
+    #[serde(default)]
+    pub key_modules: Vec<String>,
     /// Live single-session conflict: `Some` while another server holds the
     /// floating license. Runtime-only — never loaded from settings, so a restart
     /// starts clean and the next heartbeat restores it if still in conflict.
@@ -412,6 +424,14 @@ impl LicenseManager {
             .and_then(|v| serde_json::from_str(&v).ok())
             .unwrap_or_default();
 
+        // Modules portés par la clé — persistés à part de ceux du compte.
+        let key_modules: Vec<String> = settings
+            .get(CLE_MODULES_DE_LA_CLE)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default();
+
         let state = LicenseState {
             tier,
             license_key,
@@ -423,6 +443,7 @@ impl LicenseManager {
             account_premium_checked,
             qobuz_proxy_first,
             modules,
+            key_modules,
             session_conflict: None,
             key_premium_marker,
         };
@@ -523,7 +544,14 @@ impl LicenseManager {
     /// are promoted within one validation round-trip.
     pub async fn set_license_key(&self, key: &str) -> Result<(), String> {
         let settings = SettingsRepo::with_backend(self.db.clone());
+        // Une AUTRE clé ne doit pas hériter des modules de la précédente. La
+        // même clé, rejouée (la commande d'activation est rejouable), garde
+        // les siens : la validation qui suit les confirme ou les remplace.
+        let meme_cle = self.state.read().await.license_key.as_deref() == Some(key);
         settings.set("license_key", key)?;
+        if !meme_cle {
+            settings.delete(CLE_MODULES_DE_LA_CLE).ok();
+        }
         // Pending until validated: do NOT set premium or stamp a validation.
         // Clear any stale timestamp so a re-entered key can't ride a previous
         // key's grace window.
@@ -535,6 +563,9 @@ impl LicenseManager {
         state.tier = Tier::Free;
         state.last_validated = None;
         state.key_premium_marker = false;
+        if !meme_cle {
+            state.key_modules.clear();
+        }
 
         info!(
             key_prefix = &key[..key.len().min(8)],
@@ -550,6 +581,7 @@ impl LicenseManager {
         settings.set("license_tier", "free").ok();
         settings.delete("license_expires_at").ok();
         settings.delete("license_last_validated").ok();
+        settings.delete(CLE_MODULES_DE_LA_CLE).ok();
 
         let mut state = self.state.write().await;
         state.license_key = None;
@@ -557,18 +589,41 @@ impl LicenseManager {
         state.expires_at = None;
         state.last_validated = None;
         state.key_premium_marker = false;
+        // Les modules de la clé partent avec elle (désactivation).
+        state.key_modules.clear();
 
         info!("license_cleared");
     }
 
     /// Called by heartbeat when the licensing server responds.
     /// Updates tier, expires_at, and last_validated in both memory and DB.
-    pub async fn update_from_server(&self, tier: Tier, expires_at: Option<String>) {
+    ///
+    /// `modules` : les modules que le verdict attache à la clé.
+    /// - `Some(m)` : ils remplacent ceux de la clé (`Some(vec![])` les vide —
+    ///   c'est ce que passe une expiration autoritaire).
+    /// - `None` : le site n'a rien dit (site ancien, sans le champ) — on n'y
+    ///   touche pas.
+    ///
+    /// Les modules du **compte** (`set_modules`) ne sont jamais touchés ici.
+    pub async fn update_from_server(
+        &self,
+        tier: Tier,
+        expires_at: Option<String>,
+        modules: Option<Vec<String>>,
+    ) {
         let settings = SettingsRepo::with_backend(self.db.clone());
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
         settings.set("license_tier", &tier.to_string()).ok();
         settings.set("license_last_validated", &now).ok();
+        if let Some(ref m) = modules {
+            settings
+                .set(
+                    CLE_MODULES_DE_LA_CLE,
+                    &serde_json::to_string(m).unwrap_or_else(|_| "[]".into()),
+                )
+                .ok();
+        }
 
         if let Some(ref exp) = expires_at {
             settings.set("license_expires_at", exp).ok();
@@ -581,6 +636,12 @@ impl LicenseManager {
         state.expires_at = expires_at;
         state.last_validated = Some(now.clone());
         state.key_premium_marker = tier == Tier::Premium;
+        if let Some(m) = modules {
+            if state.key_modules != m {
+                info!(modules = ?m, "license_key_modules_updated");
+            }
+            state.key_modules = m;
+        }
         let premium = effective_tier(&state) == Tier::Premium;
         drop(state);
 
@@ -681,15 +742,19 @@ impl LicenseManager {
         }
     }
 
-    /// Whether the account owns the paid module `id` (e.g. "diretta").
-    /// Module SKUs are independent of the premium tier.
+    /// Whether the paid module `id` is owned — by the linked account OR by the
+    /// active license key (see [`modules_effectifs`]). Module SKUs are
+    /// independent of the premium tier.
     pub async fn has_module(&self, id: &str) -> bool {
-        self.state.read().await.modules.iter().any(|m| m == id)
+        modules_effectifs(&*self.state.read().await)
+            .iter()
+            .any(|m| m == id)
     }
 
-    /// Snapshot of the owned module ids (for provider contexts / API responses).
+    /// Snapshot of the owned module ids (for provider contexts / API
+    /// responses): the account's modules ∪ the active key's modules.
     pub async fn modules(&self) -> Vec<String> {
-        self.state.read().await.modules.clone()
+        modules_effectifs(&*self.state.read().await)
     }
 
     /// Record that the floating license is currently held by ANOTHER server
@@ -966,6 +1031,44 @@ fn effective_tier(state: &LicenseState) -> Tier {
     }
 }
 
+/// Réglage où sont persistés les modules portés par la clé.
+const CLE_MODULES_DE_LA_CLE: &str = "license_modules";
+
+/// Les modules de la clé comptent-ils en ce moment ?
+///
+/// Comme [`key_premium_active`], mais **sans palier ni grâce** :
+/// - une clé est enregistrée ;
+/// - son échéance, si le site en a donné une, n'est pas passée ;
+/// - aucun autre serveur ne tient la session (une clé, un appareil actif à
+///   la fois — la même règle que pour le Premium).
+///
+/// Pas de fenêtre de grâce : un module de la clé est un achat à vie, il reste
+/// valable hors ligne sans limite (décision D5 du 14/10/2026). Il ne naît que
+/// d'une confirmation en ligne (`update_from_server`), et une expiration
+/// autoritaire le vide.
+fn key_modules_active(state: &LicenseState) -> bool {
+    if state.license_key.is_none() || state.session_conflict.is_some() {
+        return false;
+    }
+    match state.expires_at {
+        Some(ref exp) => !is_expired(exp, 0),
+        None => true,
+    }
+}
+
+/// Les modules possédés : ceux du compte ∪ ceux de la clé quand elle compte.
+/// Triés, sans doublon. C'est LA lecture du droit à un module : découverte des
+/// sorties, `has_module` et `/cloud/license/status` passent tous par ici.
+pub fn modules_effectifs(state: &LicenseState) -> Vec<String> {
+    let mut tous: Vec<String> = state.modules.clone();
+    if key_modules_active(state) {
+        tous.extend(state.key_modules.iter().cloned());
+    }
+    tous.sort();
+    tous.dedup();
+    tous
+}
+
 // ---------------------------------------------------------------------------
 // Offline grace — READ-ONLY reporting (#1999)
 // ---------------------------------------------------------------------------
@@ -1176,6 +1279,10 @@ pub enum VerdictLicence {
     Confirmee {
         tier: Tier,
         expires_at: Option<String>,
+        /// Les modules que porte la cle (`modules`). `None` si le champ est
+        /// absent : site ancien, on ne touche pas aux modules deja connus.
+        /// `Some(vec![])` : le site dit « aucun module ».
+        modules: Option<Vec<String>>,
     },
     /// `license_valid:false` **nu**. Ce n'est PAS une revocation : re-liaison
     /// d'empreinte, hoquet du serveur, session tenue par une autre machine.
@@ -1221,6 +1328,15 @@ pub fn verdict_licence(body: &serde_json::Value) -> VerdictLicence {
             .get("license_expires_at")
             .and_then(|v| v.as_str())
             .map(String::from),
+        modules: body.get("modules").and_then(|v| v.as_array()).map(|liste| {
+            liste
+                .iter()
+                .filter_map(|m| m.as_str())
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(String::from)
+                .collect()
+        }),
     }
 }
 
@@ -1491,6 +1607,7 @@ mod tests {
             account_premium_checked,
             qobuz_proxy_first: false,
             modules: vec![],
+            key_modules: vec![],
             session_conflict: None,
             key_premium_marker: tier == Tier::Premium,
         }
@@ -1512,6 +1629,7 @@ mod tests {
             account_premium_checked: None,
             qobuz_proxy_first: false,
             modules: vec![],
+            key_modules: vec![],
             session_conflict: None,
             key_premium_marker: tier == Tier::Premium,
         }
@@ -1713,7 +1831,7 @@ mod tests {
         // A stored key is pending (Free) until the licensing server confirms it;
         // mirror that online validation so the tier is genuinely Premium before
         // we exercise the session-conflict gating.
-        mgr.update_from_server(Tier::Premium, None).await;
+        mgr.update_from_server(Tier::Premium, None, None).await;
         assert!(mgr.is_premium().await, "premium after validated activation");
 
         mgr.set_session_conflict(Some("Maison 2".into()), None)
@@ -1819,7 +1937,7 @@ mod tests {
         // La même question posée à un serveur Premium ne rend PAS un nombre.
         // C'est ce que `free_zone_limit()` était incapable de dire : il aurait
         // répondu « 3 » ici aussi.
-        mgr.update_from_server(Tier::Premium, None).await;
+        mgr.update_from_server(Tier::Premium, None, None).await;
         assert_eq!(
             mgr.limite_zones().await,
             None,
@@ -1844,7 +1962,7 @@ mod tests {
         assert!(!mgr.check_feature(Feature::CloudRelay).await);
 
         // A genuine server confirmation (heartbeat / on-demand validate) promotes it.
-        mgr.update_from_server(Tier::Premium, None).await;
+        mgr.update_from_server(Tier::Premium, None, None).await;
         assert_eq!(mgr.tier().await, Tier::Premium);
         assert!(mgr.is_premium().await);
         assert!(mgr.check_feature(Feature::CloudRelay).await);
@@ -1948,8 +2066,12 @@ mod tests {
         let backend: Arc<dyn DbBackend> = Arc::new(db);
         let mgr = LicenseManager::new(backend);
 
-        mgr.update_from_server(Tier::Premium, Some("2030-12-31T00:00:00Z".to_string()))
-            .await;
+        mgr.update_from_server(
+            Tier::Premium,
+            Some("2030-12-31T00:00:00Z".to_string()),
+            None,
+        )
+        .await;
         assert_eq!(mgr.tier().await, Tier::Premium);
 
         let state = mgr.license_state().await;
@@ -2265,7 +2387,7 @@ mod tests {
         assert!(mgr.is_premium().await, "toujours premium pendant la grâce");
 
         // Le réseau revient : un seul aller-retour du battement suffit.
-        mgr.update_from_server(Tier::Premium, None).await;
+        mgr.update_from_server(Tier::Premium, None, None).await;
 
         let apres = mgr.offline_grace().await.unwrap();
         assert_eq!(apres.phase, GracePhase::Ok, "la grâce se réarme seule");
@@ -2369,6 +2491,7 @@ mod tests {
             VerdictLicence::Confirmee {
                 tier: Tier::Premium,
                 expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+                modules: None,
             }
         );
         // Confirmee sans palier nomme : Free, jamais Premium par defaut.
@@ -2377,6 +2500,7 @@ mod tests {
             VerdictLicence::Confirmee {
                 tier: Tier::Free,
                 expires_at: None,
+                modules: None,
             }
         );
         // Palier inconnu : Free, pas une promotion.
@@ -2388,7 +2512,164 @@ mod tests {
             VerdictLicence::Confirmee {
                 tier: Tier::Free,
                 expires_at: None,
+                modules: None,
             }
         );
+    }
+
+    // --- Modules portés par la clé (étape 3 du chantier du binaire composite)
+
+    fn gestionnaire_sur(db: Arc<dyn DbBackend>) -> LicenseManager {
+        LicenseManager::new(db)
+    }
+
+    fn base_neuve() -> Arc<dyn DbBackend> {
+        let db = crate::db::sqlite::SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        crate::db::migrations::run_migrations(&db).unwrap();
+        Arc::new(db)
+    }
+
+    #[test]
+    fn le_verdict_lit_les_modules_de_la_cle() {
+        let v = verdict_licence(&corps(&[
+            (&champ_verdict(), serde_json::json!(true)),
+            ("license_tier", serde_json::json!("free")),
+            (
+                "modules",
+                serde_json::json!(["module-a", "", 7, " module-b "]),
+            ),
+        ]));
+        assert_eq!(
+            v,
+            VerdictLicence::Confirmee {
+                tier: Tier::Free,
+                expires_at: None,
+                modules: Some(vec!["module-a".into(), "module-b".into()]),
+            }
+        );
+        // Liste vide explicite : « aucun module », distinct de l'absence.
+        let v = verdict_licence(&corps(&[
+            (&champ_verdict(), serde_json::json!(true)),
+            ("modules", serde_json::json!([])),
+        ]));
+        assert!(
+            matches!(v, VerdictLicence::Confirmee { modules: Some(ref m), .. } if m.is_empty())
+        );
+        // Champ absent ou d'un autre type : site ancien, on n'en dit rien.
+        let v = verdict_licence(&corps(&[
+            (&champ_verdict(), serde_json::json!(true)),
+            ("modules", serde_json::json!("module-a")),
+        ]));
+        assert!(matches!(v, VerdictLicence::Confirmee { modules: None, .. }));
+    }
+
+    #[tokio::test]
+    async fn les_modules_de_la_cle_s_unissent_a_ceux_du_compte() {
+        let mgr = gestionnaire_sur(base_neuve());
+        mgr.set_license_key("TUNE-CLE-MODULE").await.unwrap();
+        mgr.update_from_server(Tier::Free, None, Some(vec!["module-a".into()]))
+            .await;
+        assert_eq!(mgr.modules().await, vec!["module-a".to_string()]);
+        assert_eq!(mgr.tier().await, Tier::Free, "un module n'est pas Premium");
+
+        // Le compte relu sans module : SA liste se vide, pas celle de la clé.
+        mgr.set_modules(Vec::new()).await;
+        assert!(mgr.has_module("module-a").await);
+        mgr.clear_account_premium().await;
+        assert!(mgr.has_module("module-a").await);
+
+        // Union triée, sans doublon.
+        mgr.set_modules(vec!["module-b".into(), "module-a".into()])
+            .await;
+        assert_eq!(
+            mgr.modules().await,
+            vec!["module-a".to_string(), "module-b".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn un_verdict_sans_modules_ne_touche_pas_a_ceux_de_la_cle() {
+        let mgr = gestionnaire_sur(base_neuve());
+        mgr.set_license_key("TUNE-CLE-MODULE").await.unwrap();
+        mgr.update_from_server(Tier::Free, None, Some(vec!["module-a".into()]))
+            .await;
+        mgr.update_from_server(Tier::Free, None, None).await;
+        assert!(mgr.has_module("module-a").await);
+        mgr.update_from_server(Tier::Free, None, Some(Vec::new()))
+            .await;
+        assert!(!mgr.has_module("module-a").await);
+    }
+
+    #[tokio::test]
+    async fn les_modules_de_la_cle_ignorent_la_grace_et_survivent_au_redemarrage() {
+        let db = base_neuve();
+        let mgr = gestionnaire_sur(db.clone());
+        mgr.set_license_key("TUNE-CLE-MODULE").await.unwrap();
+        mgr.update_from_server(Tier::Premium, None, Some(vec!["module-a".into()]))
+            .await;
+        let il_y_a_400_jours = (chrono::Utc::now() - chrono::Duration::days(400))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        SettingsRepo::with_backend(db.clone())
+            .set("license_last_validated", &il_y_a_400_jours)
+            .unwrap();
+        drop(mgr);
+
+        let relu = gestionnaire_sur(db);
+        assert_eq!(
+            relu.tier().await,
+            Tier::Free,
+            "témoin : la grâce de la clé a joué"
+        );
+        assert!(
+            relu.has_module("module-a").await,
+            "le module de la clé a expiré hors ligne (D5 : sans limite)"
+        );
+    }
+
+    #[tokio::test]
+    async fn une_echeance_passee_ou_un_conflit_de_session_suspend_les_modules_de_la_cle() {
+        let mgr = gestionnaire_sur(base_neuve());
+        mgr.set_license_key("TUNE-CLE-MODULE").await.unwrap();
+        mgr.update_from_server(Tier::Free, None, Some(vec!["module-a".into()]))
+            .await;
+
+        mgr.set_session_conflict(Some("autre-serveur".into()), None)
+            .await;
+        assert!(
+            !mgr.has_module("module-a").await,
+            "une clé, un appareil actif"
+        );
+        mgr.clear_session_conflict().await;
+        assert!(mgr.has_module("module-a").await);
+
+        mgr.update_from_server(Tier::Free, Some("2020-01-01T00:00:00Z".into()), None)
+            .await;
+        assert!(!mgr.has_module("module-a").await, "clé échue");
+    }
+
+    #[tokio::test]
+    async fn une_autre_cle_ou_la_desactivation_emporte_les_modules_de_la_cle() {
+        let db = base_neuve();
+        let mgr = gestionnaire_sur(db.clone());
+        mgr.set_license_key("TUNE-CLE-MODULE").await.unwrap();
+        mgr.update_from_server(Tier::Free, None, Some(vec!["module-a".into()]))
+            .await;
+
+        // La même clé, reposée : rien ne change avant la validation.
+        mgr.set_license_key("TUNE-CLE-MODULE").await.unwrap();
+        assert!(mgr.has_module("module-a").await);
+
+        // Une autre clé n'hérite de rien, même après redémarrage.
+        mgr.set_license_key("TUNE-AUTRE-CLE").await.unwrap();
+        assert!(!mgr.has_module("module-a").await);
+        assert!(!gestionnaire_sur(db.clone()).has_module("module-a").await);
+
+        mgr.update_from_server(Tier::Free, None, Some(vec!["module-a".into()]))
+            .await;
+        mgr.clear_license().await;
+        assert!(!mgr.has_module("module-a").await);
+        assert!(!gestionnaire_sur(db).has_module("module-a").await);
     }
 }

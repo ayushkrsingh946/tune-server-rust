@@ -1938,10 +1938,15 @@ fn spawn_heartbeat(state: &AppState) {
                                 );
                             } else if !valid {
                                 // No key present, or an authoritative expiry:
-                                // honor the downgrade to Free.
+                                // honor the downgrade to Free. Les modules de
+                                // la clé partent avec elle (`Some(vec![])`).
                                 info!(expired_authoritatively, "license_invalidated_by_server");
                                 license
-                                    .update_from_server(tune_core::license::Tier::Free, None)
+                                    .update_from_server(
+                                        tune_core::license::Tier::Free,
+                                        None,
+                                        Some(Vec::new()),
+                                    )
                                     .await;
                                 event_bus.emit(
                                     "license.updated",
@@ -1954,12 +1959,15 @@ fn spawn_heartbeat(state: &AppState) {
                                 let tune_core::license::VerdictLicence::Confirmee {
                                     tier,
                                     expires_at,
+                                    modules,
                                 } = verdict
                                 else {
                                     unreachable!("les autres verdicts sont traites plus haut")
                                 };
 
-                                license.update_from_server(tier, expires_at.clone()).await;
+                                license
+                                    .update_from_server(tier, expires_at.clone(), modules)
+                                    .await;
                                 info!(tier = %tier, "license_validated_from_heartbeat");
                                 event_bus.emit(
                                     "license.updated",
@@ -2070,7 +2078,7 @@ async fn revalider_la_cle(
                 return Some((Verdict::Echec, "reponse illisible".into()));
             };
             // Meme lecture du verdict que le battement et que les deux routes.
-            let (tier, expires_at) = match tune_core::license::verdict_licence(&body) {
+            let (tier, expires_at, modules) = match tune_core::license::verdict_licence(&body) {
                 tune_core::license::VerdictLicence::Absent => {
                     warn!("license_revalidation_sans_verdict_palier_conserve");
                     return Some((Verdict::Echec, "aucun verdict rendu".into()));
@@ -2085,7 +2093,7 @@ async fn revalider_la_cle(
                 tune_core::license::VerdictLicence::Expiree => {
                     info!("license_invalidated_by_server (expiration autoritaire)");
                     license
-                        .update_from_server(tune_core::license::Tier::Free, None)
+                        .update_from_server(tune_core::license::Tier::Free, None, Some(Vec::new()))
                         .await;
                     event_bus.emit(
                         "license.updated",
@@ -2093,11 +2101,15 @@ async fn revalider_la_cle(
                     );
                     return Some((Verdict::Succes, "licence expiree, palier gratuit".into()));
                 }
-                tune_core::license::VerdictLicence::Confirmee { tier, expires_at } => {
-                    (tier, expires_at)
-                }
+                tune_core::license::VerdictLicence::Confirmee {
+                    tier,
+                    expires_at,
+                    modules,
+                } => (tier, expires_at, modules),
             };
-            license.update_from_server(tier, expires_at.clone()).await;
+            license
+                .update_from_server(tier, expires_at.clone(), modules)
+                .await;
             info!(tier = %tier, "license_revalidated_without_heartbeat");
             event_bus.emit(
                 "license.updated",

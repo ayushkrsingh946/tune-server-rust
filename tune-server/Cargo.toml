@@ -1646,3 +1646,12 @@ path = "tests/playlist_manager_alias_deprecies.rs"
 name = "pg_balises_6124"
 path = "tests/pg_balises_6124.rs"
 required-features = ["postgres"]
+
+# Une clé de licence porte ses modules payants : `activate` répond
+# `activated` pour une clé confirmée non Premium, les modules de la clé
+# s'unissent à ceux du compte et restent hors ligne sans limite. Par les
+# routes montées, contre un faux site. `autotests = false` : sans cette
+# cible, jamais compilé.
+[[test]]
+name = "licence_modules_de_la_cle"
+path = "tests/licence_modules_de_la_cle.rs"

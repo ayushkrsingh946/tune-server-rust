@@ -1167,7 +1167,27 @@ async fn license_status(State(state): State<AppState>) -> Json<Value> {
         "zone_limit": zone_limit,
         "session_conflict": session_conflict,
         "offline_grace": offline_grace,
+        // Les modules payants possédés (compte ∪ clé active), et d'où ils
+        // viennent. `module_sources.key` ne liste que ceux de la clé qui
+        // comptent en ce moment.
+        "modules": tune_core::license::modules_effectifs(&ls),
+        "module_sources": sources_des_modules(&ls),
     }))
+}
+
+/// D'où vient chaque module possédé : le compte lié (`account`) ou la clé de
+/// licence (`key`). Un module peut figurer dans les deux.
+fn sources_des_modules(ls: &tune_core::license::LicenseState) -> Value {
+    let effectifs = tune_core::license::modules_effectifs(ls);
+    let de_la_cle: Vec<&String> = ls
+        .key_modules
+        .iter()
+        .filter(|m| effectifs.contains(m))
+        .collect();
+    json!({
+        "account": ls.modules,
+        "key": de_la_cle,
+    })
 }
 
 /// POST /cloud/license/activate — enregistre la clé **et** la fait confirmer en
@@ -1197,6 +1217,11 @@ async fn license_status(State(state): State<AppState>) -> Json<Value> {
 /// promesse locale : serveur de licences injoignable ou clé refusée ⇒ `pending`
 /// et Free, exactement comme avant. Aucune clé ne débloque quoi que ce soit
 /// sans confirmation en ligne.
+///
+/// `status` dit si **le site a confirmé la clé**, pas si elle est Premium : une
+/// clé « module seul » (palier Free, un module) est confirmée et doit répondre
+/// `activated` — un script d'installation teste ce champ. La réponse porte
+/// aussi `modules`, les modules possédés après la validation.
 async fn license_activate(
     State(state): State<AppState>,
     Json(body): Json<Value>,
@@ -1212,23 +1237,23 @@ async fn license_activate(
     if let Err(e) = state.license.set_license_key(key).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response();
     }
-    let tier = validate_stored_license(&state).await;
-    let premium = tier == tune_core::license::Tier::Premium;
+    let validation = validate_stored_license(&state).await;
     let ls = state.license.license_state().await;
     // `validate_stored_license` a déjà émis l'événement quand le serveur de
     // licences a tranché. On ne l'émet ici que dans le cas contraire : la clé a
     // tout de même changé, les écoutants doivent relire le statut.
-    if !premium {
+    if !validation.confirmee {
         state.event_bus.emit(
             "license.updated",
             json!({"tier": ls.tier, "expires_at": ls.expires_at}),
         );
     }
     Json(json!({
-        "status": if premium { "activated" } else { "pending" },
+        "status": if validation.confirmee { "activated" } else { "pending" },
         "tier": ls.tier,
         "expires_at": ls.expires_at,
         "license_key": key,
+        "modules": tune_core::license::modules_effectifs(&ls),
     }))
     .into_response()
 }
@@ -1271,10 +1296,17 @@ fn mozaik_base(settings: &SettingsRepo) -> String {
 /// genuine online confirmation). Shared by the on-demand validate route and the
 /// "set key" route so a newly-entered key is confirmed immediately instead of
 /// unlocking Premium locally with no server round-trip.
-pub(crate) async fn validate_stored_license(state: &AppState) -> tune_core::license::Tier {
+pub(crate) async fn validate_stored_license(state: &AppState) -> ValidationEnLigne {
     let ls = state.license.license_state().await;
     let Some(key) = ls.license_key.clone() else {
-        return tune_core::license::Tier::Free;
+        return ValidationEnLigne {
+            tier: tune_core::license::Tier::Free,
+            confirmee: false,
+        };
+    };
+    let non_confirmee = |tier| ValidationEnLigne {
+        tier,
+        confirmee: false,
     };
 
     let settings = SettingsRepo::with_backend(state.backend.clone());
@@ -1294,13 +1326,13 @@ pub(crate) async fn validate_stored_license(state: &AppState) -> tune_core::lice
         .send()
         .await;
     let Ok(resp) = resp else {
-        return state.license.tier().await;
+        return non_confirmee(state.license.tier().await);
     };
     if !resp.status().is_success() {
-        return state.license.tier().await;
+        return non_confirmee(state.license.tier().await);
     }
     let Ok(body) = resp.json::<Value>().await else {
-        return state.license.tier().await;
+        return non_confirmee(state.license.tier().await);
     };
 
     // Lecture unique du verdict (`tune_core::license::verdict_licence`) : ce
@@ -1309,20 +1341,37 @@ pub(crate) async fn validate_stored_license(state: &AppState) -> tune_core::lice
     // d'une confirmation, et un refus — transitoire ou meme expire — laisse le
     // palier en cache tel quel. La cle vient d'etre posee en attente par
     // `set_license_key`, donc le palier effectif est deja Free.
-    let tune_core::license::VerdictLicence::Confirmee { tier, expires_at } =
-        tune_core::license::verdict_licence(&body)
+    let tune_core::license::VerdictLicence::Confirmee {
+        tier,
+        expires_at,
+        modules,
+    } = tune_core::license::verdict_licence(&body)
     else {
-        return state.license.tier().await;
+        return non_confirmee(state.license.tier().await);
     };
     state
         .license
-        .update_from_server(tier, expires_at.clone())
+        .update_from_server(tier, expires_at.clone(), modules)
         .await;
     state.event_bus.emit(
         "license.updated",
         json!({"tier": tier, "expires_at": expires_at}),
     );
-    tier
+    ValidationEnLigne {
+        tier,
+        confirmee: true,
+    }
+}
+
+/// Ce que rend [`validate_stored_license`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ValidationEnLigne {
+    /// Le palier confirmé par le site, ou le palier effectif en cache quand il
+    /// ne s'est pas prononcé.
+    pub tier: tune_core::license::Tier,
+    /// Le site a-t-il **confirmé** la clé (`license_valid: true`) ? Vrai aussi
+    /// pour une clé Free qui porte un module : confirmée n'est pas Premium.
+    pub confirmee: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,7 +1615,7 @@ async fn license_validate(State(state): State<AppState>) -> impl IntoResponse {
     // un payeur en annoncant un succes. Un verdict absent ne persiste plus
     // rien : le palier en cache est rendu tel quel, sous `status:"cached"`.
     let verdict = tune_core::license::verdict_licence(&body);
-    let (tier, expires_at) = match verdict {
+    let (tier, expires_at, modules) = match verdict {
         tune_core::license::VerdictLicence::Absent => {
             warn!("license_validate_sans_verdict_palier_conserve");
             return reponse_validation(
@@ -1582,7 +1631,7 @@ async fn license_validate(State(state): State<AppState>) -> impl IntoResponse {
             info!("license_invalidated_by_server_validate (authoritative expiry)");
             state
                 .license
-                .update_from_server(tune_core::license::Tier::Free, None)
+                .update_from_server(tune_core::license::Tier::Free, None, Some(Vec::new()))
                 .await;
             state.event_bus.emit(
                 "license.updated",
@@ -1609,12 +1658,16 @@ async fn license_validate(State(state): State<AppState>) -> impl IntoResponse {
                 }),
             );
         }
-        tune_core::license::VerdictLicence::Confirmee { tier, expires_at } => (tier, expires_at),
+        tune_core::license::VerdictLicence::Confirmee {
+            tier,
+            expires_at,
+            modules,
+        } => (tier, expires_at, modules),
     };
 
     state
         .license
-        .update_from_server(tier, expires_at.clone())
+        .update_from_server(tier, expires_at.clone(), modules)
         .await;
     info!(tier = %tier, "license_validated_on_demand");
     state.event_bus.emit(

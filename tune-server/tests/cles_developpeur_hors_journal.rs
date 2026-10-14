@@ -87,7 +87,9 @@ async fn aucune_clef_ni_adresse_de_webhook_n_atteint_le_journal() {
 
     let etat = tune_server::state::AppState::new(":memory:", 0, Default::default())
         .expect("base en memoire");
-    etat.license.update_from_server(Tier::Premium, None).await;
+    etat.license
+        .update_from_server(Tier::Premium, None, None)
+        .await;
     let app = tune_server::routes::router(etat.clone());
 
     // --- Le chemin nominal : création, listage, révocation ------------------
