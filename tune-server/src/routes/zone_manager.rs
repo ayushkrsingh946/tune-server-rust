@@ -109,9 +109,41 @@ pub(crate) fn generic_group_synchronization_contract() -> Value {
     })
 }
 
+/// #6132 — le contrat d'un groupe dont le meneur recopie son flux vers une
+/// seconde sortie locale de la machine (sortie double) : horloges asservies,
+/// latences matérielles compensées par les horodatages du pilote. Les autres
+/// membres éventuels restent indépendants, et sont nommés.
+pub(crate) fn local_double_output_contract(group: &Value) -> Value {
+    let suiveur = group["sortie_double"]["suiveur_id"].as_i64();
+    let leader = group["leader_id"].as_i64();
+    let independants: Vec<i64> = group["zone_ids"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_i64())
+                .filter(|id| Some(*id) != suiveur && Some(*id) != leader)
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "supported": true,
+        "transport": "local_double_output",
+        "presentation_timestamps": false,
+        "render_latency_calibrated": true,
+        "accuracy_claim_ms": null,
+        "synchronized_zone_ids": [leader, suiveur],
+        "independent_zone_ids": independants,
+        "alternative": "oaat",
+    })
+}
+
 /// Ajoute le contrat de synchronisation à la vue d'un groupe hétérogène.
 pub(crate) fn generic_group_view(mut group: Value) -> Value {
-    group["synchronization"] = generic_group_synchronization_contract();
+    group["synchronization"] = if group.get("sortie_double").is_some() {
+        local_double_output_contract(&group)
+    } else {
+        generic_group_synchronization_contract()
+    };
     group
 }
 

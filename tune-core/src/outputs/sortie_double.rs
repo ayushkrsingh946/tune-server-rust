@@ -68,14 +68,33 @@ pub trait AnneauSecondaire {
     fn en_attente(&self) -> usize;
     /// Taille, en échantillons entrelacés, de la dernière période que le
     /// rappel de B a lue ; 0 tant qu'il n'a rien lu.
-    ///
-    /// B lit une période d'un coup : juste avant sa lecture, l'anneau tient
-    /// en moyenne une demi-période DE PLUS que son remplissage moyen, et c'est
-    /// cette tête-là que B joue. Le recopieur retranche cette demi-période de
-    /// sa consigne pour que B ne joue pas en retard d'autant.
     fn periode_du_lecteur(&self) -> usize {
         0
     }
+    /// Secondes écoulées depuis la dernière lecture de B (même horloge pour
+    /// les deux rappels).
+    ///
+    /// B lit une période d'un coup : le remplissage de l'anneau est une dent
+    /// de scie, et le lire à l'instant où A passe donne une valeur qui dépend
+    /// de la PHASE entre les deux rappels. Deux cartes aux périodes égales
+    /// (10 ms en WASAPI partagé, le cas courant) gardent la même phase pendant
+    /// des minutes : la régulation se calait alors jusqu'à une demi-période à
+    /// côté. Avec cet instant, le recopieur reconstitue ce que B fait entendre
+    /// en continu : `en attente + période lue − écoulé × cadence`.
+    fn depuis_la_derniere_lecture_s(&self) -> Option<f64> {
+        None
+    }
+    /// Latence matérielle de B, en secondes, telle que son dernier rappel l'a
+    /// lue dans les horodatages du pilote (instant de lecture − instant du
+    /// rappel). `None` : le pilote ne la donne pas.
+    fn latence_du_lecteur_s(&self) -> Option<f64> {
+        None
+    }
+    /// Le recopieur publie ici, à chaque période, l'avance que B doit prendre
+    /// sur sa consigne nominale du côté de A (latence de A + décalage manuel),
+    /// pour que le rappel de B parte au bon seuil avant même la première
+    /// mesure.
+    fn publier_l_avance_de_a(&self, _avance_s: f64) {}
 }
 
 /// Table polyphasée d'un sinc fenêtré (Blackman-Harris), chaque phase
@@ -195,18 +214,18 @@ impl Regulateur {
     }
 }
 
-/// Le remplissage visé de l'anneau de B.
+/// L'avance visée de B : ce qui est poussé vers B et pas encore entendu.
 ///
-/// La consigne nominale est le retard de A ; B y gagnerait deux retards que A
-/// n'a pas, qu'on retranche :
+/// La consigne nominale est le retard de A, corrigée de la compensation de
+/// latence ; on en retranche la demi-largeur du filtre, retard que B a et que
+/// A n'a pas (la trame de B centrée sur l'entrée `x` n'est calculée qu'à
+/// l'arrivée de l'entrée `x + COEFFICIENTS / 2`).
 ///
-/// - la demi-largeur du filtre : la trame de B centrée sur l'entrée `x` n'est
-///   calculée qu'à l'arrivée de l'entrée `x + COEFFICIENTS / 2` ;
-/// - la demi-période de B (voir [`AnneauSecondaire::periode_du_lecteur`]).
-///
-/// Sans descendre sous une période de B plus 5 ms : en dessous, B frôlerait
-/// la famine. Ce plancher n'est atteint qu'avec des périodes de B de plus de
-/// ~50 ms ; l'écart qui reste alors est constant, il ne dérive pas.
+/// Sans descendre sous une période de B plus 5 ms : juste avant de lire, B
+/// doit trouver sa période entière dans l'anneau. Le plancher borne aussi la
+/// compensation de latence : avec la consigne de 40 ms et des périodes de
+/// 10 ms, B peut être avancé d'environ 25 ms sur A, pas davantage ; l'écart
+/// qui reste alors est constant, il ne dérive pas.
 #[derive(Debug, Clone, Copy)]
 pub struct Consigne {
     trames_b: f64,
@@ -216,24 +235,23 @@ pub struct Consigne {
 }
 
 impl Consigne {
-    /// Remplissage visé, en trames de B, pour une période de B de
-    /// `periode_b` échantillons entrelacés (0 : inconnue).
-    pub fn effective(&self, periode_b: usize) -> f64 {
+    /// Avance visée, en trames de B, pour une période de B de `periode_b`
+    /// échantillons entrelacés (0 : inconnue) et une compensation de
+    /// `compensation_s` secondes (latence de A − latence de B + décalage
+    /// manuel : positive, B doit être retardé ; négative, avancé).
+    pub fn effective(&self, periode_b: usize, compensation_s: f64) -> f64 {
+        let nominale = self.trames_b + compensation_s * self.cadence_b;
         let periode_b = (periode_b / self.canaux) as f64;
-        let voulue = self.trames_b - periode_b / 2.0 - self.filtre_b;
+        let voulue = nominale - self.filtre_b;
         let plancher = periode_b + 0.005 * self.cadence_b;
-        voulue.max(plancher.min(self.trames_b))
+        voulue.max(plancher.min(nominale.max(0.0)))
     }
 
     /// Le seuil, en échantillons entrelacés, à partir duquel le rappel de B
-    /// commence à lire, quand sa période est de `periode_b` échantillons.
-    /// Partir à ce seuil-là plutôt qu'à la consigne nominale évite un
-    /// accrochage de plusieurs millisecondes au départ.
-    pub fn seuil_de_depart(&self, periode_b: usize) -> usize {
-        // Une demi-période de plus : B part juste avant de lire, quand
-        // l'anneau est au sommet de sa dent de scie.
-        let trames = self.effective(periode_b) + (periode_b / self.canaux) as f64 / 2.0;
-        (trames.round() as usize) * self.canaux
+    /// commence à lire : au départ, ce que l'anneau tient juste avant la
+    /// première lecture est exactement l'avance de B.
+    pub fn seuil_de_depart(&self, periode_b: usize, compensation_s: f64) -> usize {
+        (self.effective(periode_b, compensation_s).round() as usize) * self.canaux
     }
 }
 
@@ -251,6 +269,24 @@ pub struct Releve {
     pub echantillons_refuses: u64,
     /// Trames recopiées vers B depuis la construction.
     pub trames_produites: u64,
+    /// Latences matérielles lissées de A et de B, en millisecondes, lues dans
+    /// les horodatages du pilote ; `None` quand il ne les donne pas.
+    pub latence_a_ms: Option<f64>,
+    pub latence_b_ms: Option<f64>,
+    /// Compensation appliquée (latence de A − latence de B + décalage
+    /// manuel), en millisecondes.
+    pub compensation_ms: f64,
+}
+
+/// Constante de temps du lissage des latences lues dans les horodatages.
+const LISSAGE_LATENCE_S: f64 = 2.0;
+
+fn lisser(prec: Option<f64>, mesure: Option<f64>, dt: f64) -> Option<f64> {
+    match (prec, mesure) {
+        (p, None) => p,
+        (None, Some(m)) => Some(m),
+        (Some(p), Some(m)) => Some(p + (m - p) * (dt / LISSAGE_LATENCE_S).min(1.0)),
+    }
 }
 
 /// La recopie de A vers B : ligne à retard de A, rééchantillonneur et
@@ -278,6 +314,10 @@ pub struct Recopieur {
     index_retard: usize,
     echantillons_refuses: u64,
     trames_produites: u64,
+    latence_a: Option<f64>,
+    latence_b: Option<f64>,
+    decalage_manuel_s: f64,
+    compensation_s: f64,
 }
 
 /// Plus grande période de A traitée d'un bloc ; une période plus longue est
@@ -317,7 +357,31 @@ impl Recopieur {
             index_retard: 0,
             echantillons_refuses: 0,
             trames_produites: 0,
+            latence_a: None,
+            latence_b: None,
+            decalage_manuel_s: 0.0,
+            compensation_s: 0.0,
         }
+    }
+
+    /// Le décalage manuel de B par rapport à A, en secondes (positif : B plus
+    /// tard). C'est le réglage de secours `sync_delay_ms` des deux zones
+    /// (`B − A`) : il s'ajoute à la compensation mesurée, et la remplace
+    /// quand le pilote ne donne pas ses horodatages.
+    pub fn regler_le_decalage_manuel(&mut self, decalage_s: f64) {
+        self.decalage_manuel_s = decalage_s;
+    }
+
+    /// La compensation, bornée à ce que l'anneau de B peut tenir : on ne
+    /// retarde pas B de plus de deux consignes, on ne l'avance pas de plus
+    /// d'une.
+    fn compensation(&self) -> f64 {
+        let auto = match (self.latence_a, self.latence_b) {
+            (Some(a), Some(b)) => a - b,
+            _ => 0.0,
+        };
+        let consigne = self.consigne_trames_b / self.cadence_b;
+        (auto + self.decalage_manuel_s).clamp(-consigne, 2.0 * consigne)
     }
 
     /// La consigne de remplissage de B, à copier dans le rappel de B pour son
@@ -345,6 +409,9 @@ impl Recopieur {
 
     pub fn releve(&self) -> Releve {
         Releve {
+            latence_a_ms: self.latence_a.map(|s| s * 1000.0),
+            latence_b_ms: self.latence_b.map(|s| s * 1000.0),
+            compensation_ms: self.compensation_s * 1000.0,
             ecart_ms: self.regulateur.ecart_lisse.unwrap_or(0.0) * 1000.0,
             correction_ppm: self.regulateur.correction * 1e6,
             derive_ppm: self.regulateur.integrale_ppm * 1e6,
@@ -356,24 +423,41 @@ impl Recopieur {
     /// Une période de A : `periode` (entrelacée, déjà au volume) est recopiée
     /// vers B, puis remplacée en place par sa version retardée — ce que A
     /// doit réellement jouer.
-    pub fn recopier(&mut self, periode: &mut [f32], anneau: &dyn AnneauSecondaire) {
+    ///
+    /// `latence_a_s` : la latence matérielle de A lue dans les horodatages de
+    /// son rappel (`None` si le pilote ne la donne pas).
+    pub fn recopier(
+        &mut self,
+        periode: &mut [f32],
+        anneau: &dyn AnneauSecondaire,
+        latence_a_s: Option<f64>,
+    ) {
         let ch = self.canaux;
         let trames = periode.len() / ch;
         if trames == 0 {
             return;
         }
-        // 1. Mesure de l'écart : remplissage de B AVANT cette période, contre
-        //    la consigne corrigée des deux retards propres à la recopie (la
-        //    demi-largeur du filtre, la demi-période de B).
+        // 0. Latences matérielles : ce que chaque carte met entre son rappel
+        //    et le convertisseur. B doit être nourri d'autant plus tôt que sa
+        //    latence dépasse celle de A.
+        let dt = trames as f64 / self.cadence_a;
+        let mesure = |l: Option<f64>| l.filter(|v| v.is_finite() && *v >= 0.0 && *v < 1.0);
+        self.latence_a = lisser(self.latence_a, mesure(latence_a_s), dt);
+        self.latence_b = lisser(self.latence_b, mesure(anneau.latence_du_lecteur_s()), dt);
+        self.compensation_s = self.compensation();
+        anneau.publier_l_avance_de_a(self.latence_a.unwrap_or(0.0) + self.decalage_manuel_s);
+        // 1. Mesure de l'écart : l'avance de B (poussé mais pas encore
+        //    entendu) AVANT cette période, contre la consigne.
         //    Tant que B n'a pas commencé à lire, l'anneau se remplit jusqu'au
         //    seuil de départ par construction : il n'y a rien à corriger, et
         //    réguler là-dessus emballerait l'intégrale avant le départ.
         let periode_b = anneau.periode_du_lecteur();
         if periode_b > 0 {
-            let rempli = anneau.en_attente() as f64 / ch as f64;
-            let visee = self.consigne().effective(periode_b);
+            let ecoule = anneau.depuis_la_derniere_lecture_s().unwrap_or(0.0);
+            let rempli =
+                (anneau.en_attente() + periode_b) as f64 / ch as f64 - ecoule * self.cadence_b;
+            let visee = self.consigne().effective(periode_b, self.compensation_s);
             let ecart_s = (rempli - visee) / self.cadence_b;
-            let dt = trames as f64 / self.cadence_a;
             self.regulateur.mesurer(ecart_s, dt);
         }
         let pas = 1.0 / self.rapport();
@@ -451,6 +535,36 @@ impl Recopieur {
     pub fn cadences(&self) -> (f64, f64) {
         (self.cadence_a, self.cadence_b)
     }
+}
+
+/// Ce que l'orchestrateur demande à la sortie locale de A : la seconde
+/// sortie à ouvrir, et ce qui règle B.
+#[derive(Debug, Clone)]
+pub struct SecondeSortieDemandee {
+    /// Le nom du périphérique B (sans `local:`).
+    pub nom: String,
+    /// Le curseur de volume de la zone B (millièmes), celui que `set_volume`
+    /// et la sourdine de la zone B écrivent. `None` : B suit le volume de A.
+    pub volume_utilisateur: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
+    /// Le décalage manuel de B sur A, en secondes : `sync_delay_ms` de la
+    /// zone B moins celui de la zone A.
+    pub decalage_manuel_s: f64,
+}
+
+impl SecondeSortieDemandee {
+    pub fn nommee(nom: impl Into<String>) -> Self {
+        Self {
+            nom: nom.into(),
+            volume_utilisateur: None,
+            decalage_manuel_s: 0.0,
+        }
+    }
+}
+
+/// Le décalage manuel de B sur A, en secondes, depuis les `sync_delay_ms`
+/// des deux zones (chacun : de combien retarder SA zone).
+pub fn decalage_manuel_s(sync_delay_a_ms: i64, sync_delay_b_ms: i64) -> f64 {
+    (sync_delay_b_ms - sync_delay_a_ms) as f64 / 1000.0
 }
 
 /// La clé de réglage de la seconde sortie d'une zone. Valeur : l'identifiant

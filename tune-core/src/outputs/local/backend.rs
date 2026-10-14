@@ -397,8 +397,14 @@ impl BackendCpal<'_> {
     /// la ligne à retard de A est en place avant sa première période. Un
     /// refus est journalisé et A joue seul — jamais de silence pour cause de
     /// seconde sortie.
-    pub(super) fn brancher_la_seconde_sortie(&mut self, nom: &str, strict_bitperfect: bool) {
+    pub(super) fn brancher_la_seconde_sortie(
+        &mut self,
+        demande: &crate::outputs::sortie_double::SecondeSortieDemandee,
+        strict_bitperfect: bool,
+        reglages_a: super::sortie_double_locale::ReglagesDeA,
+    ) {
         use super::sortie_double_locale::{ouvrir_la_seconde_sortie, refus_prealable};
+        let nom = demande.nom.as_str();
         let hote = self.host.id().name();
         let refus = refus_prealable(
             hote,
@@ -411,9 +417,10 @@ impl BackendCpal<'_> {
             Some(r) => Err(r),
             None => ouvrir_la_seconde_sortie(
                 &self.host,
-                nom,
+                demande,
                 self.sortie.cadence,
                 self.sortie.canaux,
+                reglages_a,
                 &self.recopie,
             ),
         };
@@ -745,15 +752,20 @@ impl<'a> BackendLocal<'a> for BackendCpal<'a> {
                 let famine_cb = ring_cb.starvation();
                 let mut promotion = PromotionDuFilDeRendu::nouvelle();
                 let recopie_cb = recopie.clone();
+                let unite_cb = AtomicU32::new(1000);
                 device.build_output_stream(
                     cfg,
-                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                         promotion.a_la_premiere_periode();
                         // Le corps est partagé avec le chemin compressé
                         // (`render_local_shared_f32_callback`) : c'était deux
                         // copies identiques, et le faux rouge de #3814 vivait
-                        // dans les deux.
-                        render_local_shared_f32_callback(
+                        // dans les deux. #6132 — sans seconde sortie,
+                        // `rendre_la_periode_de_a` l'appelle tel quel ; avec,
+                        // au volume unité, puis recopie, puis volume de A.
+                        super::sortie_double_locale::rendre_la_periode_de_a(
+                            &recopie_cb,
+                            &unite_cb,
                             &ring_cb,
                             &vol_cb,
                             &paused_cb,
@@ -763,10 +775,8 @@ impl<'a> BackendLocal<'a> for BackendCpal<'a> {
                             soft_mute_cb.armed_ms(),
                             min_buf,
                             data,
+                            info,
                         );
-                        // #6132 — sans seconde sortie, l'emplacement est vide
-                        // et la période sort telle quelle.
-                        super::sortie_double_locale::recopier_la_periode(&recopie_cb, data);
                     },
                     make_stream_error_cb(device_gone.clone(), famine_cb),
                     None,

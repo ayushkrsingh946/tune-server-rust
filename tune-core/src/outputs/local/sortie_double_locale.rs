@@ -1,30 +1,71 @@
 //! #6132 — la sortie double branchée sur le chemin partagé cpal.
 //!
-//! La zone joue sur son périphérique (A) comme d'habitude. Quand une seconde
-//! sortie est réglée (`zone_{id}_sortie_double`), le fil de lecture ouvre en
-//! plus le périphérique B, en mode partagé, et installe un [`Recopieur`] dans
+//! La zone joue sur son périphérique (A) comme d'habitude. Quand la zone est
+//! groupée avec une autre zone locale de la machine, la route de groupement
+//! pose `zone_{id}_sortie_double` ; le fil de lecture ouvre alors en plus le
+//! périphérique B, en mode partagé, et installe un [`Recopieur`] dans
 //! l'emplacement que le rappel de A consulte à chaque période : ce que A joue
 //! part aussi vers B, l'horloge de B asservie à celle de A
 //! (`outputs::sortie_double`).
 //!
-//! Limites de cette étape, dites dans le journal plutôt que tues :
+//! Étape 2 :
+//!
+//! - **latence matérielle** : chaque rappel lit dans ses horodatages cpal ce
+//!   que sa carte met entre le rappel et le convertisseur
+//!   (`playback − callback`) ; le recopieur nourrit B d'autant plus tôt que sa
+//!   latence dépasse celle de A. `sync_delay_ms` des deux zones s'y ajoute en
+//!   réglage de secours (pilote sans horodatage) ;
+//! - **volume par membre** : quand B joue, A rend sa période au volume unité,
+//!   la recopie, puis applique SON volume ; B applique le volume de SA zone
+//!   (curseur de la zone B, ReplayGain et compensation de la piste de A).
+//!
+//! Limites, dites dans le journal plutôt que tues :
 //!
 //! - **ASIO** : un seul flux dans tout le processus (`ASIO_DEVICE_LOCK`) ;
-//!   la seconde sortie est refusée, la zone joue sur A seule ;
-//! - **mode exclusif** (WASAPI, CoreAudio) et format entier : la seconde
-//!   sortie n'est ouverte que sur le chemin partagé en `f32` ;
+//! - **mode exclusif** (WASAPI, CoreAudio), chemin compressé et format entier :
+//!   la seconde sortie n'est ouverte que sur le chemin partagé en `f32` ;
 //! - **« bit-perfect strict »** : B est rééchantillonné (de quelques ppm) ;
-//!   une zone qui interdit toute conversion ne l'ouvre pas ;
+//! - **DoP** : un flux DoP rééchantillonné n'est plus du DSD, B se tait ;
 //! - B doit accepter le même nombre de canaux que A.
 
 use super::*;
-use crate::outputs::sortie_double::{AnneauSecondaire, CONSIGNE_PAR_DEFAUT_S, Recopieur};
+use crate::outputs::sortie_double::{
+    AnneauSecondaire, CONSIGNE_PAR_DEFAUT_S, Recopieur, SecondeSortieDemandee,
+};
 use std::sync::atomic::AtomicUsize;
 
-/// L'anneau SPSC de B, et la période que son rappel a lue en dernier.
+/// « Pas de valeur » dans les atomiques de latence et d'instant.
+const AUCUNE: u64 = u64::MAX;
+
+/// L'anneau SPSC de B, et ce que le rappel de B publie pour le recopieur.
 pub(super) struct AnneauDeB {
     anneau: RingBuf,
     periode: AtomicUsize,
+    /// Origine commune des instants des deux rappels.
+    origine: std::time::Instant,
+    /// Instant de la dernière lecture de B, en ns depuis `origine`.
+    derniere_lecture_ns: AtomicU64,
+    /// Latence matérielle de B, en ns, lue dans ses horodatages.
+    latence_b_ns: AtomicU64,
+    /// Avance publiée par A (latence de A + décalage manuel), en bits `f64`.
+    avance_a: AtomicU64,
+}
+
+impl AnneauDeB {
+    fn nouveau(capacite: usize) -> Self {
+        Self {
+            anneau: RingBuf::new(capacite),
+            periode: AtomicUsize::new(0),
+            origine: std::time::Instant::now(),
+            derniere_lecture_ns: AtomicU64::new(AUCUNE),
+            latence_b_ns: AtomicU64::new(AUCUNE),
+            avance_a: AtomicU64::new(0f64.to_bits()),
+        }
+    }
+
+    fn maintenant_ns(&self) -> u64 {
+        self.origine.elapsed().as_nanos() as u64
+    }
 }
 
 impl AnneauSecondaire for AnneauDeB {
@@ -37,6 +78,32 @@ impl AnneauSecondaire for AnneauDeB {
     fn periode_du_lecteur(&self) -> usize {
         self.periode.load(Ordering::Relaxed)
     }
+    fn depuis_la_derniere_lecture_s(&self) -> Option<f64> {
+        match self.derniere_lecture_ns.load(Ordering::Acquire) {
+            AUCUNE => None,
+            t => Some(self.maintenant_ns().saturating_sub(t) as f64 * 1e-9),
+        }
+    }
+    fn latence_du_lecteur_s(&self) -> Option<f64> {
+        match self.latence_b_ns.load(Ordering::Relaxed) {
+            AUCUNE => None,
+            ns => Some(ns as f64 * 1e-9),
+        }
+    }
+    fn publier_l_avance_de_a(&self, avance_s: f64) {
+        self.avance_a.store(avance_s.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// La latence matérielle qu'un rappel de sortie lit dans ses horodatages :
+/// l'instant prévu de lecture moins l'instant du rappel. `None` quand le
+/// pilote ne la donne pas (instants égaux ou incohérents).
+pub(super) fn latence_du_rappel(info: &cpal::OutputCallbackInfo) -> Option<f64> {
+    let t = info.timestamp();
+    t.playback
+        .duration_since(&t.callback)
+        .map(|d| d.as_secs_f64())
+        .filter(|s| *s > 0.0 && *s < 1.0)
 }
 
 pub(super) struct Recopie {
@@ -44,24 +111,124 @@ pub(super) struct Recopie {
     anneau: Arc<AnneauDeB>,
 }
 
-/// Ce que le rappel de A consulte à chaque période. Vide : A joue seul,
+/// Ce que le rappel de A consulte à chaque période. Inactif : A joue seul,
 /// exactement comme avant.
-pub(super) type EmplacementDeRecopie = Arc<std::sync::Mutex<Option<Recopie>>>;
-
-pub(super) fn emplacement_vide() -> EmplacementDeRecopie {
-    Arc::new(std::sync::Mutex::new(None))
+pub(super) struct Emplacement {
+    actif: AtomicBool,
+    recopie: std::sync::Mutex<Option<Recopie>>,
 }
 
-/// Dans le rappel de A, après le rendu (volume, rampe et silence compris) :
+pub(super) type EmplacementDeRecopie = Arc<Emplacement>;
+
+pub(super) fn emplacement_vide() -> EmplacementDeRecopie {
+    Arc::new(Emplacement {
+        actif: AtomicBool::new(false),
+        recopie: std::sync::Mutex::new(None),
+    })
+}
+
+impl Emplacement {
+    /// Une recopie est-elle installée ? Lu par le rappel de A pour savoir s'il
+    /// doit rendre au volume unité (le volume de A s'applique APRÈS la
+    /// recopie, celui de B dans le rappel de B).
+    pub(super) fn est_actif(&self) -> bool {
+        self.actif.load(Ordering::Acquire)
+    }
+
+    fn installer(&self, recopie: Recopie) {
+        *self.recopie.lock().unwrap_or_else(|e| e.into_inner()) = Some(recopie);
+        self.actif.store(true, Ordering::Release);
+    }
+
+    fn retirer(&self) -> Option<Recopie> {
+        self.actif.store(false, Ordering::Release);
+        self.recopie
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+}
+
+/// Dans le rappel de A, après le rendu (rampe et silence compris) :
 /// recopier la période vers B, et la remplacer par sa version retardée.
 ///
 /// `try_lock` : le rappel temps réel n'attend jamais. Le verrou n'est pris
 /// ailleurs qu'à l'installation et au retrait de la recopie.
-pub(super) fn recopier_la_periode(emplacement: &EmplacementDeRecopie, data: &mut [f32]) {
-    if let Ok(mut garde) = emplacement.try_lock()
+pub(super) fn recopier_la_periode(
+    emplacement: &EmplacementDeRecopie,
+    data: &mut [f32],
+    latence_a: Option<f64>,
+) {
+    if let Ok(mut garde) = emplacement.recopie.try_lock()
         && let Some(recopie) = garde.as_mut()
     {
-        recopie.recopieur.recopier(data, &*recopie.anneau);
+        recopie
+            .recopieur
+            .recopier(data, &*recopie.anneau, latence_a);
+    }
+}
+
+/// Le rappel `f32` partagé de A, avec ou sans seconde sortie.
+///
+/// Sans recopie : exactement le rendu d'avant. Avec : rendu au volume unité,
+/// recopie vers B, puis volume de A — chaque membre du groupe a le sien.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rendre_la_periode_de_a(
+    emplacement: &EmplacementDeRecopie,
+    unite: &AtomicU32,
+    ring: &RingBuf,
+    volume: &AtomicU32,
+    paused: &AtomicBool,
+    silent: &AtomicBool,
+    data_started: &AtomicBool,
+    ramp: &mut crate::audio::soft_mute::SoftMuteRamp,
+    armed_ms: u32,
+    min_buffer_samples: usize,
+    data: &mut [f32],
+    info: &cpal::OutputCallbackInfo,
+) {
+    if !emplacement.est_actif() {
+        render_local_shared_f32_callback(
+            ring,
+            volume,
+            paused,
+            silent,
+            data_started,
+            ramp,
+            armed_ms,
+            min_buffer_samples,
+            data,
+        );
+        return;
+    }
+    render_local_shared_f32_callback(
+        ring,
+        unite,
+        paused,
+        silent,
+        data_started,
+        ramp,
+        armed_ms,
+        min_buffer_samples,
+        data,
+    );
+    recopier_la_periode(emplacement, data, latence_du_rappel(info));
+    let v = volume.load(Ordering::Relaxed) as f32 / 1000.0;
+    if v != 1.0 {
+        for s in data.iter_mut() {
+            *s *= v;
+        }
+    }
+}
+
+/// Le gain de B, en millièmes : le curseur de la zone B composé avec le
+/// ReplayGain et la compensation de la piste que A joue — la même règle que
+/// le volume de A ([`effective_volume_units`]). Sans curseur connu pour B, B
+/// suit le volume de A.
+pub(crate) fn gain_de_b(volume_b: Option<u32>, facteur_de_rendu_a: u32, volume_a: u32) -> u32 {
+    match volume_b {
+        Some(v) => effective_volume_units(v, facteur_de_rendu_a, false),
+        None => volume_a,
     }
 }
 
@@ -132,18 +299,16 @@ pub(super) struct SecondeSortie {
 
 impl Drop for SecondeSortie {
     fn drop(&mut self) {
-        let recopie = self
-            .emplacement
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(recopie) = recopie {
+        if let Some(recopie) = self.emplacement.retirer() {
             let releve = recopie.recopieur.releve();
             info!(
                 seconde_sortie = %self.nom,
                 ecart_ms = releve.ecart_ms,
                 derive_ppm = releve.derive_ppm,
                 correction_ppm = releve.correction_ppm,
+                latence_a_ms = ?releve.latence_a_ms,
+                latence_b_ms = ?releve.latence_b_ms,
+                compensation_ms = releve.compensation_ms,
                 echantillons_refuses = releve.echantillons_refuses,
                 trames_produites = releve.trames_produites,
                 "sortie_double_releve"
@@ -180,15 +345,25 @@ fn trouver_sans_repli(host: &cpal::Host, nom: &str) -> Option<cpal::Device> {
     }
 }
 
+/// Ce que le rappel de B lit de A : son volume, son facteur de rendu, son
+/// drapeau DoP.
+pub(super) struct ReglagesDeA {
+    pub(super) volume: Arc<AtomicU32>,
+    pub(super) facteur_de_rendu: Arc<AtomicU32>,
+    pub(super) dop: Arc<AtomicBool>,
+}
+
 /// Ouvrir B à la cadence de A si B l'accepte, sinon à sa cadence par défaut
 /// (le recopieur convertit), installer la recopie, démarrer B.
 pub(super) fn ouvrir_la_seconde_sortie(
     host: &cpal::Host,
-    nom: &str,
+    demande: &SecondeSortieDemandee,
     cadence_a: u32,
     canaux: u16,
+    reglages_a: ReglagesDeA,
     emplacement: &EmplacementDeRecopie,
 ) -> Result<SecondeSortie, RefusDeSecondeSortie> {
+    let nom = demande.nom.as_str();
     let device = trouver_sans_repli(host, nom).ok_or(RefusDeSecondeSortie::Introuvable)?;
     let config = match find_matching_config(&device, canaux, cadence_a) {
         Some(c) if c.channels == canaux => avec_periode(c),
@@ -206,28 +381,43 @@ pub(super) fn ouvrir_la_seconde_sortie(
         }
     };
     let cadence_b = config.sample_rate;
-    let recopieur = Recopieur::nouveau(
+    let mut recopieur = Recopieur::nouveau(
         usize::from(canaux),
         cadence_a,
         cadence_b,
         CONSIGNE_PAR_DEFAUT_S,
     );
+    recopieur.regler_le_decalage_manuel(demande.decalage_manuel_s);
     let consigne = recopieur.consigne();
     let capacite = ((CONSIGNE_PAR_DEFAUT_S * 4.0 * f64::from(cadence_b)) as usize).max(16_384)
         * usize::from(canaux);
-    let anneau = Arc::new(AnneauDeB {
-        anneau: RingBuf::new(capacite),
-        periode: AtomicUsize::new(0),
-    });
+    let anneau = Arc::new(AnneauDeB::nouveau(capacite));
     let anneau_cb = anneau.clone();
+    let volume_b = demande.volume_utilisateur.clone();
+    let ReglagesDeA {
+        volume: volume_a,
+        facteur_de_rendu,
+        dop,
+    } = reglages_a;
     let mut demarre = false;
+    let mut gain_precedent: Option<f32> = None;
     let nom_erreur = nom.to_string();
     let flux = device
         .build_output_stream(
             &config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                let latence_b = latence_du_rappel(info);
+                if let Some(l) = latence_b {
+                    anneau_cb
+                        .latence_b_ns
+                        .store((l * 1e9) as u64, Ordering::Relaxed);
+                }
                 if !demarre {
-                    if anneau_cb.anneau.available() < consigne.seuil_de_depart(data.len()) {
+                    let avance_a = f64::from_bits(anneau_cb.avance_a.load(Ordering::Relaxed));
+                    let compensation = avance_a - latence_b.unwrap_or(0.0);
+                    if anneau_cb.anneau.available()
+                        < consigne.seuil_de_depart(data.len(), compensation)
+                    {
                         data.fill(0.0);
                         return;
                     }
@@ -235,7 +425,28 @@ pub(super) fn ouvrir_la_seconde_sortie(
                 }
                 let lu = anneau_cb.anneau.pop(data);
                 anneau_cb.periode.store(data.len(), Ordering::Relaxed);
+                anneau_cb
+                    .derniere_lecture_ns
+                    .store(anneau_cb.maintenant_ns(), Ordering::Release);
                 data[lu..].fill(0.0);
+                // Un flux DoP rééchantillonné n'est plus du DSD : silence.
+                if dop.load(Ordering::Relaxed) {
+                    data.fill(0.0);
+                    return;
+                }
+                let gain = gain_de_b(
+                    volume_b.as_ref().map(|v| v.load(Ordering::Relaxed)),
+                    facteur_de_rendu.load(Ordering::Relaxed),
+                    volume_a.load(Ordering::Relaxed),
+                ) as f32
+                    / 1000.0;
+                // Rampe sur la période : un curseur bougé ne claque pas.
+                let depart = gain_precedent.unwrap_or(gain);
+                gain_precedent = Some(gain);
+                let n = data.len().max(1) as f32;
+                for (i, s) in data.iter_mut().enumerate() {
+                    *s *= depart + (gain - depart) * (i as f32 / n);
+                }
             },
             move |e: cpal::StreamError| {
                 warn!(seconde_sortie = %nom_erreur, erreur = %e, "sortie_double_erreur_de_flux");
@@ -243,9 +454,9 @@ pub(super) fn ouvrir_la_seconde_sortie(
             None,
         )
         .map_err(|e| RefusDeSecondeSortie::Ouverture(e.to_string()))?;
-    *emplacement.lock().unwrap_or_else(|e| e.into_inner()) = Some(Recopie { recopieur, anneau });
+    emplacement.installer(Recopie { recopieur, anneau });
     if let Err(e) = flux.play() {
-        emplacement.lock().unwrap_or_else(|e| e.into_inner()).take();
+        emplacement.retirer();
         return Err(RefusDeSecondeSortie::Ouverture(e.to_string()));
     }
     info!(
@@ -254,6 +465,8 @@ pub(super) fn ouvrir_la_seconde_sortie(
         cadence_b,
         canaux,
         consigne_ms = CONSIGNE_PAR_DEFAUT_S * 1000.0,
+        decalage_manuel_ms = demande.decalage_manuel_s * 1000.0,
+        volume_propre = demande.volume_utilisateur.is_some(),
         "sortie_double_ouverte"
     );
     Ok(SecondeSortie {
@@ -291,28 +504,45 @@ mod tests {
         );
     }
 
-    /// Le chemin réel : le rappel de A et le rappel de B tels que la sortie
-    /// locale les monte, mais appelés à la main sur un `RingBuf` réel.
+    /// Le chemin réel : le rappel de A tel que la sortie locale le monte,
+    /// appelé à la main sur un `RingBuf` réel.
     #[test]
     fn le_rappel_de_a_recopie_vers_l_anneau_de_b() {
         let emplacement = emplacement_vide();
         let mut periode = vec![0.25f32; 960];
         // Vide : A joue seul, rien ne change.
-        recopier_la_periode(&emplacement, &mut periode);
+        assert!(!emplacement.est_actif());
+        recopier_la_periode(&emplacement, &mut periode, None);
         assert!(periode.iter().all(|s| *s == 0.25));
 
-        let anneau = Arc::new(AnneauDeB {
-            anneau: RingBuf::new(48_000),
-            periode: AtomicUsize::new(0),
-        });
-        *emplacement.lock().unwrap() = Some(Recopie {
+        let anneau = Arc::new(AnneauDeB::nouveau(48_000));
+        emplacement.installer(Recopie {
             recopieur: Recopieur::nouveau(2, 48_000, 48_000, 0.010),
             anneau: anneau.clone(),
         });
-        recopier_la_periode(&emplacement, &mut periode);
+        assert!(emplacement.est_actif());
+        recopier_la_periode(&emplacement, &mut periode, Some(0.005));
         // A est retardé de 10 ms (480 trames) : sa première période est muette.
         assert!(periode.iter().all(|s| *s == 0.0));
-        // B a reçu la période, au filtre près.
+        // B a reçu la période, au filtre près, et l'avance de A est publiée.
         assert!(anneau.en_attente() >= 2 * (480 - 32));
+        assert_eq!(
+            f64::from_bits(anneau.avance_a.load(Ordering::Relaxed)),
+            0.005
+        );
+        assert!(emplacement.retirer().is_some());
+        assert!(!emplacement.est_actif());
+    }
+
+    /// #6132 étape 2 — volume par membre : B suit SON curseur, composé avec le
+    /// ReplayGain de la piste ; la zone B coupée (curseur à 0) se tait même
+    /// quand A joue fort ; sans curseur connu, B suit A.
+    #[test]
+    fn le_gain_de_b_suit_le_curseur_de_sa_zone() {
+        // ReplayGain de la piste : 0,5.
+        assert_eq!(gain_de_b(Some(800), 500, 1000), 400);
+        assert_eq!(gain_de_b(Some(0), 1000, 1000), 0);
+        assert_eq!(gain_de_b(Some(1000), 1000, 200), 1000);
+        assert_eq!(gain_de_b(None, 1000, 300), 300);
     }
 }

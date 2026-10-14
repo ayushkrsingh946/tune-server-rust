@@ -1,4 +1,4 @@
-use super::{CreateGroup, GroupRefusal, validate_group};
+use super::{CreateGroup, GroupRefusal, choisir_la_sortie_double, refus_asio, validate_group};
 use tune_core::db::zone_repo::Zone;
 
 // #1702 (Bilou, fil 1392) — deux zones pointant sur la même sortie : le
@@ -126,5 +126,75 @@ fn every_refusal_has_a_french_sentence() {
             "{key} n'a pas de traduction : le client afficherait la clé"
         );
         assert!(msg.len() > 20, "{key} doit expliquer, pas juste nommer");
+    }
+}
+
+// #6132 étape 2 — grouper deux zones locales de la machine donne une sortie
+// double au meneur ; le reste du groupe n'est pas concerné.
+
+#[test]
+fn deux_zones_locales_donnent_une_sortie_double_au_meneur() {
+    let zones = vec![
+        zone(1, "Salon", Some("local:SMSL SU-8")),
+        zone(2, "Bureau", Some("local:TASCAM US-366")),
+        zone(3, "Cuisine", Some("dlna:uuid-1")),
+    ];
+    assert_eq!(
+        choisir_la_sortie_double(1, &[1, 3, 2], &zones),
+        Some((2, "local:TASCAM US-366".to_string()))
+    );
+    // Meneur réseau : pas de sortie double, même avec deux locales dedans.
+    assert_eq!(choisir_la_sortie_double(3, &[3, 1, 2], &zones), None);
+    // Une seule zone locale : rien à recopier.
+    assert_eq!(choisir_la_sortie_double(1, &[1, 3], &zones), None);
+}
+
+#[test]
+fn asio_refuse_la_sortie_double_en_nommant_les_zones() {
+    assert_eq!(
+        refus_asio(Some("asio"), Some("wasapi"), "Salon", "Bureau"),
+        Some(GroupRefusal::AsioOneZoneAtATime(
+            "Salon".into(),
+            "Bureau".into()
+        ))
+    );
+    assert_eq!(
+        refus_asio(Some("wasapi"), Some("ASIO"), "Salon", "Bureau"),
+        Some(GroupRefusal::AsioOneZoneAtATime(
+            "Salon".into(),
+            "Bureau".into()
+        ))
+    );
+    assert_eq!(refus_asio(Some("wasapi"), Some("wasapi"), "S", "B"), None);
+    assert_eq!(refus_asio(None, None, "S", "B"), None);
+}
+
+#[test]
+fn la_vue_du_groupe_dit_qui_est_synchronise() {
+    let groupe = serde_json::json!({
+        "id": 1, "leader_id": 1, "zone_ids": [1, 2, 3],
+        "sortie_double": { "suiveur_id": 2, "sortie": "local:B" },
+    });
+    let vue = crate::routes::zone_manager::generic_group_view(groupe);
+    let sync = &vue["synchronization"];
+    assert_eq!(sync["supported"], true);
+    assert_eq!(sync["transport"], "local_double_output");
+    assert_eq!(sync["synchronized_zone_ids"], serde_json::json!([1, 2]));
+    assert_eq!(sync["independent_zone_ids"], serde_json::json!([3]));
+
+    let sans = crate::routes::zone_manager::generic_group_view(
+        serde_json::json!({ "id": 2, "leader_id": 1, "zone_ids": [1, 3] }),
+    );
+    assert_eq!(sans["synchronization"]["supported"], false);
+}
+
+#[test]
+fn le_refus_asio_a_sa_phrase_dans_chaque_langue() {
+    for lang in ["fr", "en", "de", "es", "it", "zh", "ja", "ko", "ro", "sv"] {
+        let t = crate::i18n::t(lang, "zonegroup.asioOneZone");
+        assert!(
+            t.contains("{a}") && t.contains("{b}") && t.contains("ASIO"),
+            "{lang} : {t}"
+        );
     }
 }

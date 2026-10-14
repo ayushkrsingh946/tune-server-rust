@@ -21,7 +21,7 @@ sur le serveur (depuis `batch/bugs-rc5-20261012`) et sur le client web (depuis
    machine). L'onglet Appareils disparaît. La Lecture groupée devient visible
    ailleurs qu'au clic droit.
 
-## Étape 1 — la sortie double synchrone (serveur) : livrée par cette PR
+## Étape 1 — la sortie double synchrone (serveur) : livrée (#6341)
 
 ### Le principe
 
@@ -38,8 +38,9 @@ Un pont d'horloges, comme `zita-ajbridge` ou `alsa_out` :
   proportionnel-intégral (amorti critique) le ramène à la consigne ; sa part
   intégrale est l'estimation de la dérive des deux quartz ;
 - A est retardé de la consigne (40 ms) par une ligne à retard, pour jouer au
-  même instant que B. La consigne retranche les deux retards propres à B (la
-  demi-largeur du filtre, la demi-période de B) ;
+  même instant que B. La consigne retranche le retard propre à B (la
+  demi-largeur du filtre) ; l'étape 2a y ajoute la compensation de latence
+  matérielle et mesure l'avance de B indépendamment de la phase des rappels ;
 - deux régimes : un accrochage rapide pendant les 15 premières secondes (l'écart
   de départ vaut jusqu'à une période de A), puis une boucle lente qui ne suit
   plus que la dérive, sans moduler la hauteur.
@@ -60,9 +61,9 @@ Le chemin d'appel réel : `transport.rs` (lecture d'une zone locale) →
 `brancher_la_seconde_sortie` → `ouvrir_la_seconde_sortie` (B ouvert, recopie
 installée) → à chaque période, le rappel de A → `recopier_la_periode`.
 
-Le réglage `zone_{id}_sortie_double` (valeur `local:<nom>` ou `<nom>`) est de
-la plomberie : aucun écran ni route ne l'écrit encore. L'étape 2 le posera
-depuis un groupe.
+Le réglage `zone_{id}_sortie_double` (valeur `local:<nom>` ou `<nom>`) reste
+**interne** (décision du 13/10) : seule la route de groupement l'écrit
+(étape 2a).
 
 ### Ce qui est refusé, et dit dans le journal (`sortie_double_refusee`)
 
@@ -98,29 +99,81 @@ Ce que le banc ne mesure pas : la **latence matérielle** de chaque carte (tampo
 du pilote, convertisseur). Elle est constante, elle ne dérive pas, mais elle
 diffère d'une carte à l'autre (quelques ms). Voir les décisions.
 
-## Étape 2 — la lecture groupée (serveur)
+## Décisions de Bertrand sur l'étape 2 (13/10, après l'étape 1)
+
+1. La latence propre à chaque carte est compensée **automatiquement** par les
+   horodatages cpal ; `sync_delay_ms` reste en réglage de secours.
+2. Les 40 ms de retard ajoutés aux deux sorties sont acceptés.
+3. **Volume séparé par membre** du groupe, plus un volume général qui les règle
+   ensemble.
+4. `zone_{id}_sortie_double` reste interne, posé seulement quand on groupe deux
+   zones, par la route de groupement.
+5. Refus en « bit-perfect strict », acceptation en mode PURE : maintenus.
+6. Mode exclusif et flux compressé : **après** l'étape 2 (étape 2c ci-dessous).
+
+## Étape 2a — groupe de deux zones locales (serveur)
+
+- **Route de groupement** (`POST /zones/group`, `PATCH /zones/groups/{id}`,
+  `DELETE`) : quand le meneur est une zone locale et qu'un autre membre est une
+  zone locale de la machine, la route pose `zone_{meneur}_sortie_double` (la
+  sortie du suiveur) et l'écrit dans le groupe (`sortie_double`) ; dégrouper ou
+  retirer le membre l'enlève. `choisir_la_sortie_double` : un seul suiveur
+  local (la recopie va vers UN périphérique).
+- **ASIO** : deux zones locales dont l'une sort par ASIO sont refusées
+  (`409 group_asio_one_zone`, phrase « une zone à la fois sur cette machine »
+  dans les dix langues) — la phrase que l'écran affichera.
+- **Contrat de synchronisation** : un groupe à sortie double publie
+  `supported: true`, `transport: "local_double_output"`,
+  `render_latency_calibrated: true`, les zones synchronisées et les zones
+  indépendantes. `accuracy_claim_ms` reste `null` tant qu'aucune mesure sur
+  vraies cartes n'existe.
+- **Latence matérielle** : chaque rappel lit `playback − callback` dans ses
+  horodatages cpal ; B est nourri d'autant plus tôt que sa latence dépasse
+  celle de A. `sync_delay_ms` des deux zones (B − A) s'y ajoute, et la remplace
+  quand le pilote ne donne pas d'horodatage. Borne : avec la consigne de 40 ms
+  et des périodes de 10 ms, B peut être avancé d'environ 25 ms sur A.
+- **Mesure indépendante de la phase** : l'avance de B est reconstituée en
+  continu (`en attente + période lue − écoulé depuis la lecture × cadence`).
+  Mesurée à l'instant où A passe, elle dépendait de la phase entre les deux
+  rappels ; deux cartes aux périodes égales (10 ms en WASAPI partagé) gardent
+  la même phase des minutes durant, et l'écart se calait jusqu'à une
+  demi-période à côté.
+- **Volume par membre** : quand B joue, A rend sa période au volume unité, la
+  recopie, puis applique son propre volume ; B applique le curseur de SA zone
+  (celui de `set_volume` et de la sourdine de la zone B), composé avec le
+  ReplayGain et la compensation de la piste de A, avec une rampe sur la
+  période. Le volume général du groupe (`PUT /zones/groups/{id}/volume`,
+  maître + écarts par membre) agit donc sur les deux sorties.
+- **DoP** : B se tait (un DoP rééchantillonné n'est plus du DSD).
+
+## Étape 2b — lecture groupée avec des membres réseau (serveur)
 
 1. **Propager la lecture d'un groupe.** À la lecture sur le meneur, les suiveurs
-   suivent : même élément, même position, mêmes commandes (pause, reprise,
-   saut, suivante). Le groupe devient un état du transport, pas seulement une
-   liste dans `zone_groups`.
-2. **Choisir le transport par paire de membres** :
-   - deux zones locales de la même machine : la **sortie double** de l'étape 1
-     (le meneur porte la seconde sortie ; généraliser à N sorties) ;
-   - des points de diffusion OAAT : le groupe OAAT existant ;
-   - des renderers réseau indépendants (UPnP, AirPlay, Chromecast…) : départs
-     alignés au mieux, sans garantie d'horloge — à dire dans l'interface.
-3. **ASIO** : `validate_group` refuse, avec un motif lisible, un groupe qui
-   demanderait deux flux ASIO ; le motif sert à l'écran.
-4. **Brancher ce qui est enregistré sans consommateur** : `sync_delay_ms`
-   (compensation statique par membre, y compris la latence matérielle d'une
-   carte), `calibrate_group` (501 aujourd'hui), `GroupManager` (sans appelant).
-5. **Une seule famille de routes** : `/zone-manager/groups` écrit le même
+   réseau suivent : même élément, même position, mêmes commandes (pause,
+   reprise, saut, suivante). Le groupe devient un état du transport, pas
+   seulement une liste dans `zone_groups`. La zone suiveuse locale d'une
+   sortie double doit aussi s'afficher « en groupe avec » le meneur.
+2. **Transport par membre** : points de diffusion OAAT → groupe OAAT existant ;
+   renderers indépendants (UPnP, AirPlay, Chromecast…) → départs alignés au
+   mieux, sans garantie d'horloge, dit dans l'interface.
+3. **Brancher ce qui est enregistré sans consommateur** : `calibrate_group`
+   (501), `GroupManager` (sans appelant), `sync_delay_ms` pour les membres
+   réseau.
+4. **Une seule famille de routes** : `/zone-manager/groups` écrit le même
    réglage que `/zones/group` sans validation ni contrôle Premium ; la ramener
    sur la validation commune ou la retirer.
-6. Mettre à jour `generic_group_synchronization_contract()` (aujourd'hui
-   `supported: false`) et `docs/getting-started` (chemin « Groupes de zones »
-   qui n'existe plus).
+5. `docs/getting-started` : le chemin « Groupes de zones » n'existe plus.
+
+## Étape 2c — la sortie double hors du chemin partagé (serveur)
+
+Décision du 13/10 : après l'étape 2.
+
+- **mode exclusif** (WASAPI exclusif, CoreAudio « hog ») : la recopie depuis le
+  rappel natif, B en exclusif ou partagé ;
+- **flux compressé** (non-WAV, décodé dans la sortie) : le même branchement
+  sur `build_compressed_f32_stream` ;
+- plus de deux sorties locales, adaptation des canaux, relevé dans l'API de
+  diagnostic.
 
 ## Étape 3 — les écrans (client web)
 
@@ -138,12 +191,11 @@ diffère d'une carte à l'autre (quelques ms). Voir les décisions.
 5. **ASIO** : l'écran explique « une zone à la fois sur cette machine » là où
    le groupement est refusé.
 
-## Reste ouvert sur l'étape 1
+## Reste ouvert
 
-- latence matérielle par carte (horodatages cpal `OutputCallbackInfo`, ou
-  réglage manuel `sync_delay_ms`) ;
-- chemin compressé, mode exclusif, adaptation des canaux, plus de deux sorties ;
-- un relevé lisible par l'API de diagnostic (aujourd'hui : le journal).
-- l'essai sur deux vraies cartes (Windows WASAPI partagé, Linux ALSA).
+- l'essai sur deux vraies cartes (Windows WASAPI partagé, Linux ALSA), qui
+  donnera `accuracy_claim_ms` ;
+- les groupes enregistrés avant l'étape 2a n'ont pas de sortie double tant
+  qu'ils ne sont pas refaits (ou modifiés).
 
 Refs #6132
