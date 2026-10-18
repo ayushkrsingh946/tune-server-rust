@@ -987,7 +987,11 @@ impl SlimProtoServer {
     }
 
     /// Handle a single client connection.
-    async fn handle_client(&self, mut stream: TcpStream, peer: SocketAddr) -> Result<(), String> {
+    pub(crate) async fn handle_client(
+        &self,
+        mut stream: TcpStream,
+        peer: SocketAddr,
+    ) -> Result<(), String> {
         // Non-destructively peek the first bytes so an unusual handshake framing
         // is visible in the log. Tune expects `[len:2][tag:4][payload]`; if a
         // client (Progman's slim2diretta) uses a different framing, read_message
