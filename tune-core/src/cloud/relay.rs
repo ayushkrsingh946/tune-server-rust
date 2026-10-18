@@ -1145,12 +1145,12 @@ mod reponse_dapi_tests {
     /// En-tête JPEG : invalide en UTF-8, comme toute vraie pochette.
     const JPEG: [u8; 4] = [0xFF, 0xD8, 0xFF, 0xE0];
 
-    /// (chemin + requête, `X-Tune-Profile`) de chaque appel reçu.
+    /// (chemin + requête, `X-Profile-Id`) de chaque appel reçu.
     type Journal = Arc<StdMutex<Vec<(String, Option<String>)>>>;
 
     async fn repondre(State(journal): State<Journal>, uri: Uri, headers: HeaderMap) -> Response {
         let profil = headers
-            .get("x-tune-profile")
+            .get("x-profile-id")
             .and_then(|v| v.to_str().ok())
             .map(String::from);
         journal.lock().unwrap().push((uri.to_string(), profil));
@@ -1199,7 +1199,7 @@ mod reponse_dapi_tests {
                 "id": "req-a",
                 "method": "GET",
                 "path": path,
-                "headers": {"x-tune-profile": "3"},
+                "headers": {"x-profile-id": "3"},
             })
             .to_string(),
         )
