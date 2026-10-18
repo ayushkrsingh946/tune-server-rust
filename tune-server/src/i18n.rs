@@ -119,14 +119,18 @@ pub fn lang_from_request(param: Option<&str>, headers: &HeaderMap) -> String {
 /// to French — the language the table is written in first —, then to the key
 /// itself.
 pub fn t(lang: &str, key: &str) -> String {
-    if let Some(per_lang) = table().get(key) {
-        for langue in [lang, FALLBACK, "fr"] {
-            if let Some(v) = per_lang.get(langue) {
-                return v.clone();
-            }
-        }
-    }
-    key.to_string()
+    t_opt(lang, key).unwrap_or_else(|| key.to_string())
+}
+
+/// Comme [`t`], mais `None` quand la clé n'existe pas dans la table, au lieu
+/// de rendre la clé brute. Pour un texte qui a déjà une valeur par défaut —
+/// la description qu'un greffon déclare lui-même (#6458) — et qui ne doit être
+/// remplacé que si une traduction existe.
+pub fn t_opt(lang: &str, key: &str) -> Option<String> {
+    let per_lang = table().get(key)?;
+    [lang, FALLBACK, "fr"]
+        .into_iter()
+        .find_map(|langue| per_lang.get(langue).cloned())
 }
 
 #[cfg(test)]
