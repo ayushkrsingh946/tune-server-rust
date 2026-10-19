@@ -972,6 +972,11 @@ pub fn build_album_query(
             // l'album (`ar`, joint sur `al.artist_id`). Même lecture que
             // `regles_sql::colonne_piste`.
             "album_artist" => "COALESCE(NULLIF(t.album_artist, ''), ar.name)",
+            // #6232 (forum 2218) — « Interprète » : l'album passe dès qu'UNE
+            // de ses pistes porte l'interprète cherché (balise ARTIST, à
+            // défaut l'artiste de la piste). Critère de PISTE : « ne contient
+            // pas » demande qu'AUCUNE piste ne contienne.
+            "track_artist" => crate::regles_sql::SQL_INTERPRETE_DE_LA_PISTE,
             "album" | "album_title" | "title" => "al.title",
             "composer" => "t.composer",
             "label" => "al.label",
@@ -1012,6 +1017,7 @@ pub fn build_album_query(
                 | "artist"
                 | "artist_name"
                 | "album_artist"
+                | "track_artist"
                 | "album"
                 | "album_title"
                 | "title"

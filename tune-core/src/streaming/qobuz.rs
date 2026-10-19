@@ -3130,6 +3130,19 @@ impl StreamingService for QobuzService {
             .collect())
     }
 
+    /// #6480 — la critique Qobuz de l'album (`description` de `album/get`),
+    /// ramenée à du texte. Même réponse que la fiche et les crédits, déjà mise
+    /// en cache par `detail_album` : aucun appel de plus. `description` est un
+    /// champ de CATALOGUE — la condition de cette mise en cache (aucun mappeur
+    /// ne lit les champs du compte) tient.
+    async fn get_album_description(
+        &self,
+        album_id: &str,
+    ) -> Result<Option<StreamAlbumDescription>, TuneError> {
+        let data = self.detail_album(album_id).await?;
+        Ok(super::presentation_album::presentation_qobuz(&data))
+    }
+
     async fn get_user_tracks(&self) -> Result<Vec<StreamTrack>, TuneError> {
         let items = self.favoris_bruts("tracks").await?;
         Ok(items.iter().map(Self::map_track).collect())

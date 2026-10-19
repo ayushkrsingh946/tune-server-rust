@@ -166,7 +166,7 @@ impl SkinManager {
         let manifest_path = (0..archive.len())
             .filter_map(|i| {
                 let file = archive.by_index(i).ok()?;
-                let name = file.name().to_string();
+                let name = file.name().ok()?.into_owned();
                 if name.ends_with("skin.json") && name.matches('/').count() <= 1 {
                     Some(name)
                 } else {
@@ -202,7 +202,7 @@ impl SkinManager {
         // Extract files
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
-            let name = file.name().to_string();
+            let name = file.name().map_err(|e| e.to_string())?.into_owned();
 
             let relative = if prefix.is_empty() {
                 name.clone()

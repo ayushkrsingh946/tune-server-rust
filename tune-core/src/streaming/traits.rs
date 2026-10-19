@@ -495,6 +495,21 @@ pub struct StreamCredit {
     pub disc_number: Option<u32>,
 }
 
+/// Le texte de présentation qu'un service publie pour un album (#6480) — la
+/// « critique » de Qobuz, tirée de `album/get`.
+///
+/// `description` est du TEXTE : le service l'envoie en HTML, et le serveur le
+/// ramène à des paragraphes séparés par une ligne vide
+/// ([`crate::streaming::presentation_album::texte_de_presentation`]). Aucun
+/// client n'a donc de balisage à interpréter. `language` est la langue que le
+/// service annonce pour ce texte (`fr`, `en`…), quand il la donne.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamAlbumDescription {
+    pub description: String,
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AlbumContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -841,6 +856,18 @@ pub trait StreamingService: Send + Sync {
     async fn get_album_credits(&self, _album_id: &str) -> Result<Vec<StreamCredit>, TuneError> {
         Err(TuneError::Unsupported(
             "credits not supported for this service".into(),
+        ))
+    }
+    /// Le texte de présentation d'un album du service (#6480). `Ok(None)` :
+    /// le service sait en publier, mais pas pour cet album. Un service qui
+    /// n'en publie JAMAIS répond `Unsupported` (501) : le client n'affiche
+    /// alors aucune section, plutôt qu'une section vide.
+    async fn get_album_description(
+        &self,
+        _album_id: &str,
+    ) -> Result<Option<StreamAlbumDescription>, TuneError> {
+        Err(TuneError::Unsupported(
+            "album description not supported for this service".into(),
         ))
     }
     async fn get_user_tracks(&self) -> Result<Vec<StreamTrack>, TuneError> {
