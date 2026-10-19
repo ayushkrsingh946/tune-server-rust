@@ -1567,9 +1567,11 @@ async fn zone_status(State(state): State<AppState>, Path(zone_id): Path<i64>) ->
 #[cfg(test)]
 mod refus_entier_negatif_3966;
 
-/// #4283 — `queue/jump` valide la position avant que le curseur ne bouge.
 #[cfg(test)]
 mod saut_hors_file_4283;
+/// #4283 — `queue/jump` valide la position avant que le curseur ne bouge.
+#[cfg(test)]
+mod sortie_de_pure_recompose_le_trim_6213;
 
 #[path = "playback/lecture_navigateur.rs"]
 mod lecture_navigateur;
@@ -6502,6 +6504,34 @@ async fn set_audiophile(
             })),
         )
             .into_response();
+    }
+
+    // #6213 (GgB, fil 1797) — la sortie du verrou PURE renvoie la consigne de
+    // la zone, trim compris. L'entrée commande 100 % sans trim
+    // (`set_volume_pure_force`) ; à la sortie, rien ne recomposait le trim :
+    // l'appareil gardait ces 100 % jusqu'au prochain mouvement du curseur ou
+    // du trim. Après l'écriture du réglage, pour que `set_volume` ne voie plus
+    // le verrou. Un refus de l'appareil n'annule pas la bascule, déjà écrite :
+    // il est journalisé, et le prochain geste de volume le retentera.
+    if was_full_volume && !will_be_full_volume {
+        let device_id = get_zone_device_id(&state, zone_id);
+        let consigne = state.playback.get_state(zone_id).await.volume;
+        match state
+            .orchestrator
+            .set_volume(zone_id, consigne, device_id.as_deref())
+            .await
+        {
+            Ok(()) => info!(
+                zone_id,
+                consigne, "audiophile_sortie_du_verrou_volume_recompose"
+            ),
+            Err(error) => warn!(
+                zone_id,
+                consigne,
+                error = %error,
+                "audiophile_sortie_du_verrou_volume_non_recompose"
+            ),
+        }
     }
 
     // Repousser l'état vers la sortie qui joue. Sans cet appel, la clé était
