@@ -32,7 +32,7 @@ use tune_http_types::panne_sql::OuDefautJournalise;
 use tune_core::db::play_queue_repo::{PlayQueueRepo, QueueInput};
 use tune_core::db::playlist_repo::PlaylistRepo;
 use tune_core::db::track_repo::TrackRepo;
-use tune_core::orchestrator::PlayResult;
+use tune_core::orchestrator::{Enjambee, PlayResult};
 use tune_core::outputs::OutputCommandError;
 use tune_core::streaming::quality::StreamingQualityPreference;
 
@@ -483,7 +483,17 @@ async fn jouer_playlist_mixte(
     if longueur == 0 {
         return (StatusCode::BAD_REQUEST, "no tracks to play").into_response();
     }
-    let depart = start_index.unwrap_or(0).clamp(0, longueur - 1);
+    let mut depart = start_index.unwrap_or(0).clamp(0, longueur - 1);
+    // #6368 — sans `start_index`, la playlist part de sa première ligne NON
+    // bannie ; une ligne désignée se joue même bannie.
+    if start_index.is_none()
+        && let Enjambee::Reprise(p) = state
+            .orchestrator
+            .enjamber_les_pistes_bannies(zone_id, depart)
+            .await
+    {
+        depart = p;
+    }
     info!(
         zone_id,
         lignes = items.len(),
@@ -506,6 +516,43 @@ async fn jouer_playlist_mixte(
             persist_queue_async(state, zone_id);
             warn!(zone_id, depart, error = %e, "play_playlist_mixte_echec");
             play_error_response(e, lang)
+        }
+    }
+}
+
+/// #6368 — la première ligne NON bannie de la file à partir de `position`,
+/// pour un départ que l'utilisateur n'a pas choisi (« Lire l'album »). Rend la
+/// position et l'id local de la piste à jouer, ou `None` pour garder le départ :
+/// ligne non bannie, ou tout ce qui reste est banni (on joue alors comme avant,
+/// plutôt que de ne rien jouer sans le dire).
+async fn depart_hors_bannis(
+    state: &AppState,
+    queue_repo: &PlayQueueRepo,
+    zone_id: i64,
+    position: i64,
+) -> Option<(i64, i64)> {
+    match state
+        .orchestrator
+        .enjamber_les_pistes_bannies(zone_id, position)
+        .await
+    {
+        Enjambee::Reprise(p) => {
+            let track_id = queue_repo.get_at(zone_id, p).ok().flatten()?.track_id?;
+            info!(
+                zone_id,
+                depart_demande = position,
+                depart = p,
+                "lecture_part_de_la_premiere_piste_non_bannie"
+            );
+            Some((p, track_id))
+        }
+        Enjambee::Rien => None,
+        Enjambee::FileEpuisee => {
+            info!(
+                zone_id,
+                position, "lecture_contenant_tout_banni_depart_garde"
+            );
+            None
         }
     }
 }
@@ -1568,6 +1615,8 @@ async fn zone_status(State(state): State<AppState>, Path(zone_id): Path<i64>) ->
 mod refus_entier_negatif_3966;
 
 /// #4283 — `queue/jump` valide la position avant que le curseur ne bouge.
+#[cfg(test)]
+mod depart_hors_bannis_6368;
 #[cfg(test)]
 mod saut_hors_file_4283;
 
@@ -2875,6 +2924,12 @@ async fn play(
         && body.playlist_id.is_none()
         && body.track_ids.is_none()
         && body.start_index.is_none();
+    // #6368 — la ligne de départ a-t-elle été CHOISIE ? Un `start_index`, ou
+    // un `track_id` posé à côté du contenant, désigne une piste précise : elle
+    // se joue même bannie (« un titre banni reste jouable si on le choisit
+    // exprès »). « Lire l'album » ne désigne rien : la lecture part de la
+    // première ligne non bannie, comme l'avance de la file.
+    let depart_choisi = body.start_index.is_some() || body.track_id.is_some();
 
     // #3733 — ce que la demande DÉSIGNAIT, relevé ici parce que la chaîne de
     // résolution ci-dessous consomme `body.track_ids`.
@@ -3133,6 +3188,16 @@ async fn play(
             .orchestrator
             .enjamber_les_serveurs_absents(zone_id, queue_position)
             .await
+    {
+        queue_repo.set_current(zone_id, position).ok();
+        queue_position = position;
+        target_id = track_id;
+    }
+    if !demande_nue
+        && file_conservee.is_none()
+        && !depart_choisi
+        && let Some((position, track_id)) =
+            depart_hors_bannis(&state, &queue_repo, zone_id, queue_position).await
     {
         queue_repo.set_current(zone_id, position).ok();
         queue_position = position;
