@@ -155,6 +155,54 @@ pub fn migrer(db: &Arc<dyn DbBackend>, coffre: &Coffre) -> Result<Rapport, Strin
     Ok(rapport)
 }
 
+/// Les réglages où le greffon range une valeur SCELLÉE.
+pub fn reglages_scelles() -> Vec<String> {
+    std::iter::once(CLE_API_CHIFFREE.to_string())
+        .chain(CLES_HERITEES.iter().map(|(_, f)| cle_conservee(*f)))
+        .collect()
+}
+
+/// Le passage au coffre partagé (jonction avec `tune_core::coffre`) : chaque
+/// valeur que l'ancienne clé du greffon (`assistant-ia.cle`) a scellée est
+/// rescellée sous la clé partagée du serveur, rangée, RELUE, et vérifiée.
+///
+/// Rend le nombre de valeurs passées. Une valeur déjà sous la clé partagée
+/// n'est pas réécrite ; une valeur qu'aucune clé n'ouvre est laissée telle
+/// quelle (l'écran dit déjà `cle_illisible`). Un échec d'écriture laisse
+/// l'ancienne valeur, que l'ancienne clé ouvre toujours : rien n'est perdu,
+/// le passage sera retenté au prochain démarrage. Idempotent.
+pub fn passer_au_coffre_partage(db: &Arc<dyn DbBackend>, coffre: &Coffre) -> Result<usize, String> {
+    let s = SettingsRepo::with_backend(db.clone());
+    let mut passees = 0;
+    for nom in reglages_scelles() {
+        let Some(scelle) = lire(&s, &nom) else {
+            continue;
+        };
+        let nouvelle = match coffre.resceller(&scelle) {
+            Ok(Some(n)) => n,
+            Ok(None) => continue,
+            Err(_) => {
+                // Sans la valeur, ni l'erreur (elle ne la porte pas, mais rien
+                // à gagner à l'écrire).
+                tracing::warn!(reglage = %nom, "assistant_ia_valeur_scellee_illisible");
+                continue;
+            }
+        };
+        s.set(&nom, &nouvelle)?;
+        let relue = s
+            .get(&nom)?
+            .ok_or_else(|| format!("{nom} : valeur scellée introuvable après écriture"))?;
+        if coffre.resceller(&relue)?.is_some() {
+            return Err(format!(
+                "{nom} : la valeur relue n'est pas sous la clé partagée"
+            ));
+        }
+        passees += 1;
+        tracing::info!(reglage = %nom, "assistant_ia_cle_passee_au_coffre_partage");
+    }
+    Ok(passees)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,10 +299,14 @@ mod tests {
         assert!(r.migrees.is_empty());
         assert_eq!(reglage(&db, CLE_API_CHIFFREE), None);
         assert_eq!(reglage(&db, CLE_FOURNISSEUR), None);
-        assert!(
-            !dir.path().join(crate::coffre::FICHIER_CLE).exists(),
-            "aucune clé maîtresse ne doit naître sans rien à sceller"
-        );
+        for fichier in [crate::coffre::FICHIER_CLE, tune_core::coffre::FICHIER_CLE] {
+            assert!(
+                !dir.path().join(fichier).exists(),
+                "aucune clé maîtresse ne doit naître sans rien à sceller ({fichier})"
+            );
+        }
+        assert_eq!(passer_au_coffre_partage(&db, &coffre).unwrap(), 0);
+        assert!(!dir.path().join(tune_core::coffre::FICHIER_CLE).exists());
         assert!(!reste_une_cle_heritee(&db));
     }
 

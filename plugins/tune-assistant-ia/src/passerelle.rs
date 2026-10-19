@@ -79,14 +79,22 @@ impl Passerelle {
 
     /// Migre les clés héritées vers le coffre. Un échec est journalisé (sans
     /// la clé) et laisse la clé en clair à sa place : il sera retenté.
+    ///
+    /// Puis fait passer au coffre partagé ce que l'ancienne clé du greffon a
+    /// scellé ([`migration::passer_au_coffre_partage`]) ; un échec y laisse
+    /// l'ancienne valeur, que l'ancienne clé ouvre toujours.
     pub fn migrer(&self) -> migration::Rapport {
-        match migration::migrer(&self.backend, &self.coffre) {
+        let rapport = match migration::migrer(&self.backend, &self.coffre) {
             Ok(r) => r,
             Err(e) => {
                 warn!(erreur = %e, "assistant_ia_migration_echouee");
                 migration::Rapport::default()
             }
+        };
+        if let Err(e) = migration::passer_au_coffre_partage(&self.backend, &self.coffre) {
+            warn!(erreur = %e, "assistant_ia_passage_au_coffre_partage_echoue");
         }
+        rapport
     }
 
     /// L'assistant peut-il faire partir un appel (fournisseur, modèle, clé

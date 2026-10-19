@@ -10,8 +10,9 @@
 //! `feat/assistant-ia-etape1-b209ia`) et la remonte dans `tune-core`, pour
 //! qu'il n'y en ait qu'UNE : même fichier de clé maîtresse, même format de
 //! valeur scellée (`{"v":1,"nonce":…,"ct":…}`), mêmes primitives. Le greffon
-//! peut passer à [`Coffre::avec_fichier`] (`assistant-ia.cle`) sans migrer une
-//! seule valeur déjà scellée.
+//! scelle désormais sous la clé partagée ; son ancienne clé (`assistant-ia.cle`)
+//! ouvre encore ce qu'elle a scellé ([`Coffre::avec_ancien_fichier`]) et
+//! [`Coffre::resceller`] fait passer ces valeurs sous la clé partagée.
 //!
 //! # Ce qui existait, et pourquoi ce n'est pas suffisant
 //!
@@ -70,6 +71,10 @@ struct Scelle {
 #[derive(Debug, Clone)]
 pub struct Coffre {
     chemin: PathBuf,
+    /// L'ancienne clé maîtresse d'un greffon passé au coffre partagé
+    /// ([`Coffre::avec_ancien_fichier`]) : elle OUVRE encore ce qu'elle a
+    /// scellé, elle ne scelle plus rien.
+    ancien: Option<PathBuf>,
 }
 
 impl Coffre {
@@ -83,7 +88,26 @@ impl Coffre {
     pub fn avec_fichier(dossier: &Path, fichier: &str) -> Self {
         Self {
             chemin: dossier.join(fichier),
+            ancien: None,
         }
+    }
+
+    /// Le même coffre, qui ouvre AUSSI ce qu'une ancienne clé maîtresse,
+    /// `fichier`, posée dans le même dossier, a scellé.
+    ///
+    /// C'est le passage d'un greffon à son coffre propre (`assistant-ia.cle`)
+    /// au coffre partagé : une valeur scellée avant la mise à jour reste
+    /// lisible, sans rien demander à l'utilisateur ; tout NOUVEAU scellement
+    /// part sous la clé partagée ; [`Coffre::resceller`] fait passer une
+    /// valeur ancienne sous la clé partagée.
+    pub fn avec_ancien_fichier(mut self, fichier: &str) -> Self {
+        let dossier = self
+            .chemin
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.ancien = Some(dossier.join(fichier));
+        self
     }
 
     /// Le coffre d'un serveur dont la base est `db_path` : la clé maîtresse
@@ -101,37 +125,11 @@ impl Coffre {
     }
 
     fn lire_la_cle(&self) -> Result<Option<[u8; 32]>, String> {
-        match std::fs::read_to_string(&self.chemin) {
-            Ok(t) => {
-                let octets =
-                    hex_decode(t.trim()).map_err(|_| "clé maîtresse illisible".to_string())?;
-                let cle: [u8; 32] = octets
-                    .try_into()
-                    .map_err(|_| "clé maîtresse de longueur inattendue".to_string())?;
-                Ok(Some(cle))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("clé maîtresse illisible : {}", e.kind())),
-        }
+        lire_la_cle_de(&self.chemin)
     }
 
     fn creer_la_cle(&self) -> Result<[u8; 32], String> {
-        let mut cle = [0u8; 32];
-        getrandom::getrandom(&mut cle).map_err(|e| e.to_string())?;
-        if let Some(parent) = self.chemin.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut f = options.open(&self.chemin).map_err(|e| e.to_string())?;
-        f.write_all(hex_encode(&cle).as_bytes())
-            .map_err(|e| e.to_string())?;
-        Ok(cle)
+        creer_la_cle_de(&self.chemin)
     }
 
     /// Scelle `clair`. Crée la clé maîtresse au premier usage.
@@ -153,26 +151,95 @@ impl Coffre {
         .map_err(|e| e.to_string())
     }
 
-    /// Ouvre une valeur scellée par [`Coffre::sceller`].
+    /// Ouvre une valeur scellée par [`Coffre::sceller`] — ou, pour un coffre
+    /// [`Coffre::avec_ancien_fichier`], par l'ancienne clé maîtresse.
     pub fn ouvrir(&self, scelle: &str) -> Result<String, String> {
-        let s: Scelle =
-            serde_json::from_str(scelle).map_err(|_| "valeur scellée illisible".to_string())?;
-        if s.v != 1 {
-            return Err(format!("version de scellement inconnue : {}", s.v));
+        match ouvrir_avec(&self.chemin, scelle) {
+            Ok(clair) => Ok(clair),
+            // L'erreur rendue reste celle de la clé PRINCIPALE : c'est elle
+            // que l'écran doit faire ressaisir.
+            Err(e) => match &self.ancien {
+                Some(ancien) => ouvrir_avec(ancien, scelle).map_err(|_| e),
+                None => Err(e),
+            },
         }
-        let cle = self
-            .lire_la_cle()?
-            .ok_or_else(|| "clé maîtresse absente".to_string())?;
-        let nonce = hex_decode(&s.nonce).map_err(|_| "nonce illisible".to_string())?;
-        if nonce.len() != 24 {
-            return Err("nonce de longueur inattendue".into());
-        }
-        let ct = hex_decode(&s.ct).map_err(|_| "valeur scellée illisible".to_string())?;
-        let clair = XChaCha20Poly1305::new((&cle).into())
-            .decrypt(XNonce::from_slice(&nonce), ct.as_slice())
-            .map_err(|_| "la valeur ne s'ouvre pas avec cette clé maîtresse".to_string())?;
-        String::from_utf8(clair).map_err(|_| "valeur ouverte non UTF-8".to_string())
     }
+
+    /// Fait passer une valeur scellée sous la clé principale.
+    ///
+    /// - `Ok(None)` : elle s'ouvre déjà avec la clé principale, rien à faire ;
+    /// - `Ok(Some(nouvelle))` : elle s'ouvrait avec l'ancienne clé ; la
+    ///   nouvelle valeur, scellée sous la clé principale, a été ROUVERTE et
+    ///   rend le même texte. À l'appelant de la ranger ;
+    /// - `Err` : elle ne s'ouvre avec aucune des deux. Rien n'est écrit, pas
+    ///   même la clé maîtresse partagée.
+    pub fn resceller(&self, scelle: &str) -> Result<Option<String>, String> {
+        let erreur = match ouvrir_avec(&self.chemin, scelle) {
+            Ok(_) => return Ok(None),
+            Err(e) => e,
+        };
+        let Some(ancien) = &self.ancien else {
+            return Err(erreur);
+        };
+        let clair = ouvrir_avec(ancien, scelle).map_err(|_| erreur)?;
+        let nouvelle = self.sceller(&clair)?;
+        if ouvrir_avec(&self.chemin, &nouvelle)? != clair {
+            return Err("la valeur rescellée ne rend pas le même texte".into());
+        }
+        Ok(Some(nouvelle))
+    }
+}
+
+fn lire_la_cle_de(chemin: &Path) -> Result<Option<[u8; 32]>, String> {
+    match std::fs::read_to_string(chemin) {
+        Ok(t) => {
+            let octets = hex_decode(t.trim()).map_err(|_| "clé maîtresse illisible".to_string())?;
+            let cle: [u8; 32] = octets
+                .try_into()
+                .map_err(|_| "clé maîtresse de longueur inattendue".to_string())?;
+            Ok(Some(cle))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("clé maîtresse illisible : {}", e.kind())),
+    }
+}
+
+fn creer_la_cle_de(chemin: &Path) -> Result<[u8; 32], String> {
+    let mut cle = [0u8; 32];
+    getrandom::getrandom(&mut cle).map_err(|e| e.to_string())?;
+    if let Some(parent) = chemin.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(chemin).map_err(|e| e.to_string())?;
+    f.write_all(hex_encode(&cle).as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(cle)
+}
+
+/// Ouvre `scelle` avec la clé maîtresse du fichier `chemin`.
+fn ouvrir_avec(chemin: &Path, scelle: &str) -> Result<String, String> {
+    let s: Scelle =
+        serde_json::from_str(scelle).map_err(|_| "valeur scellée illisible".to_string())?;
+    if s.v != 1 {
+        return Err(format!("version de scellement inconnue : {}", s.v));
+    }
+    let cle = lire_la_cle_de(chemin)?.ok_or_else(|| "clé maîtresse absente".to_string())?;
+    let nonce = hex_decode(&s.nonce).map_err(|_| "nonce illisible".to_string())?;
+    if nonce.len() != 24 {
+        return Err("nonce de longueur inattendue".into());
+    }
+    let ct = hex_decode(&s.ct).map_err(|_| "valeur scellée illisible".to_string())?;
+    let clair = XChaCha20Poly1305::new((&cle).into())
+        .decrypt(XNonce::from_slice(&nonce), ct.as_slice())
+        .map_err(|_| "la valeur ne s'ouvre pas avec cette clé maîtresse".to_string())?;
+    String::from_utf8(clair).map_err(|_| "valeur ouverte non UTF-8".to_string())
 }
 
 /// Le dossier du coffre du serveur, posé une fois au démarrage : les passes
@@ -248,6 +315,51 @@ mod tests {
         );
         // Le coffre partagé a SA clé : il n'ouvre pas celle du greffon.
         assert!(Coffre::new(dir.path()).ouvrir(&scelle).is_err());
+    }
+
+    /// Le passage d'un greffon au coffre partagé : une valeur scellée sous
+    /// l'ancienne clé s'ouvre encore, se rescelle sous la clé partagée, et le
+    /// nouveau scellement ne dépend plus de l'ancienne clé.
+    #[test]
+    fn l_ancienne_cle_ouvre_encore_et_la_valeur_passe_sous_la_cle_partagee() {
+        let dir = tempfile::tempdir().unwrap();
+        let ancien = Coffre::avec_fichier(dir.path(), "assistant-ia.cle")
+            .sceller("sk-ia-AVANT-1234")
+            .unwrap();
+        let coffre = Coffre::new(dir.path()).avec_ancien_fichier("assistant-ia.cle");
+        assert_eq!(coffre.ouvrir(&ancien).unwrap(), "sk-ia-AVANT-1234");
+
+        let nouvelle = coffre.resceller(&ancien).unwrap().expect("à resceller");
+        assert!(!nouvelle.contains("AVANT"), "{nouvelle}");
+        assert_eq!(
+            Coffre::new(dir.path()).ouvrir(&nouvelle).unwrap(),
+            "sk-ia-AVANT-1234"
+        );
+        assert_eq!(coffre.resceller(&nouvelle).unwrap(), None, "déjà passée");
+        // Un nouveau scellement part sous la clé partagée.
+        let neuf = coffre.sceller("sk-ia-NEUF").unwrap();
+        assert_eq!(Coffre::new(dir.path()).ouvrir(&neuf).unwrap(), "sk-ia-NEUF");
+        assert!(
+            Coffre::avec_fichier(dir.path(), "assistant-ia.cle")
+                .ouvrir(&neuf)
+                .is_err()
+        );
+    }
+
+    /// Une valeur qu'aucune des deux clés n'ouvre ne crée rien et rend une
+    /// erreur qui ne contient pas la valeur.
+    #[test]
+    fn resceller_une_valeur_illisible_n_ecrit_rien() {
+        let ailleurs = tempfile::tempdir().unwrap();
+        let etrangere = Coffre::avec_fichier(ailleurs.path(), "assistant-ia.cle")
+            .sceller("sk-ia-SECRET")
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let coffre = Coffre::new(dir.path()).avec_ancien_fichier("assistant-ia.cle");
+        let err = coffre.resceller(&etrangere).unwrap_err();
+        assert!(!err.contains("SECRET"), "{err}");
+        assert!(coffre.ouvrir(&etrangere).is_err());
+        assert!(!dir.path().join(FICHIER_CLE).exists());
     }
 
     #[cfg(unix)]
