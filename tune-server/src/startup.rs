@@ -508,6 +508,12 @@ pub async fn init_state(state: &AppState, config: &TuneConfig) {
         });
     }
     deduplicate_radios(state);
+    // #6500 — les stations du rayon Radio d'un autre Tune, rangées dans
+    // `tracks` par une indexation UPnP d'avant le correctif : retirées (sauf
+    // celles qu'un favori ou une playlist référence). Idempotente : une
+    // lecture et rien d'écrit sur une base déjà passée. Avant la boucle de
+    // synchronisation, qui ne les ramènera plus.
+    tune_core::db::radios_indexees_upnp_6500::passe_journalisee(&state.backend);
     restore_zone_volumes(state).await;
     restaurer_la_lecture(state, config).await;
     restore_oaat_groups(state).await;
