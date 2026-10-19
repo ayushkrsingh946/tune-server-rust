@@ -21,7 +21,7 @@ pub struct RelayClient {
     http_client: reqwest::Client,
     /// Client des FLUX relayés (`/stream/…`, audio d'une piste de cercle) :
     /// sans délai total, voir [`client_de_flux`].
-    http_flux: reqwest::Client,
+    http_flux: ClientDeFlux,
     /// La base des réglages, pour savoir si le greffon `circle` est installé
     /// (Tune Circle T4, #5327). `None` : aucune écoute de contact n'est
     /// servie — une absence ne vaut jamais une autorisation.
@@ -424,23 +424,41 @@ pub(crate) struct BilanDuFlux {
 }
 
 /// Silence toléré sur un flux relayé : ni connexion en plus de ce délai, ni
-/// lecture qui reste muette aussi longtemps.
+/// serveur local qui reste muet aussi longtemps.
 pub(crate) const PATIENCE_DE_FLUX: Duration = Duration::from_secs(30);
 
-/// Le client des flux relayés : délai de CONNEXION et délai de LECTURE, jamais
-/// de délai total.
+/// Le client des flux relayés et sa patience envers le serveur LOCAL.
+#[derive(Clone)]
+pub(crate) struct ClientDeFlux {
+    pub http: reqwest::Client,
+    pub patience: Duration,
+}
+
+/// Le client des flux relayés : délai de CONNEXION, et silence du serveur
+/// local borné par [`pomper_le_flux`] ; jamais de délai total.
 ///
 /// #6453 — les flux partaient sur le client de l'API, `timeout(30 s)` : chez
 /// reqwest, ce délai court jusqu'à la FIN du corps. Une radio n'en a pas : la
 /// lecture par le pont était coupée au bout de trente secondes, à chaque fois
 /// (`stream chunk error`), et le lecteur devait se reconnecter. Une piste lue
 /// sur une liaison lente (la contre-pression du pont) l'était tout autant.
-pub(crate) fn client_de_flux(patience: Duration) -> reqwest::Client {
-    crate::http::client::builder()
-        .connect_timeout(patience)
-        .read_timeout(patience)
-        .build()
-        .expect("http client de flux")
+///
+/// Pas de `read_timeout` de reqwest (tune-remote-flutter#71) : son horloge
+/// repart à chaque morceau LIVRÉ et court pendant que [`pomper_le_flux`]
+/// attend le relais. Un lecteur distant qui a rempli sa mémoire tampon cesse
+/// de lire ; le pont, puis le canal vers lui, se remplissent ; l'envoi du
+/// morceau attend. Au-delà de la patience, le morceau suivant tombait en
+/// `TimedOut` alors que le serveur local l'avait déjà fourni : le flux était
+/// coupé à chaque pause un peu longue du lecteur. La patience ne mesure donc
+/// que l'attente du serveur local, autour de chaque lecture.
+pub(crate) fn client_de_flux(patience: Duration) -> ClientDeFlux {
+    ClientDeFlux {
+        http: crate::http::client::builder()
+            .connect_timeout(patience)
+            .build()
+            .expect("http client de flux"),
+        patience,
+    }
 }
 
 /// Lit `url` en local (avec le `Range` et l'agent reçus) et le pousse au relais :
@@ -448,14 +466,14 @@ pub(crate) fn client_de_flux(patience: Duration) -> reqwest::Client {
 /// `relay.stream_end`. Chemin commun à `relay.stream_request` et à
 /// `relay.circle_stream_request`.
 pub(crate) async fn pomper_le_flux(
-    http: &reqwest::Client,
+    flux: &ClientDeFlux,
     url: &str,
     range: Option<String>,
     user_agent: Option<String>,
     id: &str,
     ws_tx: &Arc<tokio::sync::Mutex<Option<mpsc::Sender<String>>>>,
 ) -> BilanDuFlux {
-    let mut req = http.get(url);
+    let mut req = flux.http.get(url);
     if let Some(r) = range {
         req = req.header("range", r);
     }
@@ -463,7 +481,13 @@ pub(crate) async fn pomper_le_flux(
         req = req.header("user-agent", ua);
     }
 
-    match req.send().await {
+    // Un serveur local qui ne répond pas ne retient pas la tâche indéfiniment.
+    let envoi = match tokio::time::timeout(flux.patience, req.send()).await {
+        Ok(envoi) => envoi.map_err(|e| crate::http::client::decrire_erreur_http(&e)),
+        Err(_) => Err("timeout: aucune reponse du serveur local".to_string()),
+    };
+
+    match envoi {
         Ok(resp) => {
             let status = resp.status().as_u16();
             let content_length = resp
@@ -487,7 +511,22 @@ pub(crate) async fn pomper_le_flux(
             let mut octets: u64 = 0;
             use futures_util::StreamExt;
             let mut stream = resp.bytes_stream();
-            while let Some(chunk) = stream.next().await {
+            loop {
+                // La patience ne compte QUE l'attente du serveur local :
+                // l'envoi vers le relais, qui peut attendre longtemps un
+                // lecteur en pause, se fait hors de ce `timeout`.
+                let chunk = match tokio::time::timeout(flux.patience, stream.next()).await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(_) => {
+                        warn!(
+                            id = %id,
+                            patience_s = flux.patience.as_secs(),
+                            "relay stream idle timeout"
+                        );
+                        break;
+                    }
+                };
                 match chunk {
                     Ok(bytes) => {
                         octets += bytes.len() as u64;
@@ -1458,12 +1497,151 @@ mod flux_relaye_6453_tests {
         let (tx, mut rx) = mpsc::channel::<String>(256);
         let ws_tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
         let url = format!("http://127.0.0.1:{port}/stream/radio.flac");
-        let bilan = pomper_le_flux(&http, &url, None, None, "t", &ws_tx).await;
+        let flux = ClientDeFlux {
+            http,
+            patience: Duration::from_secs(10),
+        };
+        let bilan = pomper_le_flux(&flux, &url, None, None, "t", &ws_tx).await;
         assert!(
             (bilan.octets as usize) < MORCEAUX * TAILLE,
             "le délai total aurait dû couper le direct ({} octets)",
             bilan.octets
         );
         let _ = lire_jusqu_a_la_fin(&mut rx).await;
+    }
+}
+
+/// tune-remote-flutter#71 — la patience d'un flux relayé ne compte que le
+/// silence du serveur LOCAL, jamais l'attente d'un lecteur distant en pause.
+///
+/// Vraie horloge et patience raccourcie (`COURT`), comme `flux_relaye_6453_tests` :
+/// une horloge en pause avance avant que la vraie socket ait répondu, et
+/// fabrique des délais dépassés qui n'existent pas.
+#[cfg(test)]
+mod patience_du_flux_tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Uri;
+    use axum::response::{IntoResponse, Response};
+
+    const MORCEAUX: usize = 3;
+    const TAILLE: usize = 1000;
+    /// La patience des clients d'essai.
+    const COURT: Duration = Duration::from_secs(1);
+    /// L'écart entre deux morceaux du serveur local, bien sous `COURT`.
+    const PAS: Duration = Duration::from_millis(50);
+
+    fn morceau(i: usize) -> Vec<u8> {
+        vec![i as u8; TAILLE]
+    }
+
+    async fn repondre(uri: Uri) -> Response {
+        let corps = if uri.path() == "/stream/muet" {
+            // Un morceau, puis plus rien, connexion ouverte : un serveur
+            // local figé.
+            let premier =
+                futures_util::stream::once(async { Ok::<Vec<u8>, std::io::Error>(morceau(0)) });
+            Body::from_stream(premier.chain(futures_util::stream::pending()))
+        } else {
+            // Trois morceaux distincts, `PAS` d'écart : le serveur local a TOUT
+            // fourni bien avant la fin de la pause du lecteur.
+            Body::from_stream(futures_util::stream::unfold(0usize, |i| async move {
+                if i == MORCEAUX {
+                    return None;
+                }
+                if i > 0 {
+                    tokio::time::sleep(PAS).await;
+                }
+                Some((Ok::<Vec<u8>, std::io::Error>(morceau(i)), i + 1))
+            }))
+        };
+        ([("content-type", "audio/flac")], corps).into_response()
+    }
+
+    /// Le vrai client (`RelayClient::new`), patience raccourcie à `COURT`,
+    /// branché sur un canal de capacité `capacite` vers un faux pont.
+    async fn client(capacite: usize) -> (RelayClient, mpsc::Receiver<String>) {
+        let app = Router::new().fallback(repondre);
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = ecoute.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(ecoute, app).await.unwrap();
+        });
+        let mut c = RelayClient::new("srv".into(), "jeton".into(), "ws://x".into(), port);
+        c.http_flux = client_de_flux(COURT);
+        let (tx, rx) = mpsc::channel::<String>(capacite);
+        *c.ws_tx.lock().await = Some(tx);
+        (c, rx)
+    }
+
+    fn demande(stream_id: &str) -> String {
+        serde_json::json!({
+            "type": "relay.stream_request",
+            "id": "req-p",
+            "stream_id": stream_id,
+        })
+        .to_string()
+    }
+
+    /// Les octets d'un flux, jusqu'à `relay.stream_end`.
+    async fn octets_du_flux(rx: &mut mpsc::Receiver<String>) -> Vec<u8> {
+        use base64::Engine as _;
+        let debut: serde_json::Value =
+            serde_json::from_str(&rx.recv().await.expect("canal ferme")).unwrap();
+        assert_eq!(debut["type"], "relay.stream_start");
+        assert_eq!(debut["status"], 200);
+        let mut octets = Vec::new();
+        loop {
+            let t = rx.recv().await.expect("canal ferme avant la fin du flux");
+            match t.strip_prefix("BINARY:req-p:") {
+                Some(b64) => octets.extend(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .unwrap(),
+                ),
+                None => {
+                    let fin: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    assert_eq!(fin["type"], "relay.stream_end");
+                    return octets;
+                }
+            }
+        }
+    }
+
+    /// LE défaut. Le lecteur distant a rempli sa mémoire tampon et ne lit
+    /// plus : le canal vers le pont est plein, l'envoi du premier morceau
+    /// attend trois fois la patience. Avec le `read_timeout` de reqwest, le
+    /// morceau suivant tombait alors en `TimedOut` — déjà fourni par le
+    /// serveur local — et le flux s'arrêtait après le premier morceau.
+    #[tokio::test]
+    async fn un_lecteur_en_pause_ne_fait_pas_couper_le_flux() {
+        let (c, mut rx) = client(1).await;
+
+        c.handle_message(&demande("piste.flac")).await;
+        // Personne ne lit le canal pendant trois fois la patience.
+        tokio::time::sleep(COURT * 3).await;
+
+        let octets = octets_du_flux(&mut rx).await;
+        assert_eq!(
+            octets.len(),
+            MORCEAUX * TAILLE,
+            "flux coupé pendant la pause du lecteur"
+        );
+        assert_eq!(octets, (0..MORCEAUX).flat_map(morceau).collect::<Vec<u8>>());
+    }
+
+    /// Le flux garde une borne : un serveur local qui se tait est lâché au
+    /// bout de la patience, et le pont reçoit la fin du flux.
+    #[tokio::test]
+    async fn un_serveur_local_muet_est_lache_au_bout_de_la_patience() {
+        let (c, mut rx) = client(64).await;
+        let debut = std::time::Instant::now();
+
+        c.handle_message(&demande("muet")).await;
+
+        assert_eq!(octets_du_flux(&mut rx).await, morceau(0));
+        let ecoule = debut.elapsed();
+        assert!(ecoule >= COURT, "lâché trop tôt : {ecoule:?}");
     }
 }
