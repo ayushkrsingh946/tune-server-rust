@@ -509,6 +509,73 @@ fn repli_sur_la_bio_stockee(
     }
 }
 
+// ── #6555 — les similaires d'un artiste de la BIBLIOTHÈQUE (fil 2341) ──────
+//
+// Bilou : « lorsque on sélectionne un artiste et que l'on clique sur un des
+// choix d'artistes similaires […] il faut remonter à l'artiste initial puis
+// redescendre ». La fiche d'un artiste de la bibliothèque lit ses
+// similaires (« À propos ») par `GET /library/artists/{id}/metadata`. Cette
+// route, et sa sœur `/similar`, interrogeaient `https://mozaiklabs.fr/api/
+// {mbid}` : une adresse MORTE (404), le cloud vit sous `/api/v1/artists`.
+// Elles retombaient sur la fiche locale, SANS similaires. La fiche n'en
+// montrait donc qu'après « Enrichir » (Last.fm), en mémoire seulement : ouvrir
+// un voisin rechargeait la fiche, et ses propres similaires n'y étaient pas.
+//
+// Même correction que #1730 pour `/metadata/artists/{id}/similar` : le
+// client du cloud (`ArtistEnrichmentClient`), qui porte l'adresse de
+// référence et lit le réglage `artist_enrichment_api` ; et, pour un artiste
+// sans MBID (neuf sur dix en bibliothèque), la résolution EXACTE par le nom.
+
+/// Délai du cloud pour une fiche : elle charge ses similaires sans bloquer
+/// la discographie, mais une fiche ouverte ne doit pas attendre une minute.
+const DELAI_CLOUD_FICHE_SECS: u64 = 10;
+
+fn client_cloud(
+    state: &AppState,
+) -> tune_core::metadata::artist_enrichment::ArtistEnrichmentClient {
+    let base = tune_core::db::settings_repo::SettingsRepo::with_backend(state.backend.clone())
+        .get("artist_enrichment_api")
+        .ok()
+        .flatten();
+    tune_core::metadata::artist_enrichment::ArtistEnrichmentClient::new(
+        base.as_deref(),
+        DELAI_CLOUD_FICHE_SECS,
+    )
+}
+
+/// Le MBID sous lequel le cloud connaît l'artiste : le sien, ou celui que la
+/// recherche EXACTE par le nom rend. La résolution est gardée 24 h, un échec
+/// aussi : une fiche ouverte dix fois ne coûte qu'une recherche.
+async fn mbid_cloud(
+    state: &AppState,
+    client: &mut tune_core::metadata::artist_enrichment::ArtistEnrichmentClient,
+    artiste: &tune_core::db::models::Artist,
+) -> Option<String> {
+    if let Some(m) = artiste
+        .musicbrainz_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+    {
+        return Some(m.to_string());
+    }
+    let cle = format!("cache:meta-nom:{}", artiste.name.trim().to_lowercase());
+    if let Some(v) = api_cache_get(&state.backend, &cle)
+        && v.is_object()
+    {
+        return v.get("mbid").and_then(|m| m.as_str()).map(str::to_owned);
+    }
+    let trouve = client.resolve_mbid(&artiste.name).await;
+    api_cache_set(&state.backend, &cle, &json!({ "mbid": trouve }));
+    trouve
+}
+
+/// Une fiche du cloud digne de ce nom : `{"data": {…}}`. Un `{}` (ancienne
+/// réponse illisible gardée en cache) n'en est pas une.
+fn fiche_cloud_valide(v: &Value) -> bool {
+    v.get("data").is_some_and(|d| d.is_object())
+}
+
 pub(super) async fn artist_similar(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -518,26 +585,24 @@ pub(super) async fn artist_similar(
     let Some(artist) = artist else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(ref mbid) = artist.musicbrainz_id else {
+    let mut client = client_cloud(&state);
+    let Some(mbid) = mbid_cloud(&state, &mut client, &artist).await else {
         return Json(json!({"artist": artist.name, "artists": []})).into_response();
     };
     let cache_key = format!("cache:similar:{mbid}");
-    if let Some(cached) = api_cache_get(&state.backend, &cache_key) {
+    if let Some(cached) = api_cache_get(&state.backend, &cache_key)
+        && cached
+            .get("artists")
+            .is_some_and(|a| a.as_array().is_some_and(|a| !a.is_empty()))
+    {
         return Json(cached).into_response();
     }
-    match state
-        .http_client
-        .get(format!("https://mozaiklabs.fr/api/{mbid}/similar"))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            let data: Value = resp.json().await.unwrap_or(json!({}));
-            api_cache_set(&state.backend, &cache_key, &data);
-            Json(data).into_response()
-        }
-        _ => Json(json!({"mbid": mbid, "artists": []})).into_response(),
+    let voisins = client.get_similar(&mbid).await;
+    let data = json!({"artist": artist.name, "mbid": mbid, "artists": voisins});
+    if !voisins.is_empty() {
+        api_cache_set(&state.backend, &cache_key, &data);
     }
+    Json(data).into_response()
 }
 
 pub(super) async fn artist_metadata(
@@ -549,27 +614,28 @@ pub(super) async fn artist_metadata(
     let Some(artist) = artist else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(ref mbid) = artist.musicbrainz_id else {
+    let mut client = client_cloud(&state);
+    let Some(mbid) = mbid_cloud(&state, &mut client, &artist).await else {
         return Json(json!(artist)).into_response();
     };
     let cache_key = format!("cache:meta:{mbid}");
-    if let Some(cached) = api_cache_get(&state.backend, &cache_key) {
+    if let Some(cached) = api_cache_get(&state.backend, &cache_key)
+        && fiche_cloud_valide(&cached)
+    {
         return Json(cached).into_response();
     }
-    match state
-        .http_client
-        .get(format!("https://mozaiklabs.fr/api/{mbid}"))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            let data: Value = resp.json().await.unwrap_or(json!({}));
-            api_cache_set(&state.backend, &cache_key, &data);
-            Json(data).into_response()
+    match client.get_artist(&mbid).await {
+        Some(fiche) if fiche_cloud_valide(&fiche.fields) => {
+            api_cache_set(&state.backend, &cache_key, &fiche.fields);
+            Json(fiche.fields).into_response()
         }
         _ => Json(json!(artist)).into_response(),
     }
 }
+
+#[cfg(test)]
+#[path = "similaires_en_chaine_tests_6555.rs"]
+mod similaires_en_chaine_tests_6555;
 
 /// Paramètres de `GET /library/artists/{id}/albums`.
 #[derive(Deserialize)]

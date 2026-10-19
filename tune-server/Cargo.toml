@@ -411,6 +411,10 @@ name = "plafonds_indexation_upnp_4154"
 path = "tests/plafonds_indexation_upnp_4154.rs"
 
 [[test]]
+name = "radios_upnp_hors_des_pistes_6500"
+path = "tests/radios_upnp_hors_des_pistes_6500.rs"
+
+[[test]]
 name = "plugin_contracts"
 path = "tests/plugin_contracts.rs"
 
@@ -843,6 +847,13 @@ path = "tests/radio_ajout_web_sans_doublon_3543.rs"
 [[test]]
 name = "radios_recherche_distinction"
 path = "tests/radios_recherche_distinction.rs"
+
+# #6516 — annuaire radio-metadata.fr : cache local (ETag, hors ligne),
+# rapprochement de « Mes radios », ajout sans doublon. `autotests = false` :
+# sans cette inscription, le témoin ne serait jamais compilé.
+[[test]]
+name = "radios_annuaire_6516"
+path = "tests/radios_annuaire_6516.rs"
 
 # #3383 : la bascule « désactiver la télémétrie » n'éteignait rien — la route
 # n'écrivait pas, et les sept gardes d'envoi ne lisaient que `TUNE_TELEMETRY`.
