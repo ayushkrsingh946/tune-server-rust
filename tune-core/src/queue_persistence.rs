@@ -35,6 +35,18 @@ pub struct QueueSnapshot {
     pub shuffle: bool,
     /// Playback position in milliseconds within the current track.
     pub position_ms: i64,
+    /// #6526 — vrai quand l'instantané vient d'un serveur dont l'aléatoire
+    /// réordonne la file elle-même : la file en base est alors DÉJÀ l'ordre
+    /// joué. Absent (faux) des instantanés plus anciens, dont l'aléatoire
+    /// était un tirage caché perdu au redémarrage — la restauration mélange
+    /// alors la suite (`melange::restaurer_au_demarrage`).
+    #[serde(default)]
+    pub melange_dans_la_file: bool,
+    /// #6526 — l'ordre de la file d'avant l'aléatoire, en identifiants de
+    /// ligne, pour pouvoir le rétablir après un redémarrage. Vide = rien à
+    /// rétablir.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ordre_d_origine: Vec<i64>,
 }
 
 /// One entry of the ordered unified queue snapshot (local or streaming).
@@ -109,6 +121,17 @@ fn queue_file_path(db_path: &str, zone_id: i64) -> PathBuf {
 ///   réapparaître au redémarrage une file que l'utilisateur a effacée, le
 ///   défaut symétrique et le plus insidieux des deux.
 pub fn save_queue(db: &Arc<dyn DbBackend>, db_path: &str, zone_id: i64, zone_state: &ZoneState) {
+    save_queue_avec_ordre_d_origine(db, db_path, zone_id, zone_state, &[]);
+}
+
+/// [`save_queue`], avec l'ordre d'origine retenu par l'aléatoire (#6526).
+pub fn save_queue_avec_ordre_d_origine(
+    db: &Arc<dyn DbBackend>,
+    db_path: &str,
+    zone_id: i64,
+    zone_state: &ZoneState,
+    ordre_d_origine: &[i64],
+) {
     let repo = PlayQueueRepo::with_backend(db.clone());
 
     // Les trois lectures d'abord, AVANT de toucher au disque : un instantané ne
@@ -203,6 +226,12 @@ pub fn save_queue(db: &Arc<dyn DbBackend>, db_path: &str, zone_id: i64, zone_sta
         repeat_mode: repeat_mode.to_string(),
         shuffle: zone_state.shuffle,
         position_ms: zone_state.position_ms,
+        melange_dans_la_file: true,
+        ordre_d_origine: if zone_state.shuffle {
+            ordre_d_origine.to_vec()
+        } else {
+            Vec::new()
+        },
     };
 
     let path = queue_file_path(db_path, zone_id);
@@ -569,6 +598,8 @@ mod tests {
             repeat_mode: "all".into(),
             shuffle: true,
             position_ms: 45_000,
+            melange_dans_la_file: true,
+            ordre_d_origine: vec![3, 1, 2],
         };
 
         let json = serde_json::to_string_pretty(&snapshot).unwrap();
@@ -581,6 +612,22 @@ mod tests {
         assert_eq!(restored.repeat_mode, "all");
         assert!(restored.shuffle);
         assert_eq!(restored.position_ms, 45_000);
+        assert!(restored.melange_dans_la_file);
+        assert_eq!(restored.ordre_d_origine, vec![3, 1, 2]);
+    }
+
+    /// #6526 — un instantané écrit AVANT le mélange dans la file se relit
+    /// toujours, et se reconnaît : `melange_dans_la_file` vaut faux, ce qui
+    /// fait mélanger la suite au démarrage au lieu de jouer dans l'ordre sous
+    /// un bouton « aléatoire » allumé.
+    #[test]
+    fn un_instantane_d_avant_le_melange_dans_la_file_se_reconnait() {
+        let ancien = r#"{"zone_id":4,"local_track_ids":[1,2],"current_position":0,
+            "streaming_tracks":[],"repeat_mode":"off","shuffle":true,"position_ms":0}"#;
+        let s: QueueSnapshot = serde_json::from_str(ancien).unwrap();
+        assert!(s.shuffle);
+        assert!(!s.melange_dans_la_file);
+        assert!(s.ordre_d_origine.is_empty());
     }
 
     #[test]

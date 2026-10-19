@@ -68,6 +68,12 @@ pub async fn spawn_background_tasks(state: &AppState, config: &TuneConfig) {
     // Sauvegarde cloud automatique des personnalisations (#5654). Un test de
     // câblage garde la ligne.
     crate::routes::system::sauvegarde_cloud::spawn(state);
+    // « Mes écoutes, tous serveurs » (#6510) : l'envoi des écoutes au compte,
+    // opt-in et désactivé par défaut. Un test de câblage garde la ligne.
+    tune_core::cloud::ecoutes_au_compte::spawn(state.backend.clone(), state.http_client.clone());
+    // Notes et écoutes de la communauté (#6545) : consentement séparé,
+    // désactivé par défaut. Un test de câblage garde la ligne.
+    tune_core::cloud::notes_communautaires::spawn(state.backend.clone(), state.http_client.clone());
     spawn_local_audio_rescan(state);
     // Scan programmé (#2469). Cet appel manquait depuis la PR #1230 :
     // `spawn_scan_scheduler` était du code mort, la bascule des clients écrivait
@@ -2607,14 +2613,20 @@ fn spawn_radio_logo_refresh(state: &AppState) {
                 annuaire_injoignable = bilan.annuaire_injoignable,
                 "radio_logos_backfilled_at_startup"
             );
-            if !bilan.annuaire_injoignable {
-                return;
-            }
-            let Some(secs) = delais.next() else {
-                tracing::warn!("radio_logos_directory_unreachable_giving_up");
-                return;
+            // #6516 — l'annuaire se relève CHAQUE JOUR (cache local, `ETag`).
+            // Relevé réussi : rendez-vous dans 24 h. Échec : les relances
+            // rapprochées d'avant, puis le rythme quotidien — une panne ne
+            // fait plus abandonner le relevé pour toute la vie du serveur.
+            let attente = if bilan.annuaire_a_jour {
+                delais = RATTRAPAGE_LOGOS_DELAIS_SECS.iter();
+                crate::routes::radios_annuaire::PERIODE_DE_RELEVE
+            } else if let Some(secs) = delais.next() {
+                std::time::Duration::from_secs(*secs)
+            } else {
+                tracing::warn!("radio_logos_directory_unreachable_retry_tomorrow");
+                crate::routes::radios_annuaire::PERIODE_DE_RELEVE
             };
-            tokio::time::sleep(std::time::Duration::from_secs(*secs)).await;
+            tokio::time::sleep(attente).await;
         }
     });
 }
@@ -3471,6 +3483,42 @@ mod tests_licence_proprietaire_battement {
         assert!(
             source[debut..fin].contains("routes::system::sauvegarde_cloud::spawn(state);"),
             "la passe de sauvegarde cloud n'est plus lancee au demarrage"
+        );
+    }
+
+    /// #6510 — sans cet appel, l'envoi des écoutes au compte serait du code
+    /// mort : la bascule dirait « activé » et rien ne partirait jamais.
+    #[test]
+    fn l_envoi_des_ecoutes_au_compte_est_lance() {
+        let source = include_str!("background.rs");
+        let debut = source
+            .find("pub async fn spawn_background_tasks")
+            .expect("spawn_background_tasks a disparu");
+        let fin = debut + source[debut..].find("\n}\n").expect("fin du corps");
+        assert!(
+            source[debut..fin].contains(concat!(
+                "tune_core::cloud::ecoutes_au_compte::",
+                "spawn(state.backend.clone(), state.http_client.clone());"
+            )),
+            "l'envoi des écoutes au compte n'est plus lancé au démarrage"
+        );
+    }
+
+    /// #6545 — sans cet appel, le partage communautaire serait du code mort :
+    /// la bascule dirait « activé » et rien ne partirait jamais.
+    #[test]
+    fn le_partage_communautaire_est_lance() {
+        let source = include_str!("background.rs");
+        let debut = source
+            .find("pub async fn spawn_background_tasks")
+            .expect("spawn_background_tasks a disparu");
+        let fin = debut + source[debut..].find("\n}\n").expect("fin du corps");
+        assert!(
+            source[debut..fin].contains(concat!(
+                "tune_core::cloud::notes_communautaires::",
+                "spawn(state.backend.clone(), state.http_client.clone());"
+            )),
+            "le partage communautaire n'est plus lancé au démarrage"
         );
     }
 

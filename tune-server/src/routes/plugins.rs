@@ -1,5 +1,5 @@
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -336,7 +336,48 @@ fn nom_affiche<'a>(declare: &'a str, nom: &'a str) -> &'a str {
     if declare.is_empty() { nom } else { declare }
 }
 
-async fn list_plugins(State(state): State<AppState>) -> Json<Value> {
+/// Préfixe des clés de traduction des descriptions de greffons.
+const CLE_DESCRIPTION: &str = "plugin.description.";
+
+/// #6458 — la description d'une fiche de greffon, dans la langue de la
+/// requête.
+///
+/// Les greffons compilés déclarent leur description dans UNE langue
+/// (`TunePlugin::description`, souvent en français) : l'écran Extensions
+/// l'affichait telle quelle, en français pour une interface réglée en anglais
+/// (Levente, fil 2306). Quand `i18n_server.json` porte la clé
+/// `plugin.description.<nom>`, c'est elle qui parle, avec le repli habituel
+/// (anglais, puis français). Sans clé, la description déclarée reste.
+///
+/// Une fiche **wasm** n'est jamais touchée : sa description vient du
+/// manifeste de son auteur, et un tiers pourrait porter le nom d'un greffon
+/// livré.
+pub(crate) fn localiser_la_description(fiche: &mut Value, lang: &str) {
+    let Some(objet) = fiche.as_object_mut() else {
+        return;
+    };
+    if objet.get("type").and_then(Value::as_str) == Some("wasm") {
+        return;
+    }
+    let Some(nom) = objet.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    if let Some(texte) = crate::i18n::t_opt(lang, &format!("{CLE_DESCRIPTION}{nom}")) {
+        objet.insert("description".into(), Value::String(texte));
+    }
+}
+
+async fn list_plugins(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
+    let lang = crate::i18n::lang_from_header(&headers);
+    let mut fiches = list_plugins_brut(&state).await;
+    for fiche in &mut fiches {
+        localiser_la_description(fiche, &lang);
+    }
+    Json(json!(fiches))
+}
+
+async fn list_plugins_brut(state: &AppState) -> Vec<Value> {
+    let state = state.clone();
     let settings = SettingsRepo::with_backend(state.backend.clone());
     let mut plugins: Vec<Value> = fiches_locales_honorables(&state).await;
 
@@ -518,7 +559,7 @@ async fn list_plugins(State(state): State<AppState>) -> Json<Value> {
         }
     }
 
-    Json(json!(plugins))
+    plugins
 }
 
 /// Les `setup()` en erreur et les greffons chargés par un nouvel essai
@@ -587,6 +628,7 @@ fn carte_en_erreur(
 async fn retry_plugin(
     Path(name): Path<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> axum::response::Response {
     use tune_core::plugin_sdk::PluginRetryOutcome;
 
@@ -644,6 +686,7 @@ async fn retry_plugin(
             let settings = SettingsRepo::with_backend(state.backend.clone());
             let mut card = carte_en_erreur(&settings, &error);
             card["restart_required"] = Value::Bool(false);
+            localiser_la_description(&mut card, &crate::i18n::lang_from_header(&headers));
             Json(card).into_response()
         }
     }
@@ -726,7 +769,17 @@ async fn exiger_le_droit(state: &AppState, name: &str) -> Result<(), axum::respo
     Ok(())
 }
 
-async fn get_plugin(Path(name): Path<String>, State(state): State<AppState>) -> Json<Value> {
+async fn get_plugin(
+    Path(name): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<Value> {
+    let Json(mut fiche) = get_plugin_brut(name, state).await;
+    localiser_la_description(&mut fiche, &crate::i18n::lang_from_header(&headers));
+    Json(fiche)
+}
+
+async fn get_plugin_brut(name: String, state: AppState) -> Json<Value> {
     // An SDK plugin is authoritative about itself: it is loaded or it is not,
     // regardless of what the settings table happens to say.
     let settings = SettingsRepo::with_backend(state.backend.clone());

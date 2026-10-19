@@ -508,6 +508,12 @@ pub async fn init_state(state: &AppState, config: &TuneConfig) {
         });
     }
     deduplicate_radios(state);
+    // #6500 — les stations du rayon Radio d'un autre Tune, rangées dans
+    // `tracks` par une indexation UPnP d'avant le correctif : retirées (sauf
+    // celles qu'un favori ou une playlist référence). Idempotente : une
+    // lecture et rien d'écrit sur une base déjà passée. Avant la boucle de
+    // synchronisation, qui ne les ramènera plus.
+    tune_core::db::radios_indexees_upnp_6500::passe_journalisee(&state.backend);
     restore_zone_volumes(state).await;
     restaurer_la_lecture(state, config).await;
     restore_oaat_groups(state).await;
@@ -1172,8 +1178,18 @@ async fn restore_queue_metadata(state: &AppState, config: &TuneConfig) {
         };
         state.playback.set_repeat(zone_id, repeat).await;
 
-        // Restore shuffle
-        state.playback.set_shuffle(zone_id, snap.shuffle).await;
+        // Restore shuffle — #6526 : la file en base est déjà l'ordre joué si
+        // l'instantané vient d'un serveur qui mélange la file ; sinon (ancien
+        // tirage caché, perdu) la suite est mélangée maintenant.
+        tune_core::playback::melange::restaurer_au_demarrage(
+            &state.backend,
+            &state.playback,
+            zone_id,
+            snap.shuffle,
+            snap.melange_dans_la_file,
+            snap.ordre_d_origine.clone(),
+        )
+        .await;
 
         info!(
             zone_id,
