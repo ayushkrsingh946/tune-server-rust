@@ -4433,8 +4433,11 @@ pub fn decode_dsd_to_dop_streaming(
 /// sous le nom de sa première piste. Le lecteur SACD part directement de la
 /// trame de `debut_ms` et s'arrête à celle de `fin_ms`.
 ///
-/// Pour un DSF ou un DFF, la tranche n'est pas encore appliquée par ce
-/// chemin (comportement d'avant, inchangé) : seul l'ISO la reçoit.
+/// #6456 — un DSF ou un DFF la reçoit aussi : `debut_ms` est le déplacement
+/// de l'utilisateur (ou le début d'une piste CUE), `fin_ms` la fin de la
+/// tranche. Sans cela, un saut sur une sortie locale DoP relançait la piste
+/// depuis son premier bit pendant que l'horloge de la zone repartait de la
+/// position visée : le son recommençait, et la fin était déclarée trop tôt.
 #[allow(clippy::too_many_arguments)]
 pub fn decode_dsd_to_dop_streaming_tranche(
     file_path: &str,
@@ -4529,7 +4532,18 @@ fn decode_dsd_to_dop_streaming_inner(
     if ext == "dsf" {
         let info = super::dsf::parse_dsf(file_path)?;
         let mut reader = super::dsf::DsfStreamReader::open(file_path, info)?;
-        while let Some(dsd_chunk) = reader.next_chunk()? {
+        let (debut_ms, fin_ms) = tranche.unwrap_or((0, None));
+        let atteint = if debut_ms > 0 {
+            let cible = super::dsd_brut::octets_par_canal_pour_ms(dsd_rate, debut_ms) as usize;
+            reader.seek_to_bytes_per_channel(cible)? as u64
+        } else {
+            0
+        };
+        let mut borne = BorneDeTranche::new(dsd_rate, channels, atteint, fin_ms);
+        while let Some(mut dsd_chunk) = reader.next_chunk()? {
+            if !borne.couper(&mut dsd_chunk) {
+                break;
+            }
             process_chunk(&dsd_chunk)?;
         }
     } else if ext == "iso" {
@@ -4542,7 +4556,19 @@ fn decode_dsd_to_dop_streaming_inner(
         let info = super::dff::parse_dff(file_path)?;
         let read_chunk = 32768 / channels * channels;
         let mut reader = super::dff::DffStreamReader::open(file_path, &info, read_chunk)?;
-        while let Some(dsd_chunk) = reader.next_chunk()? {
+        let (debut_ms, fin_ms) = tranche.unwrap_or((0, None));
+        let atteint = if debut_ms > 0 {
+            let cible =
+                super::dsd_brut::octets_par_canal_pour_ms(dsd_rate, debut_ms) as usize * channels;
+            (reader.seek_to_interleaved_byte(cible, channels)? / channels) as u64
+        } else {
+            0
+        };
+        let mut borne = BorneDeTranche::new(dsd_rate, channels, atteint, fin_ms);
+        while let Some(mut dsd_chunk) = reader.next_chunk()? {
+            if !borne.couper(&mut dsd_chunk) {
+                break;
+            }
             process_chunk(&dsd_chunk)?;
         }
     }
@@ -4556,6 +4582,45 @@ fn decode_dsd_to_dop_streaming_inner(
         dsd_rate, dop_rate, channels, "decoded_dsd_dop_streaming"
     );
     Ok((24, dop_rate))
+}
+
+/// #6456 — la fin d'une tranche DSF/DFF, en octets PAR CANAL comptés depuis
+/// la position atteinte par le déplacement (l'ISO l'applique lui-même, dans
+/// son lecteur). Même règle que `dsd_brut::lire_dsd_brut`.
+struct BorneDeTranche {
+    canaux: usize,
+    reste_par_canal: Option<u64>,
+}
+
+impl BorneDeTranche {
+    fn new(cadence: u32, canaux: usize, atteint_par_canal: u64, fin_ms: Option<u64>) -> Self {
+        Self {
+            canaux: canaux.max(1),
+            reste_par_canal: fin_ms.map(|fin| {
+                super::dsd_brut::octets_par_canal_pour_ms(cadence, fin)
+                    .saturating_sub(atteint_par_canal)
+            }),
+        }
+    }
+
+    /// Tronque `bloc` (entrelacé) à ce qui reste de la tranche. `false` quand
+    /// la tranche était déjà épuisée : la lecture s'arrête là.
+    fn couper(&mut self, bloc: &mut Vec<u8>) -> bool {
+        let Some(reste) = self.reste_par_canal.as_mut() else {
+            return true;
+        };
+        if *reste == 0 {
+            return false;
+        }
+        let max = usize::try_from(*reste)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(self.canaux);
+        if bloc.len() > max {
+            bloc.truncate(max);
+        }
+        *reste = reste.saturating_sub((bloc.len() / self.canaux) as u64);
+        true
+    }
 }
 
 // Every DoP payload block, including a short first/final block, follows the
@@ -4599,6 +4664,10 @@ mod dop_terminal_tests_2369;
 #[cfg(test)]
 #[path = "pause_longue_4917_tests.rs"]
 mod pause_longue_4917_tests;
+
+#[cfg(test)]
+#[path = "dop_deplacement_tests_6456.rs"]
+mod dop_deplacement_tests_6456;
 
 /// Decode a DSD file (DSF or DFF) to PCM using streaming converter.
 ///

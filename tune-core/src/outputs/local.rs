@@ -684,6 +684,15 @@ pub struct LocalOutput {
     /// When set, the playback loop skips the room-correction convolver so the
     /// signal path stays bit-perfect. Set per-play by the orchestrator.
     pure_bypass: Arc<AtomicBool>,
+    /// #6522, #6524 — un traitement est-il ARMÉ dans les réglages enregistrés
+    /// de la zone qui joue (égaliseur, correction de pièce, crossfeed, greffon
+    /// natif, repli mono) ? Posé par l'orchestrateur à côté de `pure_bypass`.
+    ///
+    /// Le verdict PURE ne peut pas se lire dans la chaîne vivante : PURE la
+    /// VIDE (les chargeurs de l'orchestrateur rendent `None` en PURE), donc
+    /// sous PURE la chaîne dit toujours « rien d'armé ». Seuls les réglages
+    /// disent ce que PURE contourne. Lu par `signal_path_status`.
+    pure_contourne_un_reglage: Arc<AtomicBool>,
     /// #3973 — « bit-perfect strict » de la zone qui joue sur cette sortie.
     /// Armé, une conversion de fréquence (ouverture cpal ou changement de
     /// cadence en cours de flux) est REFUSÉE au lieu d'être jouée. Posé par
@@ -1234,6 +1243,7 @@ impl LocalOutput {
             convolver_config: Arc::new(std::sync::Mutex::new(None)),
             convolver: Arc::new(std::sync::Mutex::new(None)),
             pure_bypass: Arc::new(AtomicBool::new(false)),
+            pure_contourne_un_reglage: Arc::new(AtomicBool::new(false)),
             strict_bitperfect: Arc::new(AtomicBool::new(false)),
             mono_downmix: Arc::new(AtomicBool::new(false)),
             reaffectation: Arc::new(CreneauReaffectation::vide()),
@@ -1523,6 +1533,35 @@ impl LocalOutput {
         // #4685 — un DSP contourné ne change aucun niveau : sa compensation
         // doit tomber avec lui.
         self.recalculer_la_compensation();
+    }
+
+    /// #6522, #6524 — dire à la sortie si les réglages ENREGISTRÉS de la zone
+    /// qui joue arment un traitement que PURE contourne. Posé par
+    /// l'orchestrateur à chaque lecture, à chaque bascule PURE et à chaque
+    /// réglage poussé à chaud, d'après `Orchestrator::pure_contourne_un_reglage`.
+    pub fn set_pure_contourne_un_reglage(&self, arme: bool) {
+        self.pure_contourne_un_reglage
+            .store(arme, Ordering::Relaxed);
+    }
+
+    /// Publie le contrat de signal comme le fait le callback Windows (même
+    /// fonction, mêmes emplacements de la sortie), pour les tests : sans carte
+    /// son, c'est la seule façon de lire le verdict que lit le poller après
+    /// une vraie bascule de l'orchestrateur.
+    #[cfg(test)]
+    pub(crate) fn publier_le_contrat_pour_test(&self) {
+        publish_windows_signal_path_status(
+            &self.signal_path_status,
+            true,
+            true,
+            false,
+            1000,
+            &self.eq,
+            &self.convolver,
+            &self.crossfeed,
+            &self.pure_bypass,
+            &self.mono_downmix,
+        );
     }
 
     /// #3973 — armer (ou désarmer) « bit-perfect strict » pour la zone qui
@@ -3721,6 +3760,29 @@ fn local_dsp_runtime_state(
         OutputDspState::Applied
     } else {
         OutputDspState::Inactive
+    }
+}
+
+/// #6522, #6524 — corrige le « rien à contourner » de
+/// `local_dsp_runtime_state` par les réglages enregistrés de la zone.
+///
+/// Sous PURE, la chaîne vivante est vide PAR CONSTRUCTION : l'orchestrateur y
+/// installe les `None` que ses chargeurs rendent en PURE. Son « rien d'armé »
+/// ne prouve donc rien. Quand les réglages arment un traitement
+/// (`reglage_arme`), PURE le contourne : le verdict est `BypassedPure`. Les
+/// autres verdicts ne sont pas touchés.
+///
+/// Chemin complet du type : l'import court n'existe que sous Windows et en
+/// test, et `signal_path_status` est compilé partout.
+fn verdict_pure_selon_les_reglages(
+    dsp: super::traits::OutputDspState,
+    reglage_arme: bool,
+) -> super::traits::OutputDspState {
+    use super::traits::OutputDspState;
+    if reglage_arme && dsp == OutputDspState::PureSansObjet {
+        OutputDspState::BypassedPure
+    } else {
+        dsp
     }
 }
 
@@ -7414,10 +7476,16 @@ impl OutputTarget for LocalOutput {
     }
 
     fn signal_path_status(&self) -> Option<OutputSignalPathStatus> {
-        self.signal_path_status
+        let mut status = self
+            .signal_path_status
             .lock()
             .ok()
-            .and_then(|status| status.clone())
+            .and_then(|status| status.clone())?;
+        status.dsp = verdict_pure_selon_les_reglages(
+            status.dsp,
+            self.pure_contourne_un_reglage.load(Ordering::Relaxed),
+        );
+        Some(status)
     }
 
     /// REF-6b (#2219) : ce que l'étage courant a déclaré par
