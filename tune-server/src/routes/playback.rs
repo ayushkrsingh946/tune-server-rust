@@ -6310,6 +6310,9 @@ async fn invoke_zone_pin(
     let Some(pin) = pins.iter().find(|p| p.index == index) else {
         return (StatusCode::NOT_FOUND, "pin not found").into_response();
     };
+    // #6465 — un préréglage est un nouveau geste : il ne garde pas le
+    // contexte (album, playlist) de la lecture précédente.
+    state.playback.effacer_contexte_de_session(zone_id).await;
 
     // Build a play request from the pin
     let output_device_id = get_zone_device_id(&state, zone_id);

@@ -962,6 +962,11 @@ path = "tests/plus_comme_ca_qobuz_fil1906.rs"
 [[test]]
 name = "radio_artiste_5395"
 path = "tests/radio_artiste_5395.rs"
+# #6465 — radio, podcast et préréglage effacent le contexte de session laissé
+# par l'album joué avant (Historique, vignette « en cours »).
+[[test]]
+name = "contexte_de_session_6465"
+path = "tests/contexte_de_session_6465.rs"
 # #2816 — la garde qui detecte la DERIVE des garde-fous : un fichier d'essais
 # que le compilateur n'atteint plus, un temoin qui ne s'execute plus que sous
 # une variable d'environnement que plus aucune etape ne pose. `autotests =

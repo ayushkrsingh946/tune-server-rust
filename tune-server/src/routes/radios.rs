@@ -1412,6 +1412,8 @@ async fn play_radio(
     let Some(radio) = repo.get(id).ok().flatten() else {
         return (StatusCode::NOT_FOUND, "radio not found").into_response();
     };
+    // #6465 — une station n'appartient à aucun album ni playlist joué avant.
+    state.playback.effacer_contexte_de_session(zone_id).await;
 
     let play_req = tune_core::orchestrator::PlayRequest {
         zone_id,
