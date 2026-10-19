@@ -519,6 +519,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/albums/{id}/rate", post(albums::rate_album))
         .route("/albums/{id}/rating", get(albums::get_album_rating))
+        // #6545 — notes et écoutes de la communauté (agrégats du site, en cache).
+        .route("/albums/{id}/community", get(albums::album_community))
         .route("/tracks/{id}/credits", get(credits::track_credits))
         .route("/artists/{id}/credits", get(credits::artist_credits))
         // #1572 — crédits d’un album : un aller-retour pour toute la fiche.

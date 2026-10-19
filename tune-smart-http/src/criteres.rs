@@ -128,6 +128,11 @@ pub(crate) const CRITERES: &[Critere] = &[
     // playlist, il lit l'interprète de la PISTE — c'est là que les deux
     // critères diffèrent.
     deux("album_artist", Famille::Texte),
+    // #6232 (forum 2218) — « Interprète » : la balise ARTIST de la PISTE, à
+    // défaut l'artiste de la piste en base. Dans une collection, un album
+    // passe dès qu'une de ses pistes passe : c'est ce que « Artiste » (artiste
+    // de l'album) ne savait pas faire.
+    deux("track_artist", Famille::Texte),
     deux("genre", Famille::Texte),
     deux("composer", Famille::Texte),
     deux("label", Famille::Texte),
@@ -665,19 +670,119 @@ pub(crate) mod tests {
         );
     }
 
-    /// Le compte du client : trente-trois définitions, dont trente et une aux
+    /// Le compte du client : trente-quatre définitions, dont trente-deux aux
     /// collections (#5530 : « Généré par IA » ; #6123 : « Note de la piste » ;
     /// #6121 : « Artiste de l'album » ; #6124 : « Année de sortie originale »
-    /// et « Version »). Si ce nombre bouge, `smartRegles.ts` doit bouger
-    /// aussi.
+    /// et « Version » ; #6232 : « Interprète »). Si ce nombre bouge,
+    /// `smartRegles.ts` doit bouger aussi.
     #[test]
     fn le_tableau_a_la_taille_de_celui_du_client() {
-        assert_eq!(CRITERES.len(), 33);
+        assert_eq!(CRITERES.len(), 34);
         assert_eq!(
             CRITERES.iter().filter(|c| c.collection.is_some()).count(),
-            31
+            32
         );
     }
+    // ---------------------------------------------------------------------
+    // #6232 — « Interprète » (forum 2218).
+    // ---------------------------------------------------------------------
+
+    /// Le cas de Didier : sur l'album ordinaire 1 (Miles Davis), la piste 2
+    /// porte la balise ARTIST « Miles Davis & Genesis ». En base, son artiste
+    /// reste celui de l'album (le scan l'y met), et la balise vit dans
+    /// `track_metadata['track_artist']`. Les autres pistes n'ont pas la clé :
+    /// leur artiste en base répond.
+    fn avec_un_invite() -> SqliteDb {
+        let db = bibliotheque();
+        db.execute_batch(
+            "INSERT INTO track_metadata (track_id, key, value) VALUES \
+               (2,'track_artist','Miles Davis & Genesis');",
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn l_interprete_d_une_piste_amene_son_album_6232() {
+        let db = avec_un_invite();
+        assert_eq!(
+            albums(&db, &regle("track_artist", "contains", json!("genesis"))),
+            vec![1]
+        );
+        // « Artiste » (l'artiste de l'album) ne la voit toujours pas : les
+        // deux critères sont distincts.
+        assert!(albums(&db, &regle("artist_name", "contains", json!("genesis"))).is_empty());
+        assert!(albums(&db, &regle("album_artist", "contains", json!("genesis"))).is_empty());
+        // Sans balise en base : l'artiste de la piste répond.
+        assert_eq!(
+            albums(&db, &regle("track_artist", "=", json!("john coltrane"))),
+            vec![2]
+        );
+        assert_eq!(
+            albums(&db, &regle("track_artist", "starts_with", json!("Miles"))),
+            vec![1]
+        );
+        // « ne contient pas » : AUCUNE piste de l'album ne contient.
+        assert_eq!(
+            albums(
+                &db,
+                &regle("track_artist", "not_contains", json!("genesis"))
+            ),
+            vec![2, 3]
+        );
+        assert!(albums(&db, &regle("track_artist", "is_null", Value::Null)).is_empty());
+    }
+
+    #[test]
+    fn l_interprete_dans_une_playlist_6232() {
+        let db = avec_un_invite();
+        assert_eq!(
+            pistes(&db, &regle("track_artist", "contains", json!("Genesis"))),
+            vec![2]
+        );
+        // « Artiste » d'une playlist lit l'artiste rangé en base : la piste
+        // n'y répond pas, c'est le défaut du fil 2218.
+        assert!(pistes(&db, &regle("artist", "contains", json!("Genesis"))).is_empty());
+        assert_eq!(
+            pistes(&db, &regle("track_artist", "=", json!("Miles Davis"))),
+            vec![1]
+        );
+        assert_eq!(
+            pistes(&db, &regle("track_artist", "!=", json!("Miles Davis"))),
+            vec![2, 3, 4]
+        );
+    }
+
+    /// Un artiste CORRIGÉ dans Tune (champ tenu) l'emporte sur la balise du
+    /// fichier, que l'écriture dans les fichiers, désactivée par défaut, ne
+    /// change pas.
+    #[test]
+    fn un_artiste_tenu_l_emporte_sur_la_balise_6232() {
+        let db = avec_un_invite();
+        db.execute_batch(
+            "INSERT INTO track_metadata (track_id, key, value) VALUES \
+               (2,'champs_tenus','{\"chemin\":\"/m/jazz/2.flac\",\"artist_id\":1,\"artist_name\":\"Miles Davis\"}');",
+        )
+        .unwrap();
+        assert!(albums(&db, &regle("track_artist", "contains", json!("genesis"))).is_empty());
+        assert!(pistes(&db, &regle("track_artist", "contains", json!("genesis"))).is_empty());
+        assert_eq!(
+            pistes(&db, &regle("track_artist", "=", json!("Miles Davis"))),
+            vec![1, 2]
+        );
+        // Une tenue qui ne porte PAS l'artiste (le titre seul) laisse la
+        // balise répondre.
+        db.execute_batch(
+            "UPDATE track_metadata SET value = '{\"chemin\":\"/m/jazz/2.flac\",\"title\":\"So What\"}' \
+             WHERE track_id = 2 AND key = 'champs_tenus';",
+        )
+        .unwrap();
+        assert_eq!(
+            pistes(&db, &regle("track_artist", "contains", json!("genesis"))),
+            vec![2]
+        );
+    }
+
     // ---------------------------------------------------------------------
     // #6124 — « Année de sortie originale » et « Version ».
     // ---------------------------------------------------------------------

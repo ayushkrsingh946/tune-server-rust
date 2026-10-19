@@ -2485,6 +2485,31 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "playlist_tracks_orphelines",
         up: "",
     },
+    // #6516 (go de Bertrand, 19/10) — le lien d'une station de « Mes radios »
+    // avec sa fiche de l'annuaire radio-metadata.fr :
+    // `radio_stations.external_id` (`S000973`), NULL tant qu'aucun
+    // rapprochement n'a réussi, et son index.
+    //
+    // Posé au premier rapprochement sûr (adresse de flux exacte, ou nom porté
+    // par une seule fiche) et dès l'ajout depuis l'annuaire ; ensuite le lien
+    // se fait d'abord par lui, ce qui survit à un changement d'adresse du flux
+    // côté annuaire.
+    //
+    // Numérotée 126 / PG 090 : la 125 / PG 089 (#6179) est la dernière sur
+    // `batch/bugs-rc7-20261015` le 19/10, et la garde de contiguïté exige la
+    // suivante. ⚠️ `chantier/ordre-etiquettes` tient AUSSI 126 / 090
+    // (`tags_position`), `chantier/accueil-suggestions` et
+    // `chantier/artistes-multiples` tiennent 125 / 089 : ils se renumérotent à
+    // leur jonction avec le lot (règle de la 119). `chantier/assistant-ia` et
+    // `chantier/enrichissement-metarust` n'ajoutent aucune migration numérotée.
+    //
+    // Colonne et index posés dans le bloc de version et dans la passe finale,
+    // PAS dans `up` : même règle qu'à la 119. Jumelle PG : 090.
+    Migration {
+        version: 126,
+        name: "radio_stations_external_id",
+        up: "",
+    },
 ];
 
 /// SQL de la migration 125 (#6179) — voir son entree dans `MIGRATIONS`.
@@ -2632,6 +2657,19 @@ fn date_de_creation_des_fichiers(db: &SqliteDb) {
         warn!(erreur = %e, "migration_120_table_file_first_seen");
     }
     add_column_if_missing(db, "file_first_seen", "created_at", "REAL");
+}
+
+/// L'index de la migration 126 (#6516). `IF NOT EXISTS` : rejouable.
+const SQL_INDEX_RADIO_EXTERNAL_ID: &str =
+    "CREATE INDEX IF NOT EXISTS idx_radio_stations_external_id ON radio_stations(external_id)";
+
+/// Garantit `radio_stations.external_id` puis pose son index (#6516). Un échec
+/// de l'index est JOURNALISÉ : sans lui, le rapprochement est lent, pas faux.
+fn lien_des_radios_avec_l_annuaire(db: &SqliteDb) {
+    add_column_if_missing(db, "radio_stations", "external_id", "TEXT");
+    if let Err(e) = db.execute_batch(SQL_INDEX_RADIO_EXTERNAL_ID) {
+        warn!(erreur = %e, "migration_126_index_radio_stations_external_id");
+    }
 }
 
 /// L'index de la migration 119 (#5594). `IF NOT EXISTS` : rejouable, et posé
@@ -3799,6 +3837,11 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
             // RENDUE, comme a la 109.
             playlist_tracks_garde_les_orphelines(db)?;
         }
+        if migration.version == 126 {
+            // #6516 — le lien des radios avec l'annuaire. NULL pour l'existant :
+            // le rapprochement de départ le remplit au premier relevé.
+            lien_des_radios_avec_l_annuaire(db);
+        }
         if migration.version == 12 {
             upgrade_fts5_tables(db);
         }
@@ -4384,6 +4427,9 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     // et l'UPDATE des pistes la NOMMENT, et une base arrivée sans elle ne
     // pourrait plus rien scanner. PG : migration 088.
     add_column_if_missing(db, "tracks", "rating", "INTEGER");
+    // Le lien des radios avec l'annuaire (migration 126, #6516) — posé ICI
+    // aussi : le rapprochement le NOMME. PG : migration 090.
+    lien_des_radios_avec_l_annuaire(db);
     // Index de `listen_history.album_id` (migration 115, fil 2130) — posé ICI
     // aussi : une base arrivée sans lui reste juste, mais « Reprendre
     // l'écoute » y redevient lent. PG : migration 079.
@@ -5246,6 +5292,13 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         89,
         "playlist_tracks_orphelines",
         include_str!("../../migrations/postgres/089_playlist_tracks_orphelines.sql"),
+    ),
+    // Jumelle de la SQLite 126 (#6516) : `radio_stations.external_id`, le lien
+    // d'une station avec sa fiche de l'annuaire, NULL pour l'existant, indexé.
+    (
+        90,
+        "radio_stations_external_id",
+        include_str!("../../migrations/postgres/090_radio_stations_external_id.sql"),
     ),
 ];
 
@@ -8456,7 +8509,9 @@ mod tests {
         // `tracks.rating`, que l'INSERT et l'UPDATE des pistes NOMMENT.
         // 89 : `playlist_tracks_orphelines` (#6179), jumelle de la SQLite 125.
         // Pose les colonnes de la ligne introuvable, que `get_entries` NOMME.
-        assert_eq!(pg_latest_version(), 89, "latest PG migration must be 89");
+        // 90 : `radio_stations_external_id` (#6516), jumelle de la SQLite 126.
+        // Pose le lien des radios avec l'annuaire, que le rapprochement NOMME.
+        assert_eq!(pg_latest_version(), 90, "latest PG migration must be 90");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),
@@ -9722,3 +9777,7 @@ mod tests_playlist_titres_de_service_4889 {
         assert_eq!(n, 1, "rejouer la 109 ne recrée pas la table");
     }
 }
+
+#[cfg(test)]
+#[path = "radio_external_id_6516_tests.rs"]
+mod tests_radio_external_id_6516;

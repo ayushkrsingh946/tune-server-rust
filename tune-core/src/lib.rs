@@ -66,6 +66,7 @@ pub mod prefetch;
 pub mod queue_persistence;
 pub mod radio_favorites;
 pub mod radio_metadata;
+pub mod radio_metadata_relais;
 pub mod remote_discovery;
 pub mod remote_proxy;
 pub mod room_correction;

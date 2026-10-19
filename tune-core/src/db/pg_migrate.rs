@@ -1309,6 +1309,10 @@ CREATE INDEX IF NOT EXISTS idx_tracks_audio_pcm_key ON tracks(audio_pcm_key);
 -- tracks: note de la piste lue dans ses balises (SQLite migration v124 / PG
 -- 088, #6123). TEXT pour la copie ; la 088, rejouee juste apres, la convertit.
 ALTER TABLE tracks ADD COLUMN IF NOT EXISTS rating TEXT;
+-- radio_stations: lien avec la fiche de l'annuaire (SQLite migration v126 /
+-- PG 090, #6516). TEXT des deux côtés : la copie texte n'a rien à convertir.
+ALTER TABLE radio_stations ADD COLUMN IF NOT EXISTS external_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_radio_stations_external_id ON radio_stations(external_id);
 "#;
 
 /// Post-copy normalisation: `tracks.file_mtime` is canonically DOUBLE

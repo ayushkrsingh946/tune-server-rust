@@ -363,6 +363,11 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     // l'INSERT et l'UPDATE des pistes la NOMMENT. Sans effet sur une colonne
     // déjà là, TEXT de bascule comprise : c'est la 088 qui la convertit.
     "ALTER TABLE tracks ADD COLUMN IF NOT EXISTS rating BIGINT",
+    // #6516 — le lien des radios avec l'annuaire (PG 090). Ici AUSSI : une
+    // base de bascule ne rejoue pas la 090, et le rapprochement NOMME la
+    // colonne. L'index JUSTE APRÈS la colonne.
+    "ALTER TABLE radio_stations ADD COLUMN IF NOT EXISTS external_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_radio_stations_external_id ON radio_stations(external_id)",
     // Fil 2121 — référence d'album d'une piste de service (PG 078). Ici AUSSI,
     // même raison : une base de bascule ne rejouera jamais la 078, alors que
     // l'écriture de la file, des favoris et de l'historique nomme la colonne.

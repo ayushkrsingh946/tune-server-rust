@@ -2037,17 +2037,7 @@ async fn spawn_library_scan_avec_lecteur(
             let ou = dossier.as_deref();
             event_bus.emit(
                 "library.scan.progress",
-                portee.avec(
-                    json!({
-                        "phase": "indexing",
-                        "stage": "verification",
-                        "scanned": verifies as i64,
-                        "added": 0i64,
-                        "total": total_discovered as i64,
-                        "current_dir": ou,
-                    }),
-                    ou,
-                ),
+                portee.avec(avancement_du_prefiltre(verifies, total_discovered, ou), ou),
             );
         };
         annoncer_le_prefiltre(0, files.first().and_then(|p| dossier_de(p)));
@@ -2127,16 +2117,11 @@ async fn spawn_library_scan_avec_lecteur(
         event_bus.emit(
             "library.scan.progress",
             portee.avec(
-                json!({
-                    "phase": "files",
-                    "scanned": pre_skipped,
-                    "added": 0i64,
-                    "total": total_discovered as i64,
-                    "inserted": 0i64,
-                    "updated": 0i64,
-                    "skipped": pre_skipped,
-                    "current_dir": premier_dossier,
-                }),
+                debut_de_la_lecture(
+                    pre_skipped as usize,
+                    total_discovered,
+                    premier_dossier.as_deref(),
+                ),
                 premier_dossier.as_deref(),
             ),
         );
@@ -6047,8 +6032,48 @@ mod import_progress_tests;
 
 /// #6019 — le dossier d'un fichier, tel que l'écran l'affiche (« Dossier
 /// analysé : … »).
-fn dossier_de(path: &std::path::Path) -> Option<String> {
+pub(crate) fn dossier_de(path: &std::path::Path) -> Option<String> {
     path.parent().map(|d| d.to_string_lossy().into_owned())
+}
+
+/// L'avancement du PRÉFILTRE (la passe `stat` qui écarte les inchangés),
+/// partagé par le scan manuel (#6019) et le scan de démarrage (#6371) :
+/// `verifies` fichiers vérifiés sur `total` repérés, et le dossier en cours.
+pub(crate) fn avancement_du_prefiltre(
+    verifies: usize,
+    total: usize,
+    dossier: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        "phase": "indexing",
+        "stage": "verification",
+        "scanned": verifies as i64,
+        "added": 0i64,
+        "total": total as i64,
+        "current_dir": dossier,
+    })
+}
+
+/// Le premier `phase: files`, émis dès la fin du préfiltre : les inchangés
+/// sont faits, la barre devient déterminée sans attendre le premier lot
+/// (#1129). Partagé par les deux scans (#6371) : celui de démarrage n'en
+/// émettait aucun tant qu'aucun lot n'avait été traité — et aucun si rien
+/// n'avait changé.
+pub(crate) fn debut_de_la_lecture(
+    pre_skipped: usize,
+    total: usize,
+    dossier: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        "phase": "files",
+        "scanned": pre_skipped as i64,
+        "added": 0i64,
+        "total": total as i64,
+        "inserted": 0i64,
+        "updated": 0i64,
+        "skipped": pre_skipped as i64,
+        "current_dir": dossier,
+    })
 }
 
 #[cfg(test)]

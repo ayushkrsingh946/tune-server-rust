@@ -370,6 +370,13 @@ pub(super) async fn get_config(
         // from the one above, and default ON since it always behaved that way.
         // The web toggle writes "false" to opt out (JP Borderies).
         ("scan_import_playlists", json!(true)),
+        // #6554 (fil 2294) — « Coffrets automatiques », section Bibliothèque.
+        // Publié même absent de la base, pour que l'interface affiche la case
+        // COCHÉE (le comportement d'avant) plutôt que « je ne sais pas ».
+        (
+            tune_core::db::coffrets_auto::CLE_REGLAGE_AUTO,
+            json!(tune_core::db::coffrets_auto::REGLAGE_AUTO_DEFAUT),
+        ),
         // #4051 — le consentement LRCLIB, publié comme ses deux voisins de la
         // MÊME section « Bibliothèque » (`metadata_readonly`, `enrich_on_scan`).
         //
@@ -404,6 +411,18 @@ pub(super) async fn get_config(
         (
             tune_core::cloud::consent::CONTRIBUTION_SETTING_KEY,
             json!(tune_core::cloud::consent::CONTRIBUTION_DEFAULT),
+        ),
+        // #6510 — « Envoyer mes écoutes à mon compte ». Opt-in STRICT, publié
+        // avec son défaut pour que le client distingue « éteint » de « pas lu ».
+        (
+            tune_core::cloud::ecoutes_au_compte::CLE_ACTIVATION,
+            json!(tune_core::cloud::ecoutes_au_compte::ACTIVATION_DEFAUT),
+        ),
+        // #6545 — « Partager mes notes et mes écoutes avec la communauté
+        // (anonymement) ». Opt-in STRICT, distinct de l'envoi des écoutes.
+        (
+            tune_core::cloud::notes_communautaires::CLE_PARTAGE,
+            json!(tune_core::cloud::notes_communautaires::PARTAGE_DEFAUT),
         ),
         ("quality_split", json!(true)),
         // Fil 2148 (#5792) — le délai de la sonde des partages réseau.
@@ -1800,6 +1819,87 @@ fn appliquer_annonce_slimproto(annonce: bool, port_http: u16) -> bool {
             eteinte
         }
         ActionAnnonce::Rien => false,
+    }
+}
+
+/// #6510 — « Envoyer mes écoutes à mon compte » : publié désactivé, écrit par
+/// `PATCH`, relu par la garde même de l'envoi.
+#[cfg(test)]
+mod envoi_des_ecoutes_tests_6510 {
+    use crate::state::AppState;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+    use tune_core::cloud::ecoutes_au_compte::{CLE_ACTIVATION, envoi_active};
+    use tune_core::db::settings_repo::SettingsRepo;
+
+    async fn requete(state: &AppState, methode: &str, corps: Option<Value>) -> (StatusCode, Value) {
+        let corps = corps.map(|c| c.to_string()).unwrap_or_default();
+        let response = crate::routes::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(methode)
+                    .uri("/api/v1/system/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(corps))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn la_bascule_est_publiee_desactivee_et_s_ecrit_par_patch() {
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let reglages = SettingsRepo::with_backend(state.backend.clone());
+        let (status, config) = requete(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            config[CLE_ACTIVATION],
+            json!(false),
+            "absente ou active par défaut"
+        );
+        assert!(!envoi_active(&reglages));
+
+        let (status, _) = requete(&state, "PATCH", Some(json!({ CLE_ACTIVATION: true }))).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, config) = requete(&state, "GET", None).await;
+        assert_eq!(config[CLE_ACTIVATION], json!(true));
+        assert!(
+            envoi_active(&reglages),
+            "écrit par PATCH mais pas relu par l'envoi"
+        );
+
+        requete(&state, "PATCH", Some(json!({ CLE_ACTIVATION: false }))).await;
+        assert!(!envoi_active(&reglages));
+    }
+
+    /// #6545 — le consentement communautaire : publié désactivé, distinct de
+    /// l'envoi des écoutes, écrit par `PATCH`, relu par la garde du partage.
+    #[tokio::test]
+    async fn le_partage_communautaire_est_publie_desactive_et_independant() {
+        use tune_core::cloud::notes_communautaires::{CLE_PARTAGE, partage_active};
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let reglages = SettingsRepo::with_backend(state.backend.clone());
+        let (_, config) = requete(&state, "GET", None).await;
+        assert_eq!(config[CLE_PARTAGE], json!(false));
+        assert!(!partage_active(&reglages));
+
+        requete(&state, "PATCH", Some(json!({ CLE_ACTIVATION: true }))).await;
+        assert!(
+            !partage_active(&reglages),
+            "l'envoi des écoutes ne vaut pas consentement"
+        );
+
+        let (status, _) = requete(&state, "PATCH", Some(json!({ CLE_PARTAGE: true }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(partage_active(&reglages));
     }
 }
 

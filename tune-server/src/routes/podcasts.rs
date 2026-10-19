@@ -466,6 +466,8 @@ async fn play_episode(
         stream_id: None,
         ..Default::default()
     };
+    // #6465 — un épisode n'appartient à aucun album ni playlist joué avant.
+    state.playback.effacer_contexte_de_session(zone_id).await;
     state.playback.play(zone_id, np).await;
     let (output_sent, output_error) = if let Some(ref did) = device_id {
         let output_arc = {

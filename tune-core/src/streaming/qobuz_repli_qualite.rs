@@ -190,6 +190,34 @@ pub async fn retenir_le_flux(
     }
 }
 
+/// [`retenir_le_flux`] pour une piste de n'importe quel service : le repli
+/// ne vaut que pour Qobuz, tout autre service rend son flux tel quel, sans
+/// sonde.
+///
+/// La SEULE porte d'entrée des chemins qui résolvent une URL de service :
+/// lecture explicite (`resolve_stream`), préchargement sans blanc
+/// (`prefetch.rs`) et sonde de niveaux après une avance sans blanc
+/// (`queue.rs`). Avant elle, le préchargement allait chercher le flux HR
+/// sans repli : le titre que Qobuz refusait en HR n'était jamais préchargé,
+/// et la sonde de niveaux de la piste repliée visait un flux mort.
+pub async fn retenir_le_flux_du_service(
+    service_name: &str,
+    service: &dyn StreamingService,
+    client: &reqwest::Client,
+    track_id: &str,
+    jeton: Option<&str>,
+    flux: StreamUrl,
+) -> FluxRetenu {
+    if service_name != "qobuz" {
+        return FluxRetenu {
+            flux,
+            jeton: jeton.map(str::to_string),
+            replie: false,
+        };
+    }
+    retenir_le_flux(service, client, track_id, jeton, flux).await
+}
+
 #[cfg(test)]
 #[path = "qobuz_repli_qualite_tests_6401.rs"]
-mod tests;
+pub(crate) mod tests;
