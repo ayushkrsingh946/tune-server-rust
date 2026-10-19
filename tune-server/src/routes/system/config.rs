@@ -411,6 +411,12 @@ pub(super) async fn get_config(
             tune_core::cloud::ecoutes_au_compte::CLE_ACTIVATION,
             json!(tune_core::cloud::ecoutes_au_compte::ACTIVATION_DEFAUT),
         ),
+        // #6545 — « Partager mes notes et mes écoutes avec la communauté
+        // (anonymement) ». Opt-in STRICT, distinct de l'envoi des écoutes.
+        (
+            tune_core::cloud::notes_communautaires::CLE_PARTAGE,
+            json!(tune_core::cloud::notes_communautaires::PARTAGE_DEFAUT),
+        ),
         ("quality_split", json!(true)),
         // Fil 2148 (#5792) — le délai de la sonde des partages réseau.
         (
@@ -1865,6 +1871,28 @@ mod envoi_des_ecoutes_tests_6510 {
 
         requete(&state, "PATCH", Some(json!({ CLE_ACTIVATION: false }))).await;
         assert!(!envoi_active(&reglages));
+    }
+
+    /// #6545 — le consentement communautaire : publié désactivé, distinct de
+    /// l'envoi des écoutes, écrit par `PATCH`, relu par la garde du partage.
+    #[tokio::test]
+    async fn le_partage_communautaire_est_publie_desactive_et_independant() {
+        use tune_core::cloud::notes_communautaires::{CLE_PARTAGE, partage_active};
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let reglages = SettingsRepo::with_backend(state.backend.clone());
+        let (_, config) = requete(&state, "GET", None).await;
+        assert_eq!(config[CLE_PARTAGE], json!(false));
+        assert!(!partage_active(&reglages));
+
+        requete(&state, "PATCH", Some(json!({ CLE_ACTIVATION: true }))).await;
+        assert!(
+            !partage_active(&reglages),
+            "l'envoi des écoutes ne vaut pas consentement"
+        );
+
+        let (status, _) = requete(&state, "PATCH", Some(json!({ CLE_PARTAGE: true }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(partage_active(&reglages));
     }
 }
 

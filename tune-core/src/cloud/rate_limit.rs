@@ -43,10 +43,14 @@ pub enum CloudScope {
     UserProfile,
     /// `POST /api/v1/listens` : l'envoi des écoutes au compte (#6510).
     ListensSync,
+    /// `PUT /api/v1/community/{consent,ratings}` : le partage communautaire (#6545).
+    CommunityShareWrite,
+    /// `GET /api/v1/community/albums` : les agrégats d'un album (#6545).
+    CommunityAlbumsRead,
 }
 
 impl CloudScope {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::Telemetry,
         Self::InstanceHeartbeat,
         Self::BiosWrite,
@@ -62,6 +66,8 @@ impl CloudScope {
         Self::MetadataDecisionsWrite,
         Self::UserProfile,
         Self::ListensSync,
+        Self::CommunityShareWrite,
+        Self::CommunityAlbumsRead,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -81,6 +87,8 @@ impl CloudScope {
             Self::MetadataDecisionsWrite => "metadata_decisions_write",
             Self::UserProfile => "user_profile",
             Self::ListensSync => "listens_sync",
+            Self::CommunityShareWrite => "community_share_write",
+            Self::CommunityAlbumsRead => "community_albums_read",
         }
     }
 
