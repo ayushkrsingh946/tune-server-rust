@@ -124,7 +124,7 @@ pub(crate) fn livrets_des_dossiers(dossiers: &BTreeSet<PathBuf>) -> Vec<Livret> 
                 })
             })
             .collect();
-        ici.sort_by(|a, b| a.nom.to_lowercase().cmp(&b.nom.to_lowercase()));
+        ici.sort_by_key(|a| a.nom.to_lowercase());
         for l in ici {
             if vus.insert(l.nom.clone()) {
                 livrets.push(l);
