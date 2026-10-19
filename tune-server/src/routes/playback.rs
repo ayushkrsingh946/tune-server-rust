@@ -1939,6 +1939,9 @@ mod refus_de_format_3234 {
             assert_eq!(corps["code"], "spotify_playback_disabled");
             let message = corps["message"].as_str().unwrap_or_default();
             assert!(message.contains(phrase), "{lang} : {message}");
+            // #6396 — la phrase dit OÙ se trouve l'option : « dans les
+            // Réglages » laissait chercher (Lulu, fil 2288).
+            assert!(message.contains("> Spotify"), "{lang} : {message}");
         }
     }
 

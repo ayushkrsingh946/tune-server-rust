@@ -2982,17 +2982,17 @@
     "vi": "Ambient"
   },
   "spotify.playback.disabled": {
-    "fr": "Lecture Spotify non activée (option expérimentale dans les Réglages).",
-    "en": "Spotify playback is not enabled (experimental option in Settings).",
-    "de": "Spotify-Wiedergabe ist nicht aktiviert (experimentelle Option in den Einstellungen).",
-    "es": "La reproducción de Spotify no está activada (opción experimental en Ajustes).",
-    "it": "La riproduzione Spotify non è attivata (opzione sperimentale nelle Impostazioni).",
-    "zh": "Spotify 播放未启用（设置中的实验性选项）。",
-    "ja": "Spotify の再生は有効になっていません（設定の試験的オプション）。",
-    "ko": "Spotify 재생이 활성화되지 않았습니다(설정의 실험적 옵션).",
-    "ro": "Redarea Spotify nu este activată (opțiune experimentală în Setări).",
-    "sv": "Spotify-uppspelning är inte aktiverad (experimentellt alternativ i Inställningar).",
-    "hu": "A Spotify-lejátszás nincs engedélyezve (kísérleti beállítás a Beállításokban).",
-    "vi": "Chưa bật phát Spotify (tùy chọn thử nghiệm trong Cài đặt)."
+    "fr": "Lecture Spotify non activée : l'option expérimentale se trouve dans Réglages > Spotify > « Lecture Spotify (expérimental) ».",
+    "en": "Spotify playback is not enabled: the experimental option is in Settings > Spotify.",
+    "de": "Spotify-Wiedergabe ist nicht aktiviert: Die experimentelle Option befindet sich unter Einstellungen > Spotify.",
+    "es": "La reproducción de Spotify no está activada: la opción experimental está en Ajustes > Spotify.",
+    "it": "La riproduzione Spotify non è attivata: l'opzione sperimentale si trova in Impostazioni > Spotify.",
+    "zh": "Spotify 播放未启用：实验性选项位于 设置 > Spotify。",
+    "ja": "Spotify の再生は有効になっていません。試験的オプションは 設定 > Spotify にあります。",
+    "ko": "Spotify 재생이 활성화되지 않았습니다. 실험적 옵션은 설정 > Spotify에 있습니다.",
+    "ro": "Redarea Spotify nu este activată: opțiunea experimentală se află în Setări > Spotify.",
+    "sv": "Spotify-uppspelning är inte aktiverad: det experimentella alternativet finns under Inställningar > Spotify.",
+    "hu": "A Spotify-lejátszás nincs engedélyezve: a kísérleti beállítás a Beállítások > Spotify alatt található.",
+    "vi": "Chưa bật phát Spotify: tùy chọn thử nghiệm nằm trong Cài đặt > Spotify."
   }
 }
