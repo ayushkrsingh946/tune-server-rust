@@ -1318,6 +1318,18 @@ pub(super) async fn delete_zone(
                 etat_lecture = ?lecture,
                 "zone_deleted_by_user"
             );
+            // #6299 — l'utilisateur a supprimé la zone d'un renderer DLNA
+            // découvert : on cesse de le re-sonder à chaque démarrage. C'est le
+            // seul geste qui reste pour un appareil parti du réseau, que
+            // Réglages › Appareils ne liste plus. S'il est toujours là, le
+            // SSDP le réannonce.
+            if let Some(appareil) = visee
+                .as_ref()
+                .filter(|z| z.output_type.as_deref() == Some("dlna"))
+                .and_then(|z| z.output_device_id.as_deref())
+            {
+                crate::routes::devices::forget_discovered_dlna(&state.backend, appareil);
+            }
             state.event_bus.emit_typed(
                 tune_core::event_types::EventType::ZoneDeleted,
                 json!({"id": id}),

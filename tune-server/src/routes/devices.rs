@@ -811,6 +811,15 @@ fn load_discovered_dlna(backend: &Arc<dyn DbBackend>) -> Vec<DiscoveredDlnaDevic
     }
 }
 
+/// Les UDN du magasin des DLNA decouverts, pour les bancs d'autres modules.
+#[cfg(test)]
+pub(crate) fn uuids_dlna_decouverts(backend: &Arc<dyn DbBackend>) -> Vec<String> {
+    load_discovered_dlna(backend)
+        .into_iter()
+        .map(|d| d.uuid)
+        .collect()
+}
+
 fn save_discovered_dlna(backend: &Arc<dyn DbBackend>, devices: &[DiscoveredDlnaDevice]) {
     let repo = SettingsRepo::with_backend(backend.clone());
     match serde_json::to_string(devices) {
@@ -1006,7 +1015,12 @@ fn dedup_dlna_by_location(devices: Vec<DiscoveredDlnaDevice>) -> Vec<DiscoveredD
 }
 
 /// Retire un appareil du magasin des DLNA decouverts.
-fn forget_discovered_dlna(backend: &Arc<dyn DbBackend>, uuid: &str) {
+///
+/// #6299 — aussi appele par les gestes d'oubli de l'utilisateur
+/// (`DELETE /devices/{id}`, `POST /devices/clear`, suppression de la zone
+/// liee) : sans cela, un renderer parti du reseau etait re-sonde a chaque
+/// demarrage, sans fin, et aucun geste ne l'arretait.
+pub(crate) fn forget_discovered_dlna(backend: &Arc<dyn DbBackend>, uuid: &str) {
     let mut devices = load_discovered_dlna(backend);
     let before = devices.len();
     devices.retain(|d| d.uuid != uuid);
@@ -1761,6 +1775,13 @@ async fn clear_devices(State(state): State<AppState>) -> impl IntoResponse {
     }
     // Forget all persisted manual devices too, so a clear is durable.
     save_manual_devices(&state, &[]);
+    // #6299 — et les DLNA decouverts : sans quoi chacun, meme parti du reseau,
+    // est re-sonde au prochain demarrage. Ceux qui sont la reviennent par SSDP.
+    let oublies = load_discovered_dlna(&state.backend).len();
+    if oublies > 0 {
+        save_discovered_dlna(&state.backend, &[]);
+        info!(count = oublies, "discovered_dlna_forgotten_by_clear");
+    }
     Json(json!({"cleared": removed}))
 }
 
@@ -1773,6 +1794,9 @@ async fn delete_device(
     drop(outputs);
     // Also drop it from persistence so it isn't re-registered on next startup.
     forget_manual_device(&state, &device_id);
+    // #6299 — un renderer DLNA decouvert aussi : il etait re-sonde a chaque
+    // demarrage, meme parti du reseau.
+    forget_discovered_dlna(&state.backend, &device_id);
     state.event_bus.emit_typed(
         tune_core::event_types::EventType::DeviceLost,
         json!({ "device_id": device_id }),
@@ -3132,6 +3156,62 @@ mod liste_appareils_ignores_1280 {
         assert_eq!(
             items[0].get("name").and_then(Value::as_str),
             Some("Cabasse Pearl Akoya")
+        );
+    }
+}
+
+/// #6299 — un renderer DLNA decouvert puis parti du reseau etait re-sonde a
+/// chaque demarrage, sans fin : `DELETE /devices/{id}` et `POST /devices/clear`
+/// n'oubliaient que les appareils manuels.
+#[cfg(test)]
+mod oubli_des_dlna_decouverts_6299 {
+    use super::*;
+
+    const PARTI: &str = "uuid:4d696e69-444c-164e-9d41-b827eb4c0a0b";
+    const RESTANT: &str = "uuid:56fcb4ae-e909-1c8d-0080-0006787c2e26";
+
+    fn banc() -> (tempfile::TempDir, AppState) {
+        let dossier = tempfile::tempdir().unwrap();
+        let chemin = dossier.path().join("tune.db");
+        let state = AppState::new(chemin.to_str().unwrap(), 0, Default::default()).unwrap();
+        for (uuid, hote) in [(PARTI, "192.168.1.40"), (RESTANT, "192.168.1.11")] {
+            persist_discovered_dlna(
+                &state.backend,
+                &DiscoveredDlnaDevice::new(
+                    uuid,
+                    &format!("http://{hote}:8019/root.xml"),
+                    "Renderer",
+                    hote,
+                    8019,
+                ),
+            );
+        }
+        assert_eq!(uuids_dlna_decouverts(&state.backend).len(), 2, "premisse");
+        (dossier, state)
+    }
+
+    #[tokio::test]
+    async fn supprimer_l_appareil_l_oublie_du_magasin_des_decouverts() {
+        let (_dossier, state) = banc();
+        let statut = delete_device(State(state.clone()), Path(PARTI.to_string()))
+            .await
+            .into_response()
+            .status();
+        assert_eq!(statut, StatusCode::NO_CONTENT);
+        assert_eq!(
+            uuids_dlna_decouverts(&state.backend),
+            vec![RESTANT.to_string()],
+            "le renderer supprime ne doit plus etre re-sonde au demarrage"
+        );
+    }
+
+    #[tokio::test]
+    async fn tout_effacer_vide_aussi_le_magasin_des_decouverts() {
+        let (_dossier, state) = banc();
+        let _ = clear_devices(State(state.clone())).await.into_response();
+        assert!(
+            uuids_dlna_decouverts(&state.backend).is_empty(),
+            "apres « effacer », aucun renderer decouvert ne doit rester a re-sonder"
         );
     }
 }
