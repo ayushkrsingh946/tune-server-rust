@@ -111,6 +111,20 @@
     "hu": "Tune Circle — megosztás meghívott hozzátartozókkal. Ingyenes; a távoli hallgatás Premium.",
     "vi": "Tune Circle — chia sẻ với người thân được mời. Miễn phí; nghe từ xa là tính năng Premium."
   },
+  "plugin.description.assistant-ia": {
+    "fr": "Playlists intelligentes décrites en une phrase et suggestions d'enrichissement des albums, avec votre propre clé (Anthropic, compatible OpenAI, Gemini, Ollama)",
+    "en": "Smart playlists described in one sentence and album enrichment suggestions, with your own key (Anthropic, OpenAI-compatible, Gemini, Ollama)",
+    "de": "Intelligente Playlists in einem Satz beschrieben und Vorschläge zur Anreicherung von Alben, mit Ihrem eigenen Schlüssel (Anthropic, OpenAI-kompatibel, Gemini, Ollama)",
+    "es": "Listas inteligentes descritas en una frase y sugerencias para enriquecer los álbumes, con su propia clave (Anthropic, compatible con OpenAI, Gemini, Ollama)",
+    "it": "Playlist intelligenti descritte in una frase e suggerimenti per arricchire gli album, con la tua chiave (Anthropic, compatibile OpenAI, Gemini, Ollama)",
+    "zh": "用一句话描述的智能播放列表与专辑信息补全建议，使用您自己的密钥（Anthropic、兼容 OpenAI、Gemini、Ollama）",
+    "ja": "一文で説明するスマートプレイリストとアルバム情報の補完提案。ご自身のキーを使用（Anthropic、OpenAI 互換、Gemini、Ollama）",
+    "ko": "한 문장으로 설명하는 스마트 재생목록과 앨범 정보 보강 제안. 본인의 키 사용(Anthropic, OpenAI 호환, Gemini, Ollama)",
+    "ro": "Liste inteligente descrise într-o frază și sugestii de îmbogățire a albumelor, cu propria cheie (Anthropic, compatibil OpenAI, Gemini, Ollama)",
+    "sv": "Smarta spellistor beskrivna i en mening och förslag för att berika album, med din egen nyckel (Anthropic, OpenAI-kompatibel, Gemini, Ollama)",
+    "hu": "Egy mondatban leírt intelligens lejátszási listák és albumkiegészítési javaslatok, a saját kulcsával (Anthropic, OpenAI-kompatibilis, Gemini, Ollama)",
+    "vi": "Danh sách phát thông minh mô tả bằng một câu và gợi ý làm giàu thông tin album, với khóa của riêng bạn (Anthropic, tương thích OpenAI, Gemini, Ollama)"
+  },
   "plugin.description.entree-audio": {
     "fr": "Capter une entrée audio (USB, S/PDIF, optique) et la diffuser en direct vers une zone",
     "en": "Capture an audio input (USB, S/PDIF, optical) and stream it live to a zone",
