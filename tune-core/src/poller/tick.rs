@@ -444,6 +444,17 @@ impl PositionPoller {
                     ) {
                         ps.last_radio_poll = Instant::now();
                         self.refresh_radio_metadata(zone_id, zone_state).await;
+                    } else if decisions::relais_radio_du(
+                        zone_state.state == PlayState::Playing,
+                        zone_state.now_playing.as_ref().map(|np| np.source.as_str()),
+                        crate::radio_metadata_relais::zone_a_relire(
+                            zone_id,
+                            crate::radio_metadata_relais::periode_client(),
+                        ),
+                    ) {
+                        // #6516 — station suivie par radio-metadata.fr : le
+                        // relais se relit à sa propre cadence (5 s par défaut).
+                        self.refresh_radio_metadata(zone_id, zone_state).await;
                     }
 
                     // Zone navigateur : l'annonce « en écoute » que le
@@ -668,6 +679,20 @@ impl PositionPoller {
                 if contrat_radio_locale_6233::contrat_relu_entre_deux_sondages_radio(&device_id) {
                     self.relire_le_contrat_local_entre_deux_sondages_radio(zone_id, &device_id, ps)
                         .await;
+                }
+                // #6516 — entre deux sondages du renderer, une station suivie
+                // par radio-metadata.fr relit son titre sur le relais, à la
+                // cadence du relais. Aucun appel SOAP : le renderer garde le
+                // rythme de 15 s qui le ménage.
+                if decisions::relais_radio_du(
+                    zone_state.state == PlayState::Playing,
+                    zone_state.now_playing.as_ref().map(|np| np.source.as_str()),
+                    crate::radio_metadata_relais::zone_a_relire(
+                        zone_id,
+                        crate::radio_metadata_relais::periode_client(),
+                    ),
+                ) {
+                    self.refresh_radio_metadata(zone_id, zone_state).await;
                 }
                 continue;
             }

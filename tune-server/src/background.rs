@@ -2607,14 +2607,20 @@ fn spawn_radio_logo_refresh(state: &AppState) {
                 annuaire_injoignable = bilan.annuaire_injoignable,
                 "radio_logos_backfilled_at_startup"
             );
-            if !bilan.annuaire_injoignable {
-                return;
-            }
-            let Some(secs) = delais.next() else {
-                tracing::warn!("radio_logos_directory_unreachable_giving_up");
-                return;
+            // #6516 — l'annuaire se relève CHAQUE JOUR (cache local, `ETag`).
+            // Relevé réussi : rendez-vous dans 24 h. Échec : les relances
+            // rapprochées d'avant, puis le rythme quotidien — une panne ne
+            // fait plus abandonner le relevé pour toute la vie du serveur.
+            let attente = if bilan.annuaire_a_jour {
+                delais = RATTRAPAGE_LOGOS_DELAIS_SECS.iter();
+                crate::routes::radios_annuaire::PERIODE_DE_RELEVE
+            } else if let Some(secs) = delais.next() {
+                std::time::Duration::from_secs(*secs)
+            } else {
+                tracing::warn!("radio_logos_directory_unreachable_retry_tomorrow");
+                crate::routes::radios_annuaire::PERIODE_DE_RELEVE
             };
-            tokio::time::sleep(std::time::Duration::from_secs(*secs)).await;
+            tokio::time::sleep(attente).await;
         }
     });
 }

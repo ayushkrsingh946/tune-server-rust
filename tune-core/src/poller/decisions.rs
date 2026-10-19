@@ -1264,6 +1264,16 @@ pub fn deviceless_radio_refresh_due(
     is_playing && source == Some("radio") && radio_poll_due(since_last_poll, interval_secs)
 }
 
+/// Faut-il relire le titre d'une radio sur le relais radio-metadata (#6516) ?
+///
+/// La zone joue, la source est une radio, et le relais a servi son dernier
+/// titre il y a au moins une période (`zone_a_relire`). Une zone dont le
+/// titre vient du diffuseur ou de l'ICY n'est jamais « à relire » : elle
+/// garde le rythme du sondeur.
+pub fn relais_radio_du(is_playing: bool, source: Option<&str>, zone_a_relire: bool) -> bool {
+    is_playing && source == Some("radio") && zone_a_relire
+}
+
 /// Une lecture sans destination doit-elle cesser d'être annoncée ?
 ///
 /// Une zone sans périphérique de sortie prépare son flux, renonce à
