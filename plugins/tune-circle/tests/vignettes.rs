@@ -8,7 +8,6 @@
 mod commun;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -22,6 +21,7 @@ use tune_circle::vignettes::{self, Vignettes};
 use tune_core::cloud::library_sync::{CLE_JETON_DE_LIAISON, CLE_PARTAGE_DE_CERCLE};
 use tune_core::db::backend::DbBackend;
 use tune_core::db::settings_repo::SettingsRepo;
+use tune_core::test_scratch::{ScratchDir, scratch_dir};
 
 use commun::{JETON, appel, appel_avec_entetes, base};
 
@@ -200,17 +200,10 @@ fn jpeg_avec_exif(l: u32, h: u32, c: u8) -> Vec<u8> {
     o
 }
 
-fn dossier_de_pochettes() -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "tune-circle-vignettes-6521-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// Le cache de pochettes d'un essai : un dossier à lui, supprimé à la fin de
+/// l'essai, panique comprise (`tune_core::test_scratch`, garde #3030).
+fn dossier_de_pochettes() -> ScratchDir {
+    scratch_dir("tune-circle-vignettes-6521")
 }
 
 fn condensat(n: u32) -> String {
