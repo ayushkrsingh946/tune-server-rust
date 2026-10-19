@@ -91,9 +91,16 @@ fn regle_armee_non_appliquee_faute_de_voies_le_dit_6230() {
     assert!(
         zone_reaffectation_ignoree(&state.backend, 7, "local", None, Some(&reel(4, 6))).is_none()
     );
-    // Une source 5.1 n'est pas concernée par une règle 4.0 : pas de bruit.
+    // #6451 — une piste multicanale qui n'a pas les canaux d'entrée de la
+    // grille (un 5.1 sous une grille 4.0) : la règle ne s'applique pas, et
+    // ça se dit aussi.
+    let etape = zone_reaffectation_ignoree(&state.backend, 7, "local", None, Some(&reel(6, 6)))
+        .expect("une piste 5.1 sous une grille 4 → 6 doit se dire");
+    assert!(etape.contains("4 → 6"), "{etape}");
+    assert!(etape.contains("la piste a 6 canaux"), "{etape}");
+    // Une piste stéréo sous une règle de zone multicanale : pas de bruit.
     assert!(
-        zone_reaffectation_ignoree(&state.backend, 7, "local", None, Some(&reel(6, 6))).is_none()
+        zone_reaffectation_ignoree(&state.backend, 7, "local", None, Some(&reel(2, 2))).is_none()
     );
     // Sortie réseau, ou sortie qui n'a rien déclaré : rien.
     assert!(

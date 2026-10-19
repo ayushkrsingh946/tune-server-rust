@@ -585,15 +585,19 @@ pub(super) fn zone_reaffectation_step_lang(
 
 /// #6230 — la règle armée que l'étage local n'applique PAS, et pourquoi.
 ///
-/// L'étage n'applique une matrice que si elle produit exactement le nombre de
-/// voies que la sortie a ouvertes ([`zone_reaffectation_step_lang`] tait
-/// alors l'étape, à juste titre). Mais une grille 6 → 2 armée sur un 5.1
-/// ouvert en 6 voies restait ignorée **sans aucun signe** : l'utilisateur
-/// voyait ses six canaux sortir et cherchait la panne ailleurs (Didier,
-/// fil 2202). Seul ce cas se dit : la règle part bien des canaux de la
-/// source, et c'est le nombre de voies ouvertes qui ne correspond pas. Une
-/// règle de zone pour du 4.0 sur une piste stéréo ne concerne pas la piste
-/// et ne s'annonce pas.
+/// L'étage n'applique une matrice que si elle part exactement des canaux de
+/// la source et produit exactement les voies que la sortie a ouvertes
+/// ([`zone_reaffectation_step_lang`] tait alors l'étape, à juste titre). Hors
+/// de là, la règle restait ignorée **sans aucun signe** : une grille 6 → 2
+/// sur un 5.1 ouvert en 6 voies, ou une grille 8 → 8 sur un 5.1 (#6451, DSD
+/// multicanal converti en PCM), et l'utilisateur voyait tous ses canaux
+/// sortir sans savoir pourquoi (Didier, fil 2202).
+///
+/// Deux raisons se disent :
+/// - les voies ouvertes ne sont pas les sorties de la matrice ;
+/// - la piste n'a pas le nombre de canaux d'entrée de la matrice, quand la
+///   règle est celle de l'album ou que la piste est multicanale. Une règle de
+///   zone pour du multicanal ne s'annonce pas sur chaque piste stéréo.
 pub(super) fn zone_reaffectation_ignoree_lang(
     lang: &str,
     backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
@@ -611,14 +615,23 @@ pub(super) fn zone_reaffectation_ignoree_lang(
         .map(|tid| rc::album_et_canaux_de_la_piste(backend, tid))
         .unwrap_or((None, None));
     let canaux_source = reel.entree().canaux();
-    let regle = rc::regle_effective_with(backend, zone_id, album_id, Some(canaux_source))?;
     let ouvertes = reel.ouvert().canaux;
-    if ouvertes == regle.matrice.sorties() {
-        return None;
-    }
+    let (regle, cle, compte) =
+        match rc::regle_effective_with(backend, zone_id, album_id, Some(canaux_source)) {
+            Some(regle) if ouvertes == regle.matrice.sorties() => return None,
+            Some(regle) => (regle, "matrix_not_applied", ouvertes),
+            None => {
+                let regle = rc::regle_effective_with(backend, zone_id, album_id, None)?;
+                let concerne = regle.origine == rc::Origine::Album || canaux_source > 2;
+                if regle.matrice.entrees() == canaux_source || !concerne {
+                    return None;
+                }
+                (regle, "matrix_not_applied_inputs", canaux_source)
+            }
+        };
     Some(fs(
         lang,
-        "matrix_not_applied",
+        cle,
         &[
             &regle.reglage.inputs.to_string(),
             &regle.reglage.outputs.to_string(),
@@ -629,7 +642,7 @@ pub(super) fn zone_reaffectation_ignoree_lang(
                     rc::Origine::Zone => "rule_zone",
                 },
             ),
-            &ouvertes.to_string(),
+            &compte.to_string(),
         ],
     ))
 }
