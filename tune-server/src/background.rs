@@ -3161,7 +3161,7 @@ pub(crate) async fn appliquer_le_parc_local(
             // machine disparaissait sur un périphérique que personne n'avait
             // demandé en exclusif (jfpaquet, Asus Essence STX II).
             let statut_exclusif = tune_core::config::local_exclusive_mode_du_peripherique(
-                &configured_backend,
+                configured_backend,
                 Some(dev.backend.as_str()),
                 state.requested_exclusive_mode(),
                 // #5353 — le `true` écrit par le choix d'ASIO n'est pas une
@@ -3172,7 +3172,7 @@ pub(crate) async fn appliquer_le_parc_local(
                 dev.name.clone(),
                 (!dev.endpoint_id.is_empty()).then(|| dev.endpoint_id.clone()),
                 statut_exclusif.effective,
-                &configured_backend,
+                configured_backend,
             )
             .with_origin_host(&dev.backend);
             outputs.register(Box::new(local_out));
