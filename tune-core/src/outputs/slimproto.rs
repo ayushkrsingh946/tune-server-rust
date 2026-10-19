@@ -15,8 +15,8 @@ use tokio::sync::Mutex;
 
 use super::traits::{OutputCapabilities, OutputStatus, OutputTarget, PlayMedia, TransportState};
 use crate::slimproto::{
-    CommandChannels, FormatStrm, PlayerRegistry, ServerMessage, SlimProtoPlayback,
-    build_strm_start, lock_playback, new_playback_state, strm_control,
+    CommandChannels, FluxServi, PlayerRegistry, ServerMessage, SlimProtoPlayback, build_strm_start,
+    lock_playback, new_playback_state, strm_control,
 };
 
 #[derive(Debug, Default)]
@@ -145,32 +145,39 @@ impl OutputTarget for SlimProtoOutput {
     async fn play_media(&self, media: &PlayMedia<'_>) -> Result<(), String> {
         let (port, path) = parse_stream_url(media.url)
             .ok_or_else(|| format!("slimproto: unparseable stream url {}", media.url))?;
-        // #6475 — annoncer le codec réellement servi : un WAV annoncé FLAC
-        // reste muet sur Squeezelite. Un flux qu'on ne sait pas nommer garde
-        // l'ancienne annonce FLAC, mais le journal le dit.
-        let format = FormatStrm::pour_le_flux(
-            media.mime_type,
-            media.url,
-            media.sample_rate,
-            media.bit_depth,
-            media.channels,
-        )
-        .unwrap_or_else(|| {
+        // #6475 — annoncer le codec réellement servi, et pour un WAV/AIFF ses
+        // vrais paramètres et la seule tranche des échantillons. Ce qu'on ne
+        // sait pas annoncer avec certitude est refusé : un WAV annoncé FLAC
+        // reste muet, un en-tête joué comme du son est du bruit.
+        let annonce = crate::slimproto::annonce_pour(&FluxServi {
+            mime_type: media.mime_type,
+            url: media.url,
+            sample_rate: media.sample_rate,
+            bit_depth: media.bit_depth,
+            channels: media.channels,
+            file_path: media.file_path,
+            file_size: media.file_size,
+        })
+        .map_err(|motif| {
             tracing::warn!(
                 device_id = %self.device_id,
                 mime = media.mime_type,
                 url = media.url,
-                "slimproto_format_inconnu_annonce_flac"
+                %motif,
+                "slimproto_flux_refuse"
             );
-            FormatStrm::FLAC
-        });
+            format!("slimproto : ce flux ne peut pas être annoncé au lecteur ({motif})")
+        })?;
+        let format = annonce.format;
         tracing::info!(
             device_id = %self.device_id,
             mime = media.mime_type,
             codec = %char::from(format.codec),
+            pcm = %String::from_utf8_lossy(&[format.taille, format.frequence, format.canaux, format.boutisme]),
+            tranche = ?annonce.tranche,
             "slimproto_strm_s_format"
         );
-        self.send(build_strm_start(port, &path, format)).await?;
+        self.send(build_strm_start(port, &path, annonce)).await?;
         {
             let mut current = self.current_media.lock().await;
             current.uri = Some(media.url.to_string());
@@ -411,112 +418,158 @@ mod tests {
         (output, rx)
     }
 
-    /// Les six premiers octets d'un `strm s` : autostart, codec, puis
-    /// taille, fréquence, canaux, boutisme.
-    fn entete_strm_s(msg: ServerMessage) -> [u8; 6] {
+    /// Le `strm s` reçu : les six premiers octets (autostart, codec, taille,
+    /// fréquence, canaux, boutisme) et la requête HTTP qui le termine.
+    fn strm_s(msg: ServerMessage) -> ([u8; 6], String) {
         match msg {
             ServerMessage::Strm { command, payload } => {
                 assert_eq!(command, b's', "une lecture part en strm s");
-                payload[..6].try_into().unwrap()
+                (
+                    payload[..6].try_into().unwrap(),
+                    String::from_utf8_lossy(&payload[23..]).into_owned(),
+                )
             }
             other => panic!("strm s attendu, reçu {other:?}"),
         }
     }
 
-    /// #6475 (fil 2322) — LE défaut : une piste WAV locale (44,1 kHz,
-    /// 16 bits, stéréo) était annoncée `f` (FLAC) à Squeezelite, qui rejetait
-    /// chaque trame : 59,8 Mo aspirés, position figée à 0. Elle doit partir
-    /// en `p` (PCM) avec ses paramètres, petit-boutiste comme tout WAV.
+    /// Un WAV canonique : 44 octets d'en-tête puis `n` trames de silence.
+    fn wav(canaux: u16, frequence: u32, bits: u16, trames: usize) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let align = canaux * bits / 8;
+        let donnees = trames * usize::from(align);
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&(36 + donnees as u32).to_le_bytes());
+        v.extend_from_slice(b"WAVEfmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&canaux.to_le_bytes());
+        v.extend_from_slice(&frequence.to_le_bytes());
+        v.extend_from_slice(&(frequence * u32::from(align)).to_le_bytes());
+        v.extend_from_slice(&align.to_le_bytes());
+        v.extend_from_slice(&bits.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&(donnees as u32).to_le_bytes());
+        v.resize(44 + donnees, 0);
+        let mut f = tempfile::Builder::new().suffix(".wav").tempfile().unwrap();
+        f.write_all(&v).unwrap();
+        f
+    }
+
+    /// #6475 (fil 2322) — LE défaut : une piste WAV locale était annoncée `f`
+    /// (FLAC), et Squeezelite rejetait chaque trame. Elle part en `p` avec
+    /// les paramètres de SON en-tête, et la requête ne demande que les
+    /// échantillons : Squeezelite ne saute jamais l'en-tête d'un flux HTTP.
     #[tokio::test]
-    async fn une_piste_wav_part_en_pcm_et_non_en_flac() {
+    async fn une_piste_wav_part_en_pcm_sans_son_en_tete() {
         let (output, mut rx) = sortie_de_banc().await;
+        let fichier = wav(2, 96_000, 24, 100);
+        let chemin = fichier.path().to_str().unwrap().to_string();
         output
             .play_media(&PlayMedia {
                 url: "http://192.168.1.10:8888/stream/35e7a2df.wav",
                 mime_type: "audio/wav",
+                // Le média dit 44,1/16 : c'est l'en-tête du fichier qui fait foi.
                 sample_rate: Some(44_100),
                 bit_depth: Some(16),
                 channels: Some(2),
+                file_path: Some(&chemin),
+                file_size: Some(44 + 600),
                 ..PlayMedia::default()
             })
             .await
             .unwrap();
-        let entete = entete_strm_s(rx.recv().await.expect("strm s"));
+        let (entete, requete) = strm_s(rx.recv().await.expect("strm s"));
         assert_eq!(
             entete,
-            [b'1', b'p', b'1', b'3', b'2', b'1'],
-            "WAV 44,1/16 stéréo : codec p, taille '1' (16 bits), fréquence '3' \
-             (44 100), 2 canaux, petit-boutiste '1'"
+            [b'1', b'p', b'2', b'9', b'2', b'1'],
+            "WAV 96/24 stéréo : codec p, taille '2' (24 bits), fréquence '9' \
+             (96 000), 2 canaux, petit-boutiste '1'"
+        );
+        assert_eq!(
+            requete, "GET /stream/35e7a2df.wav HTTP/1.0\r\nRange: bytes=44-643\r\n\r\n",
+            "la requête ne demande que les 600 octets d'échantillons"
         );
     }
 
-    /// Le codec annoncé suit le flux servi, pour chaque format que Squeezelite
-    /// sait décoder ; le FLAC garde son annonce d'avant.
+    /// Un WAV fabriqué par Tune (DSP, conversion) n'est pas le fichier source :
+    /// rien ne dit son en-tête. Refusé, jamais annoncé au hasard.
+    #[tokio::test]
+    async fn un_wav_qui_n_est_pas_le_fichier_source_est_refuse() {
+        let (output, mut rx) = sortie_de_banc().await;
+        let fichier = wav(2, 44_100, 16, 10);
+        let chemin = fichier.path().to_str().unwrap().to_string();
+        for (file_path, file_size) in [
+            (None, Some(84)),
+            (Some(chemin.as_str()), None),
+            (Some(chemin.as_str()), Some(9_999)),
+        ] {
+            let refus = output
+                .play_media(&PlayMedia {
+                    url: "http://192.168.1.10:8888/stream/dsp.wav",
+                    mime_type: "audio/wav",
+                    sample_rate: Some(44_100),
+                    bit_depth: Some(16),
+                    channels: Some(2),
+                    file_path,
+                    file_size,
+                    ..PlayMedia::default()
+                })
+                .await;
+            assert!(refus.is_err(), "{file_path:?} / {file_size:?}");
+        }
+        assert!(rx.try_recv().is_err(), "aucun strm s n'est parti");
+    }
+
+    /// Les codecs compressés gardent `'?'` (comme LMS) et le flux entier.
     #[test]
     fn le_codec_annonce_suit_le_format_servi() {
-        let f = |mime: &str, url: &str, sr, bd, ch| FormatStrm::pour_le_flux(mime, url, sr, bd, ch);
-        let codec = |m: &str, url: &str| f(m, url, None, None, None).map(|x| x.codec);
-        assert_eq!(
-            f("audio/flac", "", Some(96_000), Some(24), Some(2)),
-            Some(FormatStrm::FLAC)
-        );
-        assert_eq!(codec("audio/mpeg", ""), Some(b'm'));
-        assert_eq!(codec("audio/ogg", ""), Some(b'o'));
-        assert_eq!(codec("audio/opus", ""), Some(b'u'));
-        assert_eq!(codec("audio/aac", ""), Some(b'a'));
-        assert_eq!(codec("application/x-dsd", ""), Some(b'd'));
-        assert_eq!(codec("audio/x-dsf", ""), Some(b'd'));
-        assert_eq!(codec("audio/x-ms-wma", ""), Some(b'w'));
-        // MP4 : une profondeur désigne l'ALAC, son absence l'AAC.
-        assert_eq!(
-            f("audio/mp4", "", Some(44_100), Some(16), Some(2)).map(|x| x.codec),
-            Some(b'l')
-        );
-        assert_eq!(codec("audio/mp4", ""), Some(b'a'));
-        // AIFF : PCM gros-boutiste, 24 bits / 96 kHz.
-        assert_eq!(
-            f("audio/aiff", "", Some(96_000), Some(24), Some(2)),
-            Some(FormatStrm {
-                codec: b'p',
-                taille: b'2',
-                frequence: b'9',
-                canaux: b'2',
-                boutisme: b'0'
+        let codec = |mime: &str, url: &str, bd: Option<u32>| {
+            crate::slimproto::annonce_pour(&FluxServi {
+                mime_type: mime,
+                url,
+                bit_depth: bd,
+                ..FluxServi::default()
             })
-        );
-        // audio/L16 porte ses paramètres dans le MIME.
+            .map(|a| (a.format.codec, a.format.taille, a.tranche))
+        };
+        assert_eq!(codec("audio/flac", "", None), Ok((b'f', b'?', None)));
+        assert_eq!(codec("audio/mpeg", "", None), Ok((b'm', b'?', None)));
+        assert_eq!(codec("audio/ogg", "", None), Ok((b'o', b'?', None)));
+        assert_eq!(codec("audio/opus", "", None), Ok((b'u', b'?', None)));
+        assert_eq!(codec("audio/aac", "", None), Ok((b'a', b'?', None)));
+        assert_eq!(codec("application/x-dsd", "", None), Ok((b'd', b'?', None)));
+        assert_eq!(codec("audio/x-ms-wma", "", None), Ok((b'w', b'?', None)));
+        assert_eq!(codec("audio/mp4", "", Some(16)), Ok((b'l', b'?', None)));
+        assert_eq!(codec("audio/mp4", "", None), Ok((b'a', b'?', None)));
         assert_eq!(
-            f("audio/L16;rate=48000;channels=2", "", None, None, None),
-            Some(FormatStrm {
-                codec: b'p',
-                taille: b'1',
-                frequence: b'4',
-                canaux: b'2',
-                boutisme: b'0'
+            codec("", "http://h:1/stream/x.mp3", None),
+            Ok((b'm', b'?', None))
+        );
+        assert!(codec("application/octet-stream", "http://h:1/stream/x", None).is_err());
+        // PCM brut sans en-tête : paramètres requis, aucun '?'.
+        let l16 = crate::slimproto::annonce_pour(&FluxServi {
+            mime_type: "audio/L16;rate=48000;channels=2",
+            ..FluxServi::default()
+        })
+        .unwrap();
+        assert_eq!(
+            [
+                l16.format.codec,
+                l16.format.taille,
+                l16.format.frequence,
+                l16.format.canaux,
+                l16.format.boutisme
+            ],
+            [b'p', b'1', b'4', b'2', b'0']
+        );
+        assert!(
+            crate::slimproto::annonce_pour(&FluxServi {
+                mime_type: "audio/L16",
+                ..FluxServi::default()
             })
-        );
-        // Paramètres inconnus : '?', Squeezelite lit l'en-tête RIFF.
-        assert_eq!(
-            f("audio/wav", "", None, None, None),
-            Some(FormatStrm {
-                codec: b'p',
-                taille: b'?',
-                frequence: b'?',
-                canaux: b'?',
-                boutisme: b'1'
-            })
-        );
-        // 176,4 kHz : rang 11 de la table, soit ';' (88,2 kHz est ':').
-        assert_eq!(
-            f("audio/wav", "", Some(176_400), Some(24), Some(2)).map(|x| x.frequence),
-            Some(b';')
-        );
-        // MIME absent : l'extension de l'URL du flux décide.
-        assert_eq!(codec("", "http://h:1/stream/x.wav?t=1"), Some(b'p'));
-        assert_eq!(codec("", "http://h:1/stream/x.mp3"), Some(b'm'));
-        assert_eq!(
-            codec("application/octet-stream", "http://h:1/stream/x"),
-            None
+            .is_err(),
+            "PCM brut sans fréquence : refusé"
         );
     }
 }
