@@ -19,6 +19,8 @@ pub struct RelayState {
     /// Vérificateur des billets d'écoute de Tune Circle (#5327), interrogé à
     /// CHAQUE requête de `/stream/circle/{ticket}`. Voir `crate::circle`.
     pub billets: std::sync::Arc<crate::circle::Billets>,
+    /// Octets, sessions et erreurs du pont (#6512). Voir `crate::trafic`.
+    pub trafic: Arc<crate::trafic::Trafic>,
     pub max_servers: usize,
     pub max_clients_per_server: usize,
     pub max_streams_per_server: usize,
@@ -31,6 +33,7 @@ impl RelayState {
             tokens: DashMap::new(),
             licences: crate::licence::Licences::depuis_environnement(),
             billets: crate::circle::Billets::depuis_environnement(),
+            trafic: crate::trafic::Trafic::nouveau(),
             max_servers: 100,
             max_clients_per_server: 10,
             max_streams_per_server: 5,
@@ -85,9 +88,11 @@ impl RelayState {
         }
 
         self.tokens.insert(bridge_token, server_id.clone());
+        let trafic = self.trafic.serveur(&server_id);
         self.servers.insert(
             server_id.clone(),
             ServerConnection {
+                trafic,
                 server_id,
                 server_name,
                 ws_tx,
@@ -117,7 +122,10 @@ pub struct ServerConnection {
     pub server_id: String,
     pub server_name: String,
     pub ws_tx: mpsc::Sender<String>,
-    pub pending: Arc<Mutex<HashMap<String, oneshot::Sender<PendingResponse>>>>,
+    /// Les compteurs de trafic de ce serveur (#6512), pris une fois ici pour
+    /// que le chemin chaud n'ait pas a les chercher.
+    pub trafic: Arc<crate::trafic::CompteursServeur>,
+    pub pending: Arc<Mutex<HashMap<String, Attente>>>,
     /// Puits des morceaux audio en vol, par identifiant de requete.
     ///
     /// Une reponse d'API se resout d'un coup : le `oneshot` de `pending`
@@ -128,11 +136,35 @@ pub struct ServerConnection {
     /// La carte vit dans la connexion : un serveur qui se deconnecte emporte
     /// ses puits, donc ferme les corps HTTP restes ouverts au lieu de les
     /// laisser pendre.
-    pub flux: Arc<Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
+    pub flux: Arc<Mutex<HashMap<String, Puits>>>,
     pub active_streams: AtomicU32,
     pub active_clients: AtomicU32,
     pub connected_at: Instant,
     pub last_heartbeat: Instant,
+}
+
+/// Une requete relayee qui attend la reponse du serveur.
+pub struct Attente {
+    pub tx: oneshot::Sender<PendingResponse>,
+    /// Ce que la reponse est, pour compter ses octets a l'arrivee (#6512).
+    pub categorie: crate::trafic::Categorie,
+}
+
+impl Attente {
+    pub fn nouvelle(
+        tx: oneshot::Sender<PendingResponse>,
+        categorie: crate::trafic::Categorie,
+    ) -> Self {
+        Self { tx, categorie }
+    }
+}
+
+/// Le puits d'un flux audio en vol.
+pub struct Puits {
+    pub envoi: mpsc::Sender<Vec<u8>>,
+    pub categorie: crate::trafic::Categorie,
+    /// Pose par `relay.stream_end` : la session s'est finie proprement.
+    pub fin_propre: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Corps d'une reponse relayee.
@@ -145,8 +177,9 @@ pub struct ServerConnection {
 pub enum CorpsRelaye {
     /// Corps complet, deja recu — en octets : une pochette n'est pas du texte.
     Entier(Option<Vec<u8>>),
-    /// Morceaux a venir, jusqu'a la fermeture du canal.
-    Morceaux(mpsc::Receiver<Vec<u8>>),
+    /// Morceaux a venir, jusqu'a la fermeture du canal. `fin_propre` passe a
+    /// vrai quand le serveur a annonce la fin (`relay.stream_end`).
+    Morceaux(mpsc::Receiver<Vec<u8>>, Arc<std::sync::atomic::AtomicBool>),
 }
 
 pub struct PendingResponse {
@@ -174,6 +207,7 @@ mod tests {
                 "http://cloud.invalide",
                 None,
             )),
+            trafic: crate::trafic::Trafic::nouveau(),
             max_servers,
             max_clients_per_server: 10,
             max_streams_per_server: 5,

@@ -6,6 +6,9 @@ mod protocol;
 mod relais_par_url_tests;
 mod state;
 mod stream_proxy;
+mod trafic;
+#[cfg(test)]
+mod trafic_tests;
 mod web_ui;
 mod ws_client;
 mod ws_server;
@@ -48,10 +51,25 @@ async fn main() {
             interval.tick().await;
             let ping = serde_json::json!({"type": "relay.ping"}).to_string();
             for conn in heartbeat_state.servers.iter() {
-                let _ = conn.ws_tx.send(ping.clone()).await;
+                if conn.ws_tx.send(ping.clone()).await.is_ok() {
+                    heartbeat_state
+                        .trafic
+                        .sortie(&conn.trafic, trafic::Categorie::Api, ping.len());
+                }
             }
         }
     });
+
+    // Trafic du pont (#6512) : agregats par minute, ENVOYES au site avec le
+    // jeton de service du relais. Pourquoi un envoi plutot qu'une route a
+    // interroger : le pont publie son port 9090 sur toutes les interfaces du
+    // VPS (docker-compose.bridge.yml) et le vhost bridge.mozaiklabs.fr le
+    // relaie tout entier. Une route de lecture y serait exposee a Internet,
+    // gardee par un seul secret. L'envoi n'ouvre AUCUNE route : il reutilise
+    // le chemin pont -> site et le jeton qui existent deja pour
+    // `listen/verify`, et le site le garde comme celle-ci (`auth.tune-bridge`).
+    // Les minutes non acceptees attendent 24 h au plus sur le pont.
+    tokio::spawn(trafic::boucle(state.trafic.clone()));
 
     let app = Router::new()
         .route("/health", get(health))

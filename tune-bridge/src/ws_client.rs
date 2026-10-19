@@ -10,6 +10,7 @@ use serde::Deserialize;
 use tracing::info;
 
 use crate::state::RelayState;
+use crate::trafic::Categorie;
 
 #[derive(Deserialize)]
 pub struct ClientQuery {
@@ -63,8 +64,16 @@ async fn handle_client_ws(socket: WebSocket, server_id: String, state: Arc<Relay
                         "type": "relay.client_message",
                         "client_id": client_id,
                         "message": text.to_string(),
-                    });
-                    let _ = conn.ws_tx.send(wrapped.to_string()).await;
+                    })
+                    .to_string();
+                    // Entre : la trame du navigateur ; sort : le message
+                    // vers le serveur (#6512).
+                    let compteurs = conn.trafic.clone();
+                    state.trafic.entree(&compteurs, Categorie::Api, text.len());
+                    let n = wrapped.len();
+                    if conn.ws_tx.send(wrapped).await.is_ok() {
+                        state.trafic.sortie(&compteurs, Categorie::Api, n);
+                    }
                 }
             }
             Some(Ok(Message::Ping(data))) => {

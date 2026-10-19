@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::protocol;
-use crate::state::{CorpsRelaye, RelayState};
+use crate::state::{CorpsRelaye, Puits, RelayState};
+use crate::trafic::{Categorie, Erreur};
 
 /// Prefixe des trames portant un morceau audio.
 ///
@@ -164,42 +165,53 @@ pub(crate) async fn handle_server_message(state: &RelayState, server_id: &str, t
     // n'est pas du JSON, donc `parse_message_type` rend `None` et la trame
     // etait jetee sans un mot. C'est par la que tout le son disparaissait.
     if let Some(reste) = text.strip_prefix(PREFIXE_MORCEAU) {
-        transmettre_morceau(state, server_id, reste).await;
+        transmettre_morceau(state, server_id, reste, text.len()).await;
         return;
     }
 
     let msg_type = match protocol::parse_message_type(text) {
         Some(t) => t,
-        None => return,
+        None => {
+            compter_entree(state, server_id, Categorie::Api, text.len());
+            return;
+        }
     };
 
     match msg_type.as_str() {
         "relay.pong" => {
+            compter_entree(state, server_id, Categorie::Api, text.len());
             if let Some(mut conn) = state.servers.get_mut(server_id) {
                 conn.last_heartbeat = Instant::now();
             }
         }
         "relay.response" => {
             if let Ok(resp) = serde_json::from_str::<protocol::RelayResponse>(text) {
-                resolve_pending(state, server_id, resp).await;
+                resolve_pending(state, server_id, resp, text.len()).await;
+            } else {
+                compter_entree(state, server_id, Categorie::Api, text.len());
             }
         }
         "relay.event" => {
+            compter_entree(state, server_id, Categorie::Api, text.len());
             // TODO Phase 1: forward to connected clients
         }
         "relay.stream_start" => {
             if let Ok(debut) = serde_json::from_str::<protocol::RelayStreamStart>(text) {
-                ouvrir_flux(state, server_id, debut).await;
+                ouvrir_flux(state, server_id, debut, text.len()).await;
             } else {
+                compter_entree(state, server_id, Categorie::Api, text.len());
                 warn!(server_id = %server_id, "relay.stream_start illisible");
             }
         }
         "relay.stream_end" => {
             if let Ok(fin) = serde_json::from_str::<protocol::RelayStreamEnd>(text) {
-                fermer_flux(state, server_id, &fin.id).await;
+                fermer_flux(state, server_id, &fin.id, text.len()).await;
+            } else {
+                compter_entree(state, server_id, Categorie::Api, text.len());
             }
         }
         _ => {
+            compter_entree(state, server_id, Categorie::Api, text.len());
             warn!(server_id = %server_id, msg_type = %msg_type, "unknown server message");
         }
     }
@@ -210,26 +222,46 @@ pub(crate) async fn handle_server_message(state: &RelayState, server_id: &str, t
 /// Aucune n'est emise a ce jour : les morceaux audio voyagent en trames texte
 /// prefixees `BINARY:` (voir `PREFIXE_MORCEAU`). L'arm existe pour ne pas
 /// fermer la connexion sur une trame inattendue.
-async fn handle_server_binary(_state: &RelayState, _server_id: &str, _data: &[u8]) {}
+async fn handle_server_binary(state: &RelayState, server_id: &str, data: &[u8]) {
+    compter_entree(state, server_id, Categorie::Api, data.len());
+}
+
+/// Octets entres sur le VPS, depuis ce serveur (#6512).
+fn compter_entree(state: &RelayState, server_id: &str, categorie: Categorie, n: usize) {
+    let compteurs = match state.servers.get(server_id) {
+        Some(conn) => conn.trafic.clone(),
+        None => return,
+    };
+    state.trafic.entree(&compteurs, categorie, n);
+}
 
 /// Debut d'un flux : on repond au navigateur, et on ouvre le puits.
 ///
 /// L'en-tete part tout de suite — c'est ce qui permet au lecteur de commencer
 /// a jouer avant la fin du fichier. Le corps suit, morceau par morceau.
-async fn ouvrir_flux(state: &RelayState, server_id: &str, debut: protocol::RelayStreamStart) {
-    let (pending, flux) = match state.servers.get(server_id) {
-        // Les deux `Arc` sont clones puis le garde de la DashMap est relache :
+async fn ouvrir_flux(
+    state: &RelayState,
+    server_id: &str,
+    debut: protocol::RelayStreamStart,
+    taille: usize,
+) {
+    let (pending, flux, compteurs) = match state.servers.get(server_id) {
+        // Les `Arc` sont clones puis le garde de la DashMap est relache :
         // garder un garde a travers un `await` sur la meme carte est le chemin
         // court vers l'interblocage.
-        Some(conn) => (conn.pending.clone(), conn.flux.clone()),
+        Some(conn) => (conn.pending.clone(), conn.flux.clone(), conn.trafic.clone()),
         None => return,
     };
 
-    let attendu = match pending.lock().await.remove(&debut.id) {
-        Some(tx) => tx,
+    let (attendu, categorie) = match pending.lock().await.remove(&debut.id) {
+        Some(a) => (a.tx, a.categorie),
         // Personne n'attend : requete abandonnee ou deja expiree.
-        None => return,
+        None => {
+            state.trafic.entree(&compteurs, Categorie::Audio, taille);
+            return;
+        }
     };
+    state.trafic.entree(&compteurs, categorie, taille);
 
     let mut headers = debut.headers;
     // `content_length` voyage dans son propre champ ; le navigateur, lui, le
@@ -244,6 +276,9 @@ async fn ouvrir_flux(state: &RelayState, server_id: &str, debut: protocol::Relay
     // `relay.stream_end` : lui ouvrir un puits laisserait le corps HTTP
     // pendre jusqu'a la deconnexion. On repond court, tout de suite.
     if debut.status >= 400 {
+        if debut.status >= 500 {
+            state.trafic.erreur(Erreur::Amont5xx);
+        }
         let _ = attendu.send(crate::state::PendingResponse {
             status: debut.status,
             headers,
@@ -253,13 +288,21 @@ async fn ouvrir_flux(state: &RelayState, server_id: &str, debut: protocol::Relay
     }
 
     let (envoi, reception) = mpsc::channel::<Vec<u8>>(MORCEAUX_EN_ATTENTE);
-    flux.lock().await.insert(debut.id.clone(), envoi);
+    let fin_propre = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    flux.lock().await.insert(
+        debut.id.clone(),
+        Puits {
+            envoi,
+            categorie,
+            fin_propre: fin_propre.clone(),
+        },
+    );
 
     if attendu
         .send(crate::state::PendingResponse {
             status: debut.status,
             headers,
-            body: CorpsRelaye::Morceaux(reception),
+            body: CorpsRelaye::Morceaux(reception, fin_propre),
         })
         .is_err()
     {
@@ -269,29 +312,37 @@ async fn ouvrir_flux(state: &RelayState, server_id: &str, debut: protocol::Relay
 }
 
 /// Un morceau audio, du serveur vers le corps HTTP qui l'attend.
-async fn transmettre_morceau(state: &RelayState, server_id: &str, reste: &str) {
+async fn transmettre_morceau(state: &RelayState, server_id: &str, reste: &str, taille: usize) {
+    let (flux, compteurs) = match state.servers.get(server_id) {
+        Some(conn) => (conn.flux.clone(), conn.trafic.clone()),
+        None => return,
+    };
     let Some((id, encode)) = reste.split_once(':') else {
+        state.trafic.entree(&compteurs, Categorie::Audio, taille);
         warn!(server_id = %server_id, "morceau sans identifiant");
         return;
-    };
-    let Some(octets) = decoder_base64(encode) else {
-        // Un morceau illisible n'est pas transmis : mieux vaut un trou franc
-        // qu'un octet invente au milieu du son.
-        warn!(server_id = %server_id, id, "morceau base64 illisible");
-        return;
-    };
-
-    let flux = match state.servers.get(server_id) {
-        Some(conn) => conn.flux.clone(),
-        None => return,
     };
 
     // Le `Sender` est clone hors du verrou : `send` attend quand le canal est
     // plein (contre-pression voulue), et attendre le verrou en main bloquerait
     // tous les autres flux du meme serveur.
-    let envoi = match flux.lock().await.get(id) {
-        Some(tx) => tx.clone(),
-        None => return,
+    let puits = flux
+        .lock()
+        .await
+        .get(id)
+        .map(|p| (p.envoi.clone(), p.categorie));
+    // La trame est entree sur le VPS, qu'elle serve ou non : elle compte.
+    let categorie = puits.as_ref().map_or(Categorie::Audio, |(_, c)| *c);
+    state.trafic.entree(&compteurs, categorie, taille);
+    let Some((envoi, _)) = puits else {
+        return;
+    };
+
+    let Some(octets) = decoder_base64(encode) else {
+        // Un morceau illisible n'est pas transmis : mieux vaut un trou franc
+        // qu'un octet invente au milieu du son.
+        warn!(server_id = %server_id, id, "morceau base64 illisible");
+        return;
     };
 
     if envoi.send(octets).await.is_err() {
@@ -301,21 +352,45 @@ async fn transmettre_morceau(state: &RelayState, server_id: &str, reste: &str) {
 }
 
 /// Fin du flux : fermer le puits termine le corps HTTP.
-async fn fermer_flux(state: &RelayState, server_id: &str, id: &str) {
-    let flux = match state.servers.get(server_id) {
-        Some(conn) => conn.flux.clone(),
+async fn fermer_flux(state: &RelayState, server_id: &str, id: &str, taille: usize) {
+    let (flux, compteurs) = match state.servers.get(server_id) {
+        Some(conn) => (conn.flux.clone(), conn.trafic.clone()),
         None => return,
     };
-    flux.lock().await.remove(id);
+    let puits = flux.lock().await.remove(id);
+    let categorie = puits.as_ref().map_or(Categorie::Audio, |p| p.categorie);
+    state.trafic.entree(&compteurs, categorie, taille);
+    if let Some(p) = puits {
+        // Avant que le `Sender` tombe : la session lira « fin propre » quand
+        // son canal se fermera.
+        p.fin_propre
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
-async fn resolve_pending(state: &RelayState, server_id: &str, resp: protocol::RelayResponse) {
-    let pending = match state.servers.get(server_id) {
-        Some(conn) => conn.pending.clone(),
+async fn resolve_pending(
+    state: &RelayState,
+    server_id: &str,
+    resp: protocol::RelayResponse,
+    taille: usize,
+) {
+    let (pending, compteurs) = match state.servers.get(server_id) {
+        Some(conn) => (conn.pending.clone(), conn.trafic.clone()),
         None => return,
     };
     let attendu = pending.lock().await.remove(&resp.id);
-    if let Some(tx) = attendu {
+    // Une reponse d'API qui porte une image est une pochette.
+    let categorie = match attendu.as_ref().map(|a| a.categorie) {
+        Some(Categorie::Api) | None => Categorie::d_une_reponse(
+            resp.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                .and_then(|(_, v)| v.as_str()),
+        ),
+        Some(autre) => autre,
+    };
+    state.trafic.entree(&compteurs, categorie, taille);
+    if let Some(crate::state::Attente { tx, .. }) = attendu {
         // Un corps binaire arrive en base64 (`body_base64`), un corps texte
         // dans `body`. Un base64 illisible devient un 502 franc : mieux vaut
         // une image absente qu'une image corrompue.
@@ -411,7 +486,10 @@ mod relais_de_flux_tests {
     async fn attente_deposee(state: &RelayState, id: &str) -> oneshot::Receiver<PendingResponse> {
         let (tx, rx) = oneshot::channel::<PendingResponse>();
         let pending = state.servers.get("srv").unwrap().pending.clone();
-        pending.lock().await.insert(id.to_string(), tx);
+        pending.lock().await.insert(
+            id.to_string(),
+            crate::state::Attente::nouvelle(tx, Categorie::Audio),
+        );
         rx
     }
 
@@ -463,7 +541,7 @@ mod relais_de_flux_tests {
         // navigateur n'a ni duree ni barre de progression.
         assert_eq!(reponse.headers["content-length"], "9");
         let mut morceaux = match reponse.body {
-            CorpsRelaye::Morceaux(rx) => rx,
+            CorpsRelaye::Morceaux(rx, _) => rx,
             CorpsRelaye::Entier(_) => panic!("un flux audio n'est pas un corps entier"),
         };
 
@@ -545,7 +623,7 @@ mod relais_de_flux_tests {
         let attente = attente_deposee(&state, "req-3").await;
         handle_server_message(&state, "srv", &debut("req-3", 200, None)).await;
         let mut morceaux = match reponse_attendue(attente).await.body {
-            CorpsRelaye::Morceaux(rx) => rx,
+            CorpsRelaye::Morceaux(rx, _) => rx,
             CorpsRelaye::Entier(_) => panic!("un flux audio n'est pas un corps entier"),
         };
 
@@ -592,7 +670,10 @@ mod relais_de_flux_tests {
         let reponse = crate::stream_proxy::reponse_relayee(PendingResponse {
             status: 206,
             headers: serde_json::Map::new(),
-            body: CorpsRelaye::Morceaux(reception),
+            body: CorpsRelaye::Morceaux(
+                reception,
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ),
         });
         assert_eq!(reponse.status(), 206);
 
