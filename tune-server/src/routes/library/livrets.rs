@@ -269,12 +269,10 @@ pub(super) async fn livret_album(
 mod tests {
     use super::*;
 
-    fn dossier_de_test(nom: &str) -> PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("tune-livrets-6481-{nom}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// Un dossier temporaire nettoyé par `Drop`, même si le test échoue
+    /// (#3030 : `tune_core::test_scratch`).
+    fn dossier_de_test(nom: &str) -> tune_core::test_scratch::ScratchDir {
+        tune_core::test_scratch::scratch_dir(&format!("livrets-6481-{nom}"))
     }
 
     #[test]
@@ -323,7 +321,8 @@ mod tests {
 
     #[test]
     fn seuls_les_pdf_du_dossier_sont_listes() {
-        let racine = dossier_de_test("liste");
+        let racine_tmp = dossier_de_test("liste");
+        let racine = racine_tmp.path();
         let album = racine.join("Album");
         std::fs::create_dir_all(album.join("Scans")).unwrap();
         std::fs::write(album.join("01.flac"), b"x").unwrap();
@@ -338,12 +337,12 @@ mod tests {
             .map(|l| l.nom)
             .collect();
         assert_eq!(noms, vec!["Livret.pdf".to_string()]);
-        let _ = std::fs::remove_dir_all(&racine);
     }
 
     #[test]
     fn rien_hors_du_dossier_de_l_album_ne_se_sert() {
-        let racine = dossier_de_test("garde");
+        let racine_tmp = dossier_de_test("garde");
+        let racine = racine_tmp.path();
         let album = racine.join("Album");
         std::fs::create_dir_all(&album).unwrap();
         std::fs::write(album.join("01.flac"), b"x").unwrap();
@@ -367,13 +366,13 @@ mod tests {
                 "{tentative:?} ne doit rien servir"
             );
         }
-        let _ = std::fs::remove_dir_all(&racine);
     }
 
     #[cfg(unix)]
     #[test]
     fn un_lien_symbolique_n_est_ni_liste_ni_servi() {
-        let racine = dossier_de_test("lien");
+        let racine_tmp = dossier_de_test("lien");
+        let racine = racine_tmp.path();
         let album = racine.join("Album");
         std::fs::create_dir_all(&album).unwrap();
         std::fs::write(album.join("01.flac"), b"x").unwrap();
@@ -382,12 +381,12 @@ mod tests {
         let dossiers = dossiers_des_pistes([album.join("01.flac").to_string_lossy()]);
         assert!(livrets_des_dossiers(&dossiers).is_empty());
         assert!(livret_a_servir(&dossiers, "Lien.pdf").is_none());
-        let _ = std::fs::remove_dir_all(&racine);
     }
 
     #[tokio::test]
     async fn les_routes_listent_et_servent_le_livret_de_l_album() {
-        let racine = dossier_de_test("routes");
+        let racine_tmp = dossier_de_test("routes");
+        let racine = racine_tmp.path();
         let album = racine.join("Kind of Blue");
         std::fs::create_dir_all(&album).unwrap();
         std::fs::write(album.join("01.flac"), b"x").unwrap();
@@ -435,6 +434,5 @@ mod tests {
         // Le livret d'un album n'est pas servi au nom d'un autre album.
         let r = livret_album(State(state), Path((999, "Livret numérique.pdf".into()))).await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
-        let _ = std::fs::remove_dir_all(&racine);
     }
 }
