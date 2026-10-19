@@ -1,3 +1,4 @@
+use super::textes_signal::{formater as fs, texte as ts};
 use super::*;
 
 pub fn build_signal_path_pub(
@@ -114,7 +115,8 @@ pub(super) fn zone_eq_alters_signal(
 /// réserve sûre, le limiteur est nommé comme absent : le pré-gain réserve la
 /// norme L1, aucune crête ne peut saturer. En réserve réaliste, le limiteur de
 /// sécurité est présent, et la description dit s'il a agi.
-pub(super) fn zone_eq_step_description(
+pub(super) fn zone_eq_step_description_lang(
+    lang: &str,
     backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
     zone_id: i64,
 ) -> Option<String> {
@@ -123,34 +125,45 @@ pub(super) fn zone_eq_step_description(
     let left = profile.reserve_db_at(0, sr);
     let right = profile.reserve_db_at(1, sr);
     let pre_gain = if (left - right).abs() < 0.01 {
-        format!("pré-gain auto {left:.1} dB")
+        fs(lang, "pregain", &[&format!("{left:.1}")])
     } else {
-        format!("pré-gain auto G {left:.1} dB / D {right:.1} dB")
+        fs(
+            lang,
+            "pregain_lr",
+            &[&format!("{left:.1}"), &format!("{right:.1}")],
+        )
     };
     Some(match profile.headroom_mode {
-        tune_core::audio::eq::HeadroomMode::Safe => {
-            format!("EQ actif (réserve sûre, {pre_gain}, sans limiteur)")
-        }
-        tune_core::audio::eq::HeadroomMode::Realistic => {
-            format!(
-                "EQ actif (réserve réaliste, {pre_gain}, {})",
-                phrase_du_limiteur(&tune_core::audio::limiteur::REGISTRE.releve())
-            )
-        }
+        tune_core::audio::eq::HeadroomMode::Safe => fs(lang, "eq_safe", &[&pre_gain]),
+        tune_core::audio::eq::HeadroomMode::Realistic => fs(
+            lang,
+            "eq_realistic",
+            &[
+                &pre_gain,
+                &phrase_du_limiteur_lang(lang, &tune_core::audio::limiteur::REGISTRE.releve()),
+            ],
+        ),
     })
 }
 
 /// #5171 — ce que le limiteur de sécurité a fait, en clair. Le compteur est
 /// celui du PROCESSUS (comme les compteurs d'écrêtage de #2218) : il cumule
 /// toutes les zones en réserve réaliste depuis le démarrage du serveur.
-pub(super) fn phrase_du_limiteur(r: &tune_core::audio::limiteur::ReleveLimiteur) -> String {
+pub(super) fn phrase_du_limiteur_lang(
+    lang: &str,
+    r: &tune_core::audio::limiteur::ReleveLimiteur,
+) -> String {
     if r.trames_limitees == 0 {
-        "limiteur de sécurité, n'a pas agi".to_string()
+        ts(lang, "limiter_idle").to_string()
     } else {
-        format!(
-            "limiteur de sécurité, a agi sur {} trames ({:.3} %) depuis le démarrage, \
-             {:.1} dB au plus",
-            r.trames_limitees, r.pourcentage, r.reduction_max_db
+        fs(
+            lang,
+            "limiter_active",
+            &[
+                &r.trames_limitees.to_string(),
+                &format!("{:.3}", r.pourcentage),
+                &format!("{:.1}", r.reduction_max_db),
+            ],
         )
     }
 }
@@ -178,7 +191,8 @@ pub(super) fn zone_crossfeed_ombre(
 /// tête quand elle est allumée : la coupure et la pente, en champs et dans la
 /// description. N'ajoute AUCUNE étape : elle annote celle qui dit que le
 /// crossfeed est dans le flux, et rien quand il n'y en a pas.
-pub(super) fn annoter_l_ombre_du_crossfeed(
+pub(super) fn annoter_l_ombre_du_crossfeed_lang(
+    lang: &str,
     steps: &mut [Value],
     ombre: Option<tune_core::audio::crossfeed::OmbreDeTete>,
 ) {
@@ -186,9 +200,13 @@ pub(super) fn annoter_l_ombre_du_crossfeed(
         return;
     };
     for etape in steps.iter_mut().filter(|e| e["code"] == "crossfeed") {
-        let suffixe = format!(
-            "ombre de la tête {} Hz, {} dB/octave",
-            ombre.cutoff_hz, ombre.slope_db_per_octave
+        let suffixe = fs(
+            lang,
+            "shadow",
+            &[
+                &ombre.cutoff_hz.to_string(),
+                &ombre.slope_db_per_octave.to_string(),
+            ],
         );
         let description = match etape["description"].as_str() {
             Some(d) => format!("{d} · {suffixe}"),
@@ -207,16 +225,18 @@ pub(super) fn annoter_l_ombre_du_crossfeed(
 /// le crossfeed intégré est alors éteint, l'appeler « Crossfeed » désignerait
 /// l'autre. Le `code` reste `crossfeed` pour les clients qui le lisent ;
 /// `plugin` porte l'identifiant du greffon. Sans greffon, rien ne change.
-pub(super) fn nommer_le_crossfeed_du_greffon(steps: &mut [Value], greffon: Option<&str>) {
+pub(super) fn nommer_le_crossfeed_du_greffon_lang(
+    lang: &str,
+    steps: &mut [Value],
+    greffon: Option<&str>,
+) {
     let Some(id) = greffon else {
         return;
     };
     let nom = tune_core::audio::natifs_tiers::nom_affichable(id);
     for etape in steps.iter_mut().filter(|e| e["code"] == "crossfeed") {
         etape["name"] = json!(nom);
-        etape["description"] = json!(format!(
-            "{nom} dans le flux (greffon, voies gauche et droite croisées)"
-        ));
+        etape["description"] = json!(fs(lang, "plugin_crossfeed", &[&nom]));
         etape["plugin"] = json!(id);
     }
 }
@@ -279,7 +299,8 @@ pub(super) fn zone_eq_headroom(
 /// défaut de panneau muet que #1548/#1627. La retenue est donc nommée
 /// (`clipping_guard`), et l'étape existe même à facteur unité quand c'est un
 /// refus.
-pub(super) fn zone_replaygain_step(
+pub(super) fn zone_replaygain_step_lang(
+    lang: &str,
     backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
     zone_id: i64,
     track_id: Option<i64>,
@@ -288,13 +309,14 @@ pub(super) fn zone_replaygain_step(
     if tune_core::audio::audiophile::zone_enabled(backend, zone_id) {
         return None;
     }
-    replaygain_step_hors_pure(backend, track_id?)
+    replaygain_step_hors_pure_lang(lang, backend, track_id?)
 }
 
 /// L'étape ReplayGain telle qu'elle serait HORS PURE — le corps de
-/// [`zone_replaygain_step`], sans la garde PURE. #5633 la relit sous PURE pour
+/// [`zone_replaygain_step_lang`], sans la garde PURE. #5633 la relit sous PURE pour
 /// dire ce que PURE laisse de côté.
-fn replaygain_step_hors_pure(
+fn replaygain_step_hors_pure_lang(
+    lang: &str,
     backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
     tid: i64,
 ) -> Option<ReplayGainStep> {
@@ -331,24 +353,24 @@ fn replaygain_step_hors_pure(
         // pré-ampli — ce que l'auditeur a réglé, pas ce que le garde-fou en a
         // fait.
         let demande_db = gain.gain_db + settings.preamp_db;
-        format!(
-            "ReplayGain ({label}, {demande_db:+.1} dB refusés : aucun pic tagué, anti-écrêtage armé)"
-        )
+        fs(lang, "rg_refused", &[label, &format!("{demande_db:+.1}")])
     } else {
         match origin {
             Some(src) => format!(
                 "ReplayGain ({label}, {applied_db:+.1} dB, {})",
-                src.label_fr()
+                ts(lang, src.as_str())
             ),
             None => format!("ReplayGain ({label}, {applied_db:+.1} dB)"),
         }
     };
     if peak_headroom_db > 0.0 {
-        description.push_str(&format!(
-            " — pic d'échantillon, réserve estimée de {peak_headroom_db:.1} dB (crête vraie inconnue)"
+        description.push_str(&fs(
+            lang,
+            "sample_peak",
+            &[&format!("{peak_headroom_db:.1}")],
         ));
     } else if peak_kind == tune_core::audio::replaygain::PeakKind::TruePeak {
-        description.push_str(" — crête vraie disponible");
+        description.push_str(ts(lang, "true_peak"));
     }
     Some(ReplayGainStep {
         description,
@@ -382,7 +404,7 @@ pub(super) fn replaygain_ignore_par_pure(
     if !tune_core::audio::audiophile::zone_enabled(backend, zone_id) {
         return None;
     }
-    let rg = replaygain_step_hors_pure(backend, track_id?)?;
+    let rg = replaygain_step_hors_pure_lang("fr", backend, track_id?)?;
     if !rg.alters_audio {
         return None;
     }
@@ -487,7 +509,8 @@ fn replaygain_ecretage_metrics() -> serde_json::Value {
 /// du verdict) et de #1627 (ReplayGain). Ici la transformation est réelle et
 /// doit APPARAÎTRE : #2825 vient de corriger le cas inverse, où le volume
 /// logiciel prétendait à tort dégrader.
-pub(super) fn zone_mono_downmix_step(
+pub(super) fn zone_mono_downmix_step_lang(
+    lang: &str,
     backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
     zone_id: i64,
     output_type: &str,
@@ -496,7 +519,7 @@ pub(super) fn zone_mono_downmix_step(
         return None;
     }
     tune_core::orchestrator::PlaybackOrchestrator::zone_mono_downmix_with(backend, zone_id)
-        .then(|| "Sortie mono : (G + D) / 2 sur les deux voies".to_string())
+        .then(|| ts(lang, "mono").to_string())
 }
 
 /// #6044 — la zone réaffecte-t-elle les canaux de la piste en cours, et si
@@ -508,7 +531,8 @@ pub(super) fn zone_mono_downmix_step(
 /// qu'elle a ouvert (REF-6b), la matrice doit en produire exactement le
 /// nombre de voies : sinon l'étage a gardé l'adaptation par défaut, et
 /// l'annoncer serait décrire un traitement qui n'a pas lieu.
-pub(super) fn zone_reaffectation_step(
+pub(super) fn zone_reaffectation_step_lang(
+    lang: &str,
     backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
     zone_id: i64,
     output_type: &str,
@@ -527,11 +551,37 @@ pub(super) fn zone_reaffectation_step(
     if reel.is_some_and(|r| r.ouvert().canaux != regle.matrice.sorties()) {
         return None;
     }
-    Some(regle.description())
+    let preset = regle
+        .reglage
+        .preset
+        .as_deref()
+        .map(|p| format!(" ({p})"))
+        .unwrap_or_default();
+    Some(fs(
+        lang,
+        "matrix",
+        &[
+            &regle.reglage.inputs.to_string(),
+            &regle.reglage.outputs.to_string(),
+            &preset,
+            ts(
+                lang,
+                match regle.origine {
+                    rc::Origine::Album => "rule_album",
+                    rc::Origine::Zone => "rule_zone",
+                },
+            ),
+            ts(
+                lang,
+                if regle.matrice.est_recopie() {
+                    "channel_copy"
+                } else {
+                    "channel_mix"
+                },
+            ),
+        ],
+    ))
 }
-
-/// #6221 — le libellé de l'étape qui décompresse un DST en DSF.
-pub(super) const LIBELLE_DST_EN_DSF: &str = "DST décompressé \u{2192} DSF";
 
 /// La famille DSD que désigne une cadence brute (2,8 MHz → DSD64, etc.).
 ///
@@ -705,15 +755,18 @@ pub(super) fn runtime_transport_is_intact(status: &OutputSignalPathStatus) -> bo
                 .all(|reason| matches!(reason, OutputSignalReason::SoftwareVolume)))
 }
 
-pub(super) fn runtime_signal_reason_detail(status: &OutputSignalPathStatus) -> Option<String> {
+pub(super) fn runtime_signal_reason_detail_lang(
+    lang: &str,
+    status: &OutputSignalPathStatus,
+) -> Option<String> {
     let details: Vec<&str> = status
         .reasons
         .iter()
         .map(|reason| match reason {
-            OutputSignalReason::FloatTransport => "Transport flottant imposé par le callback",
-            OutputSignalReason::DspApplied => "DSP appliqué",
-            OutputSignalReason::DspStateUnknown => "État DSP indéterminé",
-            OutputSignalReason::SoftwareVolume => "Volume logiciel appliqué",
+            OutputSignalReason::FloatTransport => ts(lang, "float"),
+            OutputSignalReason::DspApplied => ts(lang, "dsp_on"),
+            OutputSignalReason::DspStateUnknown => ts(lang, "dsp_unknown"),
+            OutputSignalReason::SoftwareVolume => ts(lang, "volume_on"),
         })
         .collect();
     (!details.is_empty()).then(|| details.join(" ; "))
@@ -738,7 +791,8 @@ pub(super) fn libelle_de_transport(output_type: &str) -> &str {
     }
 }
 
-pub(super) fn build_signal_path(
+pub fn build_signal_path_lang(
+    lang: &str,
     ps: &ZoneState,
     zone: &Zone,
     backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
@@ -768,9 +822,17 @@ pub(super) fn build_signal_path(
     // mesuré le publie, et `None` laisse chaque verdict à sa déduction.
     let transformations_reelles = ps.transformations_reelles.as_ref();
 
-    let mut traitements =
-        relever_les_traitements(backend, zone, np, output_type, runtime_signal_path, wire);
-    traitements.reaffectation_step = zone_reaffectation_step(
+    let mut traitements = relever_les_traitements_lang(
+        lang,
+        backend,
+        zone,
+        np,
+        output_type,
+        runtime_signal_path,
+        wire,
+    );
+    traitements.reaffectation_step = zone_reaffectation_step_lang(
+        lang,
         backend,
         zone.id.unwrap_or(0),
         output_type,
@@ -826,14 +888,15 @@ pub(super) fn build_signal_path(
     // #5051 — une entrée audio EN DIRECT : ce que la compensation de dérive
     // fait au signal. Une reprise ou un rééchantillonnage retire le
     // bit-perfect, et l'étape « Capture » le dit.
-    let capture = etape_de_capture_en_direct(np);
+    let capture = etape_de_capture_en_direct_lang(lang, np);
     let bit_perfect =
         analyse.verdicts.bit_perfect && capture.as_ref().is_none_or(|(_, intacte)| *intacte);
     let is_lossless = analyse.source.is_lossless;
     let codec_connu = analyse.source.codec_connu;
     let zone_id_courant = zone.id.unwrap_or(0);
     let pure = tune_core::audio::audiophile::zone_enabled(backend, zone_id_courant);
-    let mut etapes = assembler_les_etapes(
+    let mut etapes = assembler_les_etapes_lang(
+        lang,
         ps,
         zone,
         renderer_label,
@@ -848,10 +911,11 @@ pub(super) fn build_signal_path(
         &tune_core::db::settings_repo::SettingsRepo::with_backend(backend.clone()),
         zone_id_courant,
     );
-    nommer_le_crossfeed_du_greffon(&mut etapes.steps, greffon_de_crossfeed.as_deref());
+    nommer_le_crossfeed_du_greffon_lang(lang, &mut etapes.steps, greffon_de_crossfeed.as_deref());
     // #5081 — la coupure et la pente de l'ombre de la tête, sur l'étape
     // crossfeed quand elle existe.
-    annoter_l_ombre_du_crossfeed(
+    annoter_l_ombre_du_crossfeed_lang(
+        lang,
         &mut etapes.steps,
         zone_crossfeed_ombre(backend, zone_id_courant).filter(|_| greffon_de_crossfeed.is_none()),
     );
@@ -947,17 +1011,20 @@ pub(crate) const CODE_CODEC_INCONNU: &str = "source_codec_unknown";
 /// l'en-tête : aucun ffmpeg ne tourne. L'ancien texte (« FLAC écrit par
 /// ffmpeg (Lavf) ») décrivait le fichier d'origine, mais se lisait comme
 /// « Tune a réécrit le FLAC avec ffmpeg » (réunion avec Yves Corbat, 30/09).
+#[cfg(test)]
 pub(crate) const DETAIL_FLAC_ENTETE_NEUF: &str =
     "Fichier d'origine sans somme MD5 : en-tête FLAC refait par Tune, trames audio intactes";
 
 /// #5525 — le même détail quand l'en-tête n'a pas pu être lu et que Tune
 /// décode puis ré-encode (#4350).
+#[cfg(test)]
 pub(crate) const DETAIL_FLAC_REENCODE: &str =
     "Fichier d'origine sans somme MD5 : FLAC ré-encodé sans perte par Tune";
 
 /// #5051 — l'étape « Capture » d'une entrée audio en direct, et si le signal
 /// servi est encore, à l'octet près, celui capté. `None` hors entrée audio.
-pub(super) fn etape_de_capture_en_direct(
+pub(super) fn etape_de_capture_en_direct_lang(
+    lang: &str,
     np: &tune_core::playback::NowPlaying,
 ) -> Option<(Value, bool)> {
     if np.source != "entree-audio" {
@@ -971,7 +1038,7 @@ pub(super) fn etape_de_capture_en_direct(
         return Some((
             json!({
                 "name": "Capture",
-                "description": "Entrée audio en direct",
+                "description": ts(lang, "live"),
                 "bit_perfect": true,
             }),
             true,
@@ -979,15 +1046,12 @@ pub(super) fn etape_de_capture_en_direct(
     };
     let derive = c
         .derive_ppm
-        .map(|p| format!(", dérive {p:+.1} ppm"))
+        .map(|p| fs(lang, "drift", &[&format!("{p:+.1}")]))
         .unwrap_or_default();
     let description = if c.reechantillonne {
-        format!("Entrée audio en direct — dérive compensée par rééchantillonnage adaptatif{derive}")
+        fs(lang, "live_adaptive", &[&derive])
     } else {
-        format!(
-            "Entrée audio en direct — tampon avec reprise, sans rééchantillonnage ; {} reprise(s){derive}",
-            c.reprises
-        )
+        fs(lang, "live_buffer", &[&c.reprises.to_string(), &derive])
     };
     let intacte = c.bit_perfect();
     Some((
@@ -1057,7 +1121,8 @@ struct Etapes {
 /// `build_signal_path`, sorti tel quel, qui relit l'analyse sous les noms
 /// d'origine. Elle prend l'analyse par valeur : ses champs non copiables
 /// (descriptions, étapes optionnelles) y sont consommés.
-fn assembler_les_etapes(
+fn assembler_les_etapes_lang(
+    lang: &str,
     ps: &ZoneState,
     zone: &Zone,
     renderer_label: Option<&str>,
@@ -1166,7 +1231,7 @@ fn assembler_les_etapes(
     if dst_reconstruit_en_dsf {
         steps.push(json!({
             "name": "Decoder",
-            "description": LIBELLE_DST_EN_DSF,
+            "description": ts(lang, "dst"),
             "bit_perfect": true,
         }));
     }
@@ -1312,9 +1377,9 @@ fn assembler_les_etapes(
             // décodage, premier son immédiat) ou, si l'en-tête n'a pas pu
             // être lu, le décodage-ré-encodage de #4350.
             etape["detail"] = json!(if conteneur_flac_copie {
-                DETAIL_FLAC_ENTETE_NEUF
+                ts(lang, "flac_header")
             } else {
-                DETAIL_FLAC_REENCODE
+                ts(lang, "flac_encode")
             });
         }
         steps.push(etape);
@@ -1336,7 +1401,7 @@ fn assembler_les_etapes(
     if is_dsd && !transcode_active {
         steps.push(json!({
             "name": "Niveau",
-            "description": "DSD natif : référence 6 dB sous le PCM (Scarlet Book), aucun gain appliqué",
+            "description": ts(lang, "dsd_level"),
             "bit_perfect": true,
         }));
     }
@@ -1358,7 +1423,7 @@ fn assembler_les_etapes(
             "code": "rate_conversion",
             "from_hz": t.entree().cadence(),
             "to_hz": t.ouvert().cadence,
-            "description": format!("{src_khz}kHz \u{2192} {dst_khz}kHz (mesuré)"),
+            "description": fs(lang, "measured", &[&format!("{src_khz}kHz → {dst_khz}kHz")]),
             "bit_perfect": false,
         }));
     } else if let Some(max_sr) = max_sample_rate.filter(|_| resampling_active) {
@@ -1426,12 +1491,12 @@ fn assembler_les_etapes(
             // contredire le verdict (#2053).
             OutputVolumeState::Applied => steps.push(json!({
                 "name": "Volume",
-                "description": format!("Volume logiciel {}%", (ui_volume * 100.0).round() as i32),
+                "description": fs(lang, "software_volume", &[&((ui_volume * 100.0).round() as i32).to_string()]),
                 "bit_perfect": true,
             })),
             OutputVolumeState::BypassedDop => steps.push(json!({
                 "name": "Volume",
-                "description": "Volume contourné pour DoP",
+                "description": ts(lang, "volume_dop"),
                 "bit_perfect": true,
             })),
             OutputVolumeState::Unity => {}
@@ -1456,18 +1521,15 @@ fn assembler_les_etapes(
     if let Some(runtime) = runtime_signal_path {
         let dsp_step = match runtime.dsp {
             OutputDspState::Applied => Some((
-                eq_step_description.as_deref().unwrap_or("DSP appliqué"),
+                eq_step_description.as_deref().unwrap_or(ts(lang, "dsp_on")),
                 false,
             )),
-            OutputDspState::BypassedPure => Some(("DSP contourné par PURE", true)),
+            OutputDspState::BypassedPure => Some((ts(lang, "dsp_pure"), true)),
             // #4176 — PURE allumé sur un chemin déjà intact : le dire, plutôt
             // que d'annoncer un contournement qui ne change rien.
-            OutputDspState::PureSansObjet => Some((
-                "PURE actif : aucun traitement armé, rien à contourner",
-                true,
-            )),
-            OutputDspState::BypassedDop => Some(("DSP contourné pour DoP", true)),
-            OutputDspState::Unknown => Some(("État DSP indéterminé", false)),
+            OutputDspState::PureSansObjet => Some((ts(lang, "pure_idle"), true)),
+            OutputDspState::BypassedDop => Some((ts(lang, "dsp_dop"), true)),
+            OutputDspState::Unknown => Some((ts(lang, "dsp_unknown"), false)),
             OutputDspState::Inactive => None,
         };
         if let Some((description, intact)) = dsp_step {
@@ -1484,10 +1546,7 @@ fn assembler_les_etapes(
         // compris — si le DSP a tourné, il n'a pas été contourné.
         steps.push(json!({
             "name": "DSP",
-            "description": format!(
-                "{} (mesuré)",
-                eq_step_description.as_deref().unwrap_or("DSP appliqué")
-            ),
+            "description": fs(lang, "measured", &[eq_step_description.as_deref().unwrap_or(ts(lang, "dsp_on"))]),
             "bit_perfect": false,
         }));
     } else if dsp_contourne_par_le_dsd {
@@ -1503,13 +1562,13 @@ fn assembler_les_etapes(
         // de la sortie locale publie déjà.
         steps.push(json!({
             "name": "DSP",
-            "description": "DSP contourné (DSD natif servi brut)",
+            "description": ts(lang, "dsp_dsd"),
             "bit_perfect": true,
         }));
     } else if dsp_applique {
         steps.push(json!({
             "name": "DSP",
-            "description": eq_step_description.as_deref().unwrap_or("EQ/DSP active"),
+            "description": eq_step_description.as_deref().unwrap_or(ts(lang, "eq_on")),
             "bit_perfect": false,
         }));
     }
@@ -1529,7 +1588,7 @@ fn assembler_les_etapes(
         steps.push(json!({
             "name": "Crossfeed",
             "code": "crossfeed",
-            "description": "Crossfeed casque dans le flux (voies gauche et droite croisées)",
+            "description": ts(lang, "crossfeed"),
             "bit_perfect": false,
         }));
     }
@@ -1542,9 +1601,7 @@ fn assembler_les_etapes(
         steps.push(json!({
             "name": "Compensation",
             "code": "level_compensation",
-            "description": format!(
-                "Compensation de niveau {db:+.1} dB dans le flux (bornée à la crête, sans écrêtage)"
-            ),
+            "description": fs(lang, "compensation", &[&format!("{db:+.1}")]),
             "bit_perfect": false,
             "compensation_db": (db * 100.0).round() / 100.0,
         }));
@@ -1591,7 +1648,7 @@ fn assembler_les_etapes(
         steps.push(json!({
             "name": "Fondu enchaîné",
             "code": "crossfade",
-            "description": "Deux pistes superposées le temps du fondu enchaîné",
+            "description": ts(lang, "crossfade"),
             "bit_perfect": false,
         }));
     }
@@ -1617,15 +1674,11 @@ fn assembler_les_etapes(
     if reel.is_none()
         && tune_core::orchestrator::is_network_output_type(Some(output_type))
         && let (Some(entree), Some(sortie)) = (canaux_source, canaux_du_fil)
-        && let Some(etiquette) = tune_core::audio::canaux_reseau_4573::etiquette_de_reduction_reseau(
-            entree,
-            sortie,
-            canaux_declares,
-        )
+        && tune_core::audio::canaux_reseau_4573::reduction_de_canaux_requise(entree, Some(sortie))
     {
         steps.push(json!({
             "name": "Canaux",
-            "description": etiquette,
+            "description": fs(lang, if canaux_declares.map(|d| d.max(2)) == Some(sortie) { "network_selected" } else { "network_advertised" }, &[&entree.to_string(), &sortie.to_string()]),
             // Un repli BS.775 mélange les voies : le fil ne porte plus les
             // échantillons du fichier. Le dire « bit-perfect » serait
             // exactement le mensonge que ce dossier corrige.
@@ -1640,11 +1693,7 @@ fn assembler_les_etapes(
     if let Some(t) = reel.filter(|t| t.adaptation_canaux()) {
         steps.push(json!({
             "name": "Canaux",
-            "description": format!(
-                "{} \u{2192} {} canaux (mesuré)",
-                t.entree().canaux(),
-                t.ouvert().canaux
-            ),
+            "description": fs(lang, "channels", &[&t.entree().canaux().to_string(), &t.ouvert().canaux.to_string()]),
             "bit_perfect": false,
         }));
     }
@@ -1660,7 +1709,7 @@ fn assembler_les_etapes(
             .unwrap_or_default();
         steps.push(json!({
             "name": "Canaux",
-            "description": format!("{canaux} canaux{disposition}, sortie multicanal (mesuré)"),
+            "description": fs(lang, "multichannel", &[&canaux.to_string(), &disposition]),
             "bit_perfect": true,
         }));
     }
@@ -1670,7 +1719,7 @@ fn assembler_les_etapes(
         "name": "Transport",
         "description": transport_desc,
         "bit_perfect": transport_bit_perfect,
-        "detail": runtime_signal_path.and_then(runtime_signal_reason_detail),
+        "detail": runtime_signal_path.and_then(|r| runtime_signal_reason_detail_lang(lang, r)),
     }));
 
     let renderer_name = renderer_label
@@ -2360,7 +2409,8 @@ struct Traitements {
 }
 
 /// Relève les traitements armés sur la zone, la sonde locale primant sur les réglages.
-fn relever_les_traitements(
+fn relever_les_traitements_lang(
+    lang: &str,
     backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
     zone: &Zone,
     np: &tune_core::playback::NowPlaying,
@@ -2389,17 +2439,17 @@ fn relever_les_traitements(
     let dsp_enabled = runtime_signal_path
         .map(|status| status.dsp == OutputDspState::Applied)
         .unwrap_or(configured_dsp_enabled);
-    let eq_step_description = zone_eq_step_description(&backend, zid);
+    let eq_step_description = zone_eq_step_description_lang(lang, &backend, zid);
 
     // ReplayGain effectivement appliqué à la piste en cours (#1627) : même
     // traitement que l'EQ — une étape dans le chemin, et le verdict bit-perfect
     // en tient compte. `None` en PURE, en mode off, ou sans gain stocké.
-    let replaygain_step = zone_replaygain_step(&backend, zid, np.track_id);
+    let replaygain_step = zone_replaygain_step_lang(lang, &backend, zid, np.track_id);
 
     // Sortie mono (#2362) : sortie locale seulement, jamais en PURE. C'est une
     // vraie transformation — elle réécrit chaque échantillon — donc elle porte
     // une étape et fait tomber le verdict bit-perfect, comme le ReplayGain.
-    let mono_downmix_step = zone_mono_downmix_step(&backend, zid, output_type);
+    let mono_downmix_step = zone_mono_downmix_step_lang(lang, &backend, zid, output_type);
 
     // #5071 — la compensation de niveau d'une zone RÉSEAU multiplie chaque
     // échantillon du flux : une étape, et le verdict en tient compte.
@@ -2709,4 +2759,52 @@ fn decrire_la_source<'w>(
         canaux_du_fil: wire.map(|w| w.channels).filter(|c| *c > 0),
         dst_reconstruit_en_dsf: is_dsd && wire.is_some_and(|w| w.dsd_reconstruit_depuis_dst),
     }
+}
+
+pub(super) fn build_signal_path(
+    ps: &ZoneState,
+    zone: &Zone,
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    renderer_label: Option<&str>,
+    audio_backend: &str,
+    wire: Option<&StreamInfo>,
+) -> Option<Value> {
+    build_signal_path_lang(
+        super::textes_signal::langue_courante(),
+        ps,
+        zone,
+        backend,
+        renderer_label,
+        audio_backend,
+        wire,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn phrase_du_limiteur(r: &tune_core::audio::limiteur::ReleveLimiteur) -> String {
+    phrase_du_limiteur_lang("fr", r)
+}
+
+#[cfg(test)]
+pub(super) fn annoter_l_ombre_du_crossfeed(
+    steps: &mut [Value],
+    ombre: Option<tune_core::audio::crossfeed::OmbreDeTete>,
+) {
+    annoter_l_ombre_du_crossfeed_lang("fr", steps, ombre)
+}
+
+#[cfg(test)]
+pub(super) fn nommer_le_crossfeed_du_greffon(steps: &mut [Value], greffon: Option<&str>) {
+    nommer_le_crossfeed_du_greffon_lang("fr", steps, greffon)
+}
+
+#[cfg(test)]
+pub(super) fn zone_reaffectation_step(
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    zone_id: i64,
+    output_type: &str,
+    track_id: Option<i64>,
+    reel: Option<&TransformationsReelles>,
+) -> Option<String> {
+    zone_reaffectation_step_lang("fr", backend, zone_id, output_type, track_id, reel)
 }

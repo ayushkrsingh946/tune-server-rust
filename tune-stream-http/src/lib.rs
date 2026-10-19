@@ -771,19 +771,58 @@ pub async fn handle_stream(
     // honore ce Range en n'émettant que la fin de l'en-tête, puis le direct.
     // Une radio n'a pas de position — au-delà de l'en-tête, « reprendre à N »
     // ne peut vouloir dire que « donne-moi le direct maintenant ».
+    //
+    // ── #6453 — la sonde `bytes=0-1` d'AVPlayer ──
+    //
+    // « Ce téléphone » (iPhone, rc6, FIP) : AVPlayer ouvre TOUT média
+    // progressif par `Range: bytes=0-1`. Ce bloc ne lisait que le début de la
+    // plage : à `start == 0`, il répondait 200 + `Content-Length: 2147483647`,
+    // et CoreMedia abandonnait aussitôt (`CoreMediaErrorDomain -12939`) — le
+    // même rejet que #6064 sur la voie mandataire. La borne de fin d'une plage
+    // `bytes=N-M` est donc honorée ici aussi : 206 `bytes N-M/<total>`, M−N+1
+    // octets, puis le corps s'arrête (`borner_le_corps`). Une sonde de deux
+    // octets ne rend que le début de l'en-tête WAV et lâche le corps AVANT
+    // d'avoir réclamé le canal PCM : le direct de la connexion suivante n'en
+    // perd rien. Une plage OUVERTE (`bytes=0-`, `bytes=N-`) et l'absence de
+    // `Range` gardent exactement leur réponse d'avant : seule une plage
+    // FERMÉE (`bytes=N-M`) change.
     let mut bounded_status = StatusCode::OK;
     let mut header_skip: usize = 0;
+    let mut limite_bornee: Option<u64> = None;
+    // Reprise d'une radio bornée AU-DELÀ de l'en-tête : son offset, pour la
+    // phase de trame (voir `remplissage_de_phase`).
+    let mut reprise_bornee: Option<u64> = None;
     if bounded_live {
         let total = tune_core::http::streamer::LIVE_BOUNDED_TOTAL_LEN;
         headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
-        let start = req_headers
-            .get("Range")
-            .and_then(|v| v.to_str().ok())
+        let range_brut = req_headers.get("Range").and_then(|v| v.to_str().ok());
+        let start = range_brut
             .and_then(parse_range_start)
             .filter(|s| *s < total);
-        match start {
-            Some(start) if start > 0 => {
+        // Borne de fin d'une plage fermée, ramenée au dernier octet : la
+        // seconde requête d'AVPlayer est `bytes=0-2147483646`, le fichier
+        // entier, et elle attend elle aussi son 206.
+        let fin = range_brut
+            .and_then(parse_range_end)
+            .zip(start)
+            .filter(|(fin, debut)| *fin >= *debut)
+            .map(|(fin, _)| fin.min(total - 1));
+        match (start, fin) {
+            (Some(start), Some(fin)) => {
                 header_skip = start.min(44) as usize;
+                let longueur = fin - start + 1;
+                headers.insert("Content-Length", HeaderValue::from(longueur));
+                headers.insert(
+                    "Content-Range",
+                    HeaderValue::from_str(&format!("bytes {start}-{fin}/{total}")).unwrap(),
+                );
+                bounded_status = StatusCode::PARTIAL_CONTENT;
+                limite_bornee = (fin < total - 1).then_some(longueur);
+                reprise_bornee = (start > 44).then_some(start);
+            }
+            (Some(start), None) if start > 0 => {
+                header_skip = start.min(44) as usize;
+                reprise_bornee = (start > 44).then_some(start);
                 headers.insert("Content-Length", HeaderValue::from(total - start));
                 headers.insert(
                     "Content-Range",
@@ -799,6 +838,7 @@ pub async fn handle_stream(
             stream_id,
             total,
             range_start = ?start,
+            range_fin = ?fin,
             header_skip,
             "radio_bounded_live_response — renderer refuses chunked, serving the file contract"
         );
@@ -940,6 +980,16 @@ pub async fn handle_stream(
         // en-tête WAV compris (voir `decoupe_icy`). Le compteur vit ici, et non
         // dans la boucle, pour cette seule raison.
         let mut bytes_since_meta: usize = 0;
+        // ── #6453 — la phase de trame d'une reprise de radio bornée ──
+        //
+        // AVPlayer reprend le « fichier » à l'octet qu'il a reçu, pas à une
+        // frontière de trame (`bytes=16158-…` vu sur CoreMedia : (16158−44)
+        // mod 4 = 2). Le direct, lui, part toujours en tête de trame : servi
+        // tel quel, chaque échantillon serait lu décalé — voies inversées à
+        // deux octets, bruit à un ou trois. On complète d'abord la trame
+        // entamée par des zéros (un échantillon de silence), puis le direct
+        // part en phase. Calculé une fois le format réel connu (en-tête).
+        let mut remplissage_de_phase: usize = 0;
         // Le bloc à insérer : le titre courant s'il a été publié par le poller,
         // sinon celui de la connexion. Relu à CHAQUE insertion — c'est la seule
         // chose que le renderer verra changer sans qu'on relance quoi que ce soit.
@@ -1036,6 +1086,10 @@ pub async fn handle_stream(
                     return;
                 };
                 let real_bd = session.output_bit_depth();
+                if let Some(debut) = reprise_bornee {
+                    remplissage_de_phase =
+                        remplissage_de_phase_radio(debut, real_ch, real_bd);
+                }
                 if bounded_live {
                     build_wav_header_bounded_live(real_ch, real_sr, real_bd)
                 } else {
@@ -1122,7 +1176,13 @@ pub async fn handle_stream(
                             // `radio_stream_concurrent_consumer` (.15). Le
                             // canal ICY ne fait qu'entrelacer des blocs dans
                             // les octets déjà servis.
-                            Some(chunk) => {
+                            Some(mut chunk) => {
+                                if remplissage_de_phase > 0 {
+                                    let mut complet = vec![0u8; remplissage_de_phase];
+                                    complet.extend_from_slice(&chunk);
+                                    chunk = complet;
+                                    remplissage_de_phase = 0;
+                                }
                                 if has_icy {
                                     for part in decoupe_icy(
                                         &chunk,
@@ -1527,7 +1587,8 @@ pub async fn handle_stream(
         flux,
         fin_de_tranche
             .zip(finite_range_start)
-            .map(|(fin, debut)| fin - debut + 1),
+            .map(|(fin, debut)| fin - debut + 1)
+            .or(limite_bornee),
     );
     let flux = futures_util::StreamExt::map(flux, move |morceau| {
         if let (Ok(o), Some(b)) = (&morceau, bilan.as_mut()) {
@@ -2026,9 +2087,9 @@ fn perte_menace_la_lecture(avance_ms: i64) -> bool {
     avance_ms < AVANCE_SANS_RISQUE_MS
 }
 
-/// Débit nominal d'un flux PCM servi en WAV, en octets par seconde.
+/// Débit nominal d'un flux PCM WAV ou DSD natif DSF/DFF, en octets/s.
 ///
-/// `None` hors WAV, et c'est délibéré : sur un format compressé la
+/// `None` pour les formats compressés : la
 /// correspondance octets ↔ temps n'est pas linéaire, et une avance calculée
 /// dessus mentirait. Mieux vaut ne rien dire que dire un chiffre faux — même
 /// contrat que le `debit_kio_s` sous la milliseconde.
@@ -2038,11 +2099,17 @@ fn debit_nominal_octets_par_seconde(
     bit_depth: u16,
     channels: u16,
 ) -> Option<u32> {
-    if format != "wav" {
-        return None;
-    }
-    let octets_par_trame = u32::from(channels) * u32::from(bit_depth / 8);
-    let debit = sample_rate.checked_mul(octets_par_trame)?;
+    let debit = match format {
+        "wav" => sample_rate.checked_mul(u32::from(channels) * u32::from(bit_depth / 8))?,
+        // DSD : sample_rate est la fréquence des BITS (11 289 600 pour
+        // DSD256), pas une fréquence PCM. Diviser avant de multiplier la
+        // profondeur tronquerait le bit unique à zéro. Le DST compressé
+        // n'est pas servi comme DFF : il est reconstruit en DSF (#6221).
+        "dsf" | "dff" if bit_depth == 1 && sample_rate.is_multiple_of(8) => {
+            (sample_rate / 8).checked_mul(u32::from(channels))?
+        }
+        _ => return None,
+    };
     (debit > 0).then_some(debit)
 }
 
@@ -2490,6 +2557,17 @@ fn build_file_body(
             chrono.noter_fin(FinDuService::Complet);
         }
     })
+}
+
+/// #6453 — octets de silence qui complètent la trame PCM entamée à l'offset
+/// `debut` d'un WAV (en-tête de 44 octets), pour que le direct, qui part en
+/// tête de trame, reste en phase avec ce que le lecteur attend.
+fn remplissage_de_phase_radio(debut: u64, canaux: u16, profondeur: u16) -> usize {
+    let trame = u64::from(canaux) * u64::from(profondeur / 8);
+    if trame <= 1 || debut <= 44 {
+        return 0;
+    }
+    ((trame - (debut - 44) % trame) % trame) as usize
 }
 
 /// Borne de fin INCLUSE d'un `Range: bytes=N-M` : `M`. `None` pour
@@ -5604,16 +5682,50 @@ mod terrain_perdu_4645 {
         );
     }
 
-    /// Hors WAV, on ne rend RIEN plutôt qu'un chiffre faux : sur un format
+    /// Hors formats non compressés, on ne rend RIEN : sur un format
     /// compressé la correspondance octets ↔ temps n'est pas linéaire.
     #[test]
-    fn hors_wav_aucun_nominal_nest_rendu() {
-        for format in ["flac", "mp3", "aac", "dsf", ""] {
+    fn hors_formats_non_compresses_aucun_nominal_nest_rendu() {
+        for format in ["flac", "mp3", "aac", "dst", ""] {
             assert_eq!(
                 debit_nominal_octets_par_seconde(format, 44_100, 24, 2),
                 None,
                 "{format} : un nominal calculé sur un format compressé mentirait"
             );
+        }
+    }
+
+    #[test]
+    fn dsd256_dsf_et_dff_mesurent_le_retard_du_k17_6478() {
+        for format in ["dsf", "dff"] {
+            let nominal = debit_nominal_octets_par_seconde(format, 11_289_600, 1, 2)
+                .expect("DSD256 natif : la livraison doit avoir un débit nominal");
+            assert_eq!(nominal, 2_822_400, "DSD256 stéréo : bits / 8 × canaux");
+            // Première connexion du journal #6478 : sous le temps réel.
+            assert_eq!(
+                avance_de_livraison_ms(759_103_488, nominal, 274_046),
+                -5_090
+            );
+            assert_eq!(
+                avance_de_livraison_ms(u64::from(nominal), nominal, 1_000),
+                0
+            );
+            assert_eq!(
+                debit_nominal_octets_par_seconde(format, 2_822_400, 1, 6),
+                Some(2_116_800)
+            );
+            for (rate, depth, channels) in [
+                (0, 1, 2),
+                (11_289_600, 1, 0),
+                (11_289_600, 24, 2),
+                (1, 1, 2),
+                (u32::MAX - 7, 1, u16::MAX),
+            ] {
+                assert_eq!(
+                    debit_nominal_octets_par_seconde(format, rate, depth, channels),
+                    None
+                );
+            }
         }
     }
 
@@ -6444,5 +6556,194 @@ mod temoins_du_mandataire_dsf {
             Some(format!("bytes 4000-{}/{total}", total - 1).as_str())
         );
         assert_eq!(lire_tout(rep).await, corps[4000..].to_vec());
+    }
+}
+
+/// #6453 — la radio sur « Ce téléphone » : AVPlayer ouvre le flux par la sonde
+/// `Range: bytes=0-1`, puis `bytes=0-2147483646`. Les deux attendent un 206.
+#[cfg(test)]
+mod sonde_avplayer_radio_6453_tests {
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use futures_util::StreamExt;
+    use tune_core::http::streamer::{
+        LIVE_BOUNDED_TOTAL_LEN, SharedSessions, StreamInfo, StreamSession,
+    };
+
+    const AVPLAYER: &str =
+        "AppleCoreMedia/1.0.0.24A446 (iPhone; U; CPU OS 27_0_1 like Mac OS X; fr_fr)";
+    const PCM: usize = 3 * 8192;
+
+    /// Une radio WAV dont `PCM` octets de direct attendent déjà en file,
+    /// l'émetteur fermé : le corps d'une connexion qui réclame le canal est fini.
+    async fn sessions_radio(sid: &str) -> SharedSessions {
+        let info = StreamInfo {
+            format: "wav".into(),
+            mime_type: "audio/wav".into(),
+            sample_rate: 44100,
+            bit_depth: 16,
+            channels: 2,
+            ..StreamInfo::default()
+        };
+        let mut session = StreamSession::new(sid.to_string(), info, false, 64);
+        session.is_radio = true;
+        let session = std::sync::Arc::new(session);
+        session.publish_detected_output_format(48000, 2);
+        let tx = session.tx.lock().await.clone().expect("tx");
+        for _ in 0..PCM / 8192 {
+            tx.send(vec![0xAA; 8192]).await.expect("pcm");
+        }
+        drop(tx);
+        session.close_sender().await;
+        std::sync::Arc::new(tokio::sync::Mutex::new(
+            [(sid.to_string(), session)].into_iter().collect(),
+        ))
+    }
+
+    async fn requete(
+        sessions: &SharedSessions,
+        sid: &str,
+        range: Option<&str>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("User-Agent", AVPLAYER.parse().unwrap());
+        if let Some(r) = range {
+            h.insert("Range", r.parse().unwrap());
+        }
+        let rep =
+            super::handle_stream(Path(format!("{sid}.flac")), State(sessions.clone()), h).await;
+        let statut = rep.status();
+        let entetes = rep.headers().clone();
+        let mut corps = rep.into_body().into_data_stream();
+        let mut octets = Vec::new();
+        while let Some(Ok(b)) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), corps.next())
+                .await
+                .expect("le corps doit se terminer")
+        {
+            octets.extend_from_slice(&b);
+        }
+        (statut, entetes, octets)
+    }
+
+    fn entete<'a>(h: &'a axum::http::HeaderMap, nom: &str) -> Option<&'a str> {
+        h.get(nom).and_then(|v| v.to_str().ok())
+    }
+
+    /// LE défaut : la sonde recevait 200 + `Content-Length: 2147483647`, et
+    /// CoreMedia abandonnait (-12939). Elle reçoit désormais ses deux octets.
+    #[tokio::test]
+    async fn la_sonde_bytes_0_1_recoit_un_206_de_deux_octets() {
+        let sid = "radio-6453-sonde";
+        let sessions = sessions_radio(sid).await;
+        let (statut, h, corps) = requete(&sessions, sid, Some("bytes=0-1")).await;
+        assert_eq!(statut, StatusCode::PARTIAL_CONTENT);
+        let attendu = format!("bytes 0-1/{LIVE_BOUNDED_TOTAL_LEN}");
+        assert_eq!(entete(&h, "Content-Range"), Some(attendu.as_str()));
+        assert_eq!(entete(&h, "Content-Length"), Some("2"));
+        assert_eq!(entete(&h, "Accept-Ranges"), Some("bytes"));
+        assert!(entete(&h, "Transfer-Encoding").is_none());
+        assert_eq!(corps, b"RI".to_vec());
+    }
+
+    /// La sonde ne réclame pas le canal PCM : la requête suivante d'AVPlayer,
+    /// le fichier entier en plage FERMÉE, reçoit un 206, l'en-tête complet et
+    /// TOUT le direct en file — rien n'a été perdu dans la sonde.
+    #[tokio::test]
+    async fn apres_la_sonde_le_fichier_entier_part_en_206_sans_perte() {
+        let sid = "radio-6453-suite";
+        let sessions = sessions_radio(sid).await;
+        let _ = requete(&sessions, sid, Some("bytes=0-1")).await;
+        let fin = LIVE_BOUNDED_TOTAL_LEN - 1;
+        let (statut, h, corps) = requete(&sessions, sid, Some(&format!("bytes=0-{fin}"))).await;
+        assert_eq!(statut, StatusCode::PARTIAL_CONTENT);
+        let attendu = format!("bytes 0-{fin}/{LIVE_BOUNDED_TOTAL_LEN}");
+        assert_eq!(entete(&h, "Content-Range"), Some(attendu.as_str()));
+        let longueur = LIVE_BOUNDED_TOTAL_LEN.to_string();
+        assert_eq!(entete(&h, "Content-Length"), Some(longueur.as_str()));
+        assert_eq!(&corps[..4], b"RIFF");
+        assert_eq!(corps.len(), 44 + PCM, "la sonde a consommé du direct");
+        assert!(corps[44..].iter().all(|b| *b == 0xAA));
+    }
+
+    /// Une tranche fermée au-delà de l'en-tête (`bytes=44-M`, la troisième
+    /// requête d'AVPlayer) : 206 `bytes 44-M/<total>`, M−43 octets de PCM.
+    #[tokio::test]
+    async fn une_tranche_fermee_apres_l_entete_est_bornee() {
+        let sid = "radio-6453-tranche";
+        let sessions = sessions_radio(sid).await;
+        let (statut, h, corps) = requete(&sessions, sid, Some("bytes=44-1043")).await;
+        assert_eq!(statut, StatusCode::PARTIAL_CONTENT);
+        let attendu = format!("bytes 44-1043/{LIVE_BOUNDED_TOTAL_LEN}");
+        assert_eq!(entete(&h, "Content-Range"), Some(attendu.as_str()));
+        assert_eq!(entete(&h, "Content-Length"), Some("1000"));
+        assert_eq!(corps, vec![0xAA; 1000]);
+    }
+
+    /// La reprise qu'AVPlayer a faite sur CoreMedia (`bytes=16158-…`) tombe à
+    /// deux octets dans une trame 16 bits stéréo : deux octets de silence
+    /// complètent la trame, puis le direct part en phase.
+    #[tokio::test]
+    async fn une_reprise_hors_trame_est_remise_en_phase() {
+        let sid = "radio-6453-phase";
+        let sessions = sessions_radio(sid).await;
+        let fin = LIVE_BOUNDED_TOTAL_LEN - 1;
+        let (statut, h, corps) = requete(&sessions, sid, Some(&format!("bytes=16158-{fin}"))).await;
+        assert_eq!(statut, StatusCode::PARTIAL_CONTENT);
+        let attendu = format!("bytes 16158-{fin}/{LIVE_BOUNDED_TOTAL_LEN}");
+        assert_eq!(entete(&h, "Content-Range"), Some(attendu.as_str()));
+        assert_eq!(corps.len(), 2 + PCM);
+        assert_eq!(&corps[..2], &[0, 0]);
+        assert!(corps[2..].iter().all(|b| *b == 0xAA));
+    }
+
+    #[test]
+    fn remplissage_de_phase_selon_la_trame() {
+        use super::remplissage_de_phase_radio as r;
+        // 16 bits stéréo : trame de 4 octets.
+        assert_eq!(r(44, 2, 16), 0);
+        assert_eq!(r(48, 2, 16), 0);
+        assert_eq!(r(16158, 2, 16), 2);
+        assert_eq!(r(45, 2, 16), 3);
+        assert_eq!(r(47, 2, 16), 1);
+        // 24 bits stéréo : trame de 6 octets.
+        assert_eq!(r(44 + 6 * 1000 + 4, 2, 24), 2);
+        // Dans l'en-tête : rien à compléter.
+        assert_eq!(r(10, 2, 16), 0);
+    }
+
+    /// Non-régression : une plage OUVERTE et l'absence de `Range` gardent la
+    /// réponse d'avant — 200 + longueur totale pour `bytes=0-` et sans Range
+    /// (darTZeel, #1689), 206 ouvert pour `bytes=44-`.
+    #[tokio::test]
+    async fn les_plages_ouvertes_gardent_leur_reponse() {
+        let total = LIVE_BOUNDED_TOTAL_LEN.to_string();
+        for (range, statut_attendu, longueur) in [
+            (None, StatusCode::OK, LIVE_BOUNDED_TOTAL_LEN),
+            (Some("bytes=0-"), StatusCode::OK, LIVE_BOUNDED_TOTAL_LEN),
+            (
+                Some("bytes=44-"),
+                StatusCode::PARTIAL_CONTENT,
+                LIVE_BOUNDED_TOTAL_LEN - 44,
+            ),
+        ] {
+            let sid = format!("radio-6453-ouverte-{}", range.unwrap_or("aucune"));
+            let sessions = sessions_radio(&sid).await;
+            let (statut, h, corps) = requete(&sessions, &sid, range).await;
+            assert_eq!(statut, statut_attendu, "{range:?}");
+            assert_eq!(
+                entete(&h, "Content-Length"),
+                Some(longueur.to_string().as_str()),
+                "{range:?}"
+            );
+            if range == Some("bytes=44-") {
+                let attendu = format!("bytes 44-{}/{total}", LIVE_BOUNDED_TOTAL_LEN - 1);
+                assert_eq!(entete(&h, "Content-Range"), Some(attendu.as_str()));
+                assert_eq!(corps.len(), PCM);
+            } else {
+                assert!(entete(&h, "Content-Range").is_none(), "{range:?}");
+                assert_eq!(corps.len(), 44 + PCM, "{range:?}");
+            }
+        }
     }
 }

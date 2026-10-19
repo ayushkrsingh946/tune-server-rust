@@ -38,6 +38,9 @@ fn language_directive(lang: &str) -> &'static str {
         "ja" => "Reply to the user in Japanese unless they clearly write in another language.",
         "ko" => "Reply to the user in Korean unless they clearly write in another language.",
         "ro" => "Reply to the user in Romanian unless they clearly write in another language.",
+        "sv" => "Reply to the user in Swedish unless they clearly write in another language.",
+        "hu" => "Reply to the user in Hungarian unless they clearly write in another language.",
+        "vi" => "Reply to the user in Vietnamese unless they clearly write in another language.",
         _ => "Reply to the user in French unless they clearly write in another language.",
     }
 }
@@ -862,4 +865,31 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod language_directive_tests {
+    use super::language_directive;
+
+    /// Chaque langue de l'interface nomme SA langue à l'assistant. Le suédois,
+    /// puis le hongrois et le vietnamien, tombaient dans le `_` : l'assistant
+    /// répondait en français à un utilisateur réglé en suédois.
+    ///
+    /// Contre-épreuve : retirer le bras `"vi"` fait rougir ce test sur «vi».
+    #[test]
+    fn chaque_langue_de_l_interface_a_sa_consigne() {
+        let francais = language_directive("fr");
+        for lang in crate::i18n::SUPPORTED {
+            if *lang == "fr" {
+                continue;
+            }
+            assert_ne!(
+                language_directive(lang),
+                francais,
+                "«{lang}» reçoit la consigne française"
+            );
+        }
+        assert!(language_directive("hu").contains("Hungarian"));
+        assert!(language_directive("vi").contains("Vietnamese"));
+    }
 }

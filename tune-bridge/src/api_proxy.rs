@@ -143,8 +143,14 @@ pub async fn proxy_api(
 /// - `range`, `if-range` : lecture partielle ;
 /// - `if-none-match`, `if-modified-since`, `cache-control` : les validateurs
 ///   de cache, sans lesquels chaque pochette repart en entier ;
-/// - `x-tune-profile` : le profil actif. Sans lui, le serveur rend favoris et
-///   historique du profil par defaut a tout le monde.
+/// - `x-profile-id` : le profil actif, sous le nom que le serveur lit
+///   (`ActiveProfile`, `tune-server/src/routes/active_profile.rs`) et que
+///   tous les clients envoient (web, Flutter, iOS). Sans lui, le serveur se
+///   rabat sur le profil par defaut, et la garde de `/profiles/{id}/favorites`
+///   repond « profile not found » des que le chemin nomme un autre profil
+///   (#6479). La liste portait jusqu'ici `x-tune-profile`, un nom qu'aucun
+///   client n'envoie et que le serveur ne lit pas : l'en-tete reel etait
+///   donc retire en route.
 ///
 /// Ni `cookie` (la session du navigateur vise le domaine du pont, pas le
 /// serveur), ni `x-bridge-token` (il ne concerne que le relais).
@@ -157,7 +163,7 @@ pub const ENTETES_RELAYES: [&str; 9] = [
     "if-none-match",
     "if-modified-since",
     "cache-control",
-    "x-tune-profile",
+    "x-profile-id",
 ];
 
 /// Les en-tetes de la requete du navigateur a transmettre au serveur.

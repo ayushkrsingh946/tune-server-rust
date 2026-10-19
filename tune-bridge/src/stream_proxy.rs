@@ -48,13 +48,7 @@ pub async fn proxy_stream(
         .get("range")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-
-    let stream_req = serde_json::json!({
-        "type": "relay.stream_request",
-        "id": request_id,
-        "stream_id": stream_path,
-        "range": range,
-    });
+    let stream_req = message_de_flux(&request_id, &stream_path, &headers);
 
     let (tx, rx) = oneshot::channel::<PendingResponse>();
     conn.pending
@@ -115,6 +109,35 @@ pub struct Comptage {
     pub range: Option<String>,
     /// Arrivee de la requete, pour le delai jusqu'au premier octet.
     pub debut: Instant,
+}
+
+/// Le message `relay.stream_request` d'une lecture : le `Range` ET le
+/// `User-Agent` du lecteur.
+///
+/// #6453 — le serveur choisit le contrat d'une radio selon le lecteur
+/// (`accepts_chunked_live_stream`, tune-stream-http) : corps chunké pour un
+/// navigateur ou un renderer Lavf, « fichier borné » pour les autres, dont
+/// AVPlayer. Sans l'agent, la requête locale du serveur n'en portait aucun, et
+/// l'iPhone recevait le contrat chunké, qu'AVPlayer rejette
+/// (`CoreMediaErrorDomain -12939`). Un serveur plus ancien ignore le champ.
+pub fn message_de_flux(
+    request_id: &str,
+    stream_path: &str,
+    headers: &HeaderMap,
+) -> serde_json::Value {
+    let entete = |nom: &str| {
+        headers
+            .get(nom)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+    serde_json::json!({
+        "type": "relay.stream_request",
+        "id": request_id,
+        "stream_id": stream_path,
+        "range": entete("range"),
+        "user_agent": entete("user-agent"),
+    })
 }
 
 /// Batit la reponse HTTP a partir de ce que le serveur a renvoye.
@@ -204,4 +227,43 @@ pub fn reponse_relayee_comptee(resp: PendingResponse, comptage: Option<Comptage>
     response
         .body(corps)
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_de_flux;
+    use axum::http::HeaderMap;
+
+    /// #6453 — l'agent d'AVPlayer voyage jusqu'au serveur avec le `Range`.
+    #[test]
+    fn le_message_de_flux_porte_le_range_et_l_agent_du_lecteur() {
+        let mut h = HeaderMap::new();
+        h.insert("range", "bytes=0-1".parse().unwrap());
+        h.insert(
+            "user-agent",
+            "AppleCoreMedia/1.0.0.24A446 (iPhone; U; CPU OS 27_0_1 like Mac OS X; fr_fr)"
+                .parse()
+                .unwrap(),
+        );
+        let m = message_de_flux("req-1", "abc.flac", &h);
+        assert_eq!(m["type"], "relay.stream_request");
+        assert_eq!(m["id"], "req-1");
+        assert_eq!(m["stream_id"], "abc.flac");
+        assert_eq!(m["range"], "bytes=0-1");
+        assert!(
+            m["user_agent"]
+                .as_str()
+                .is_some_and(|ua| ua.starts_with("AppleCoreMedia/")),
+            "l'agent du lecteur doit partir vers le serveur : {m}"
+        );
+    }
+
+    /// Sans en-têtes, les deux champs valent `null` : le serveur garde son
+    /// comportement d'avant (agent absent → contrat chunké).
+    #[test]
+    fn sans_entetes_les_champs_sont_nuls() {
+        let m = message_de_flux("req-2", "abc", &HeaderMap::new());
+        assert!(m["range"].is_null());
+        assert!(m["user_agent"].is_null());
+    }
 }

@@ -1559,6 +1559,7 @@ fn output_reach_of(
 }
 
 mod signal_path;
+pub(crate) mod textes_signal;
 pub use signal_path::*;
 
 mod ecriture;

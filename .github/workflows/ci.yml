@@ -843,6 +843,10 @@ jobs:
           # dependance a ete remplacee par `opus` / `opusic-sys`, maintenus
           # (#2251). Il n'y a plus d'avis a taire.
           ignore: RUSTSEC-2024-0436,RUSTSEC-2024-0384
+      # Cet outil est exclu du workspace et possède son propre verrou.
+      # L'audit de la racine ne couvre donc pas ses dépendances (#6503).
+      - name: Auditer le verrou du moissonneur Roon
+        run: cargo audit --file tools/moissonneur-roon/Cargo.lock --deny warnings
 
   ffi:
     name: FFI mobile (compilation)

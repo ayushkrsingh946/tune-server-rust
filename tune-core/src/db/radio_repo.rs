@@ -307,6 +307,52 @@ impl RadioRepo {
     }
 }
 
+/// #6516 — le lien d'une station de « Mes radios » avec sa fiche de
+/// l'annuaire radio-metadata.fr : `radio_stations.external_id` (SQLite 126 /
+/// PG 090), NULL tant qu'aucun rapprochement n'a réussi.
+///
+/// Gardé HORS de [`RadioStation`] : la colonne ne sert qu'au rapprochement, et
+/// l'ajouter à la structure toucherait chacune de ses quarante constructions.
+pub mod sql_annuaire {
+    use super::SqlDialect;
+
+    pub fn liens() -> &'static str {
+        "SELECT id, external_id FROM radio_stations WHERE external_id IS NOT NULL"
+    }
+
+    pub fn lier<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "UPDATE radio_stations SET external_id = {} WHERE id = {}",
+            d.placeholder(1),
+            d.placeholder(2)
+        )
+    }
+}
+
+impl RadioRepo {
+    /// Les liens station → fiche d'annuaire déjà enregistrés.
+    pub fn liens_annuaire(&self) -> Result<std::collections::HashMap<i64, String>, String> {
+        let rows = self.db.query_many(sql_annuaire::liens(), &[])?;
+        Ok(rows
+            .iter()
+            .filter_map(|c| {
+                let id = c.first().and_then(|v| v.as_i64())?;
+                let ext = c.get(1).and_then(|v| v.as_string())?;
+                (!ext.trim().is_empty()).then_some((id, ext))
+            })
+            .collect())
+    }
+
+    /// Enregistre (ou retire, avec `None`) le lien d'une station avec sa fiche.
+    pub fn lier_a_l_annuaire(&self, id: i64, external_id: Option<&str>) -> Result<(), String> {
+        let sql = self.dialect_sql(sql_annuaire::lier, sql_annuaire::lier);
+        let ext: Option<String> = external_id.map(str::to_string);
+        let params: [&dyn ToSqlValue; 2] = [&ext, &id];
+        self.db.execute(&sql, &params)?;
+        Ok(())
+    }
+}
+
 /// #5716 — le codec de sonde (`mp3`, `aac`, `ogg`…) dans la forme des
 /// codecs saisis ou servis par l'annuaire (`MP3`, `AAC`, `OGG`).
 fn libelle_du_codec(codec: &str) -> String {
