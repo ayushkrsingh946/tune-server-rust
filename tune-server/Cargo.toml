@@ -1311,6 +1311,13 @@ path = "tests/suppression_playlist_de_service.rs"
 name = "playlist_manager_cloisonnement_par_profil"
 path = "tests/playlist_manager_cloisonnement_par_profil.rs"
 
+# La fusion qui apparie d'un catalogue à l'autre relève du même droit que le
+# transfert ; la fusion « au même endroit » reste libre. `autotests = false`
+# plus haut : sans cette cible, jamais compilé.
+[[test]]
+name = "playlist_manager_fusion_droit"
+path = "tests/playlist_manager_fusion_droit.rs"
+
 # #4767 — les deux sections de la page artiste (« Compilations »,
 # « Apparitions ») et l'absence d'une section vide.
 [[test]]

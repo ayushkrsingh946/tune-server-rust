@@ -741,13 +741,25 @@ struct MergeSource {
 async fn merge_playlists(
     State(state): State<AppState>,
     profile: ActiveProfile,
+    headers: axum::http::HeaderMap,
     Json(body): Json<MergeRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let cible = body
         .target_service
         .as_deref()
         .unwrap_or("local")
         .to_string();
+
+    // Une fusion dont une source vit ailleurs que la cible apparie ses titres
+    // d'un catalogue à l'autre : c'est un transfert, soumis au même droit que
+    // `POST /transfer`. La fusion « au même endroit » (bibliothèque →
+    // bibliothèque, ou playlists d'un service vers ce même service) reste
+    // gratuite. Le contrôle se joue avant toute lecture et toute écriture.
+    if fusion_hors_de_la_cible(&body, &cible)
+        && let Err(refus) = refus_premium_du_transfert(&state, &headers).await
+    {
+        return refus;
+    }
 
     // Les sources, lues chacune chez elle. Une seule erreur de lecture arrête
     // tout : fusionner la moitié d'une playlist sans le dire serait pire.
@@ -761,6 +773,13 @@ async fn merge_playlists(
     } else {
         fusion_vers_le_service(&state, &body, &cible, pistes).await
     }
+}
+
+/// Une source au moins vit-elle ailleurs que sur la cible ?
+fn fusion_hors_de_la_cible(body: &MergeRequest, cible: &str) -> bool {
+    body.playlists
+        .iter()
+        .any(|source| source.service.as_deref().unwrap_or("local") != cible)
 }
 
 /// Une piste vue depuis sa source, réduite à ce qui sert à l'apparier.
