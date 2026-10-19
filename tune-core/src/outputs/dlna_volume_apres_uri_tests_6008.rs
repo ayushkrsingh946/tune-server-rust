@@ -272,3 +272,65 @@ async fn une_baisse_apres_la_pose_n_est_pas_corrigee() {
     assert!(!compat::volume_remonte_a_l_uri(udn));
     vie.abort();
 }
+
+/// Appareil qui porte DÉJÀ la règle « volume remonté à l'URI », comme ceux de
+/// Reivax66 (fil 2307) et de pissa7 (fil 2315) en rc6 : Tune pose `consigne`,
+/// une première piste part, puis l'appareil rapporte de lui-même `lu` HORS de
+/// la fenêtre qui suit la pose. Rend le volume de l'appareil après la pose de
+/// la piste suivante.
+async fn volume_apres_la_piste_suivante(udn: &str, consigne: f64, lu: u32) -> (u32, f64) {
+    compat::reinitialiser_compatibilite(udn).unwrap();
+    compat::memoriser_volume_remonte_a_l_uri(udn);
+    let etat = FauxRenderer::new(false);
+    let (sortie, vie) = demarrer(etat.clone(), udn).await;
+
+    sortie.set_volume(consigne).await.unwrap();
+    sortie
+        .play_media(&piste("http://127.0.0.1:9/stream/6472-a.flac"))
+        .await
+        .expect("la première piste part");
+    sortie.vieillir_la_pose_d_uri();
+    // L'appareil rapporte un volume que Tune n'a pas posé, hors fenêtre.
+    *etat.volume.lock().await = lu;
+    let statut = sortie.get_status().await.unwrap();
+    sortie
+        .play_media(&piste("http://127.0.0.1:9/stream/6472-b.flac"))
+        .await
+        .expect("la piste suivante part");
+    let apres = *etat.volume.lock().await;
+
+    compat::reinitialiser_compatibilite(udn).unwrap();
+    vie.abort();
+    (apres, statut.volume)
+}
+
+/// 🔴 #6472 (Reivax66, fil 2307, rc6) : au passage de la radio FIP à un album,
+/// Tune a mis l'ampli à 0. Le renderer avait rapporté 0 hors de la fenêtre ;
+/// cette LECTURE devenait le volume connu et la pose suivante la réimposait
+/// (`dlna_volume_reimpose_apres_uri … volume_pct=0`). Seule la dernière
+/// consigne de Tune (52 %) peut être réimposée.
+#[tokio::test]
+async fn une_lecture_a_zero_n_est_jamais_reimposee_apres_l_uri() {
+    let (apres, lu) = volume_apres_la_piste_suivante("uuid:banc-6472-zero", 0.52, 0).await;
+    assert!(lu.abs() < 0.005, "prémisse : le sondeur a bien lu 0 ({lu})");
+    assert_eq!(
+        apres, 52,
+        "après la pose d'URI, Tune doit reposer SA consigne (52 %), jamais un 0 lu sur l'appareil"
+    );
+}
+
+/// 🔴 #6008 (pissa7, fil 2315, rc6) : même mécanisme, dans l'autre sens. La
+/// Cabasse Abyss rapporte 80 % entre deux pistes, et Tune réimposait 80 %
+/// alors que l'auditeur avait ramené le volume à 13 % depuis Tune.
+#[tokio::test]
+async fn un_80_remonte_par_l_appareil_n_est_jamais_reimpose_apres_l_uri() {
+    let (apres, lu) = volume_apres_la_piste_suivante("uuid:banc-6472-abyss", 0.13, 80).await;
+    assert!(
+        (lu - 0.80).abs() < 0.005,
+        "prémisse : le sondeur a bien lu 80 ({lu})"
+    );
+    assert_eq!(
+        apres, 13,
+        "après la pose d'URI, Tune doit reposer SA consigne (13 %), pas les 80 % lus sur l'appareil"
+    );
+}

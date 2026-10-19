@@ -85,7 +85,7 @@ fn unpack(bytes: &[u8], target: &str) -> Result<(Package, BTreeMap<String, Vec<u
     let mut portable_names = BTreeSet::new();
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|e| e.to_string())?;
-        let name = file.name().to_string();
+        let name = file.name().map_err(|e| e.to_string())?.into_owned();
         if !safe_path(&name)
             || file.is_dir()
             || file
