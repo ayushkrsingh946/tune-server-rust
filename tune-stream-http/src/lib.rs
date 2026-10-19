@@ -2026,9 +2026,9 @@ fn perte_menace_la_lecture(avance_ms: i64) -> bool {
     avance_ms < AVANCE_SANS_RISQUE_MS
 }
 
-/// Débit nominal d'un flux PCM servi en WAV, en octets par seconde.
+/// Débit nominal d'un flux PCM WAV ou DSD natif DSF/DFF, en octets/s.
 ///
-/// `None` hors WAV, et c'est délibéré : sur un format compressé la
+/// `None` pour les formats compressés : la
 /// correspondance octets ↔ temps n'est pas linéaire, et une avance calculée
 /// dessus mentirait. Mieux vaut ne rien dire que dire un chiffre faux — même
 /// contrat que le `debit_kio_s` sous la milliseconde.
@@ -2038,11 +2038,17 @@ fn debit_nominal_octets_par_seconde(
     bit_depth: u16,
     channels: u16,
 ) -> Option<u32> {
-    if format != "wav" {
-        return None;
-    }
-    let octets_par_trame = u32::from(channels) * u32::from(bit_depth / 8);
-    let debit = sample_rate.checked_mul(octets_par_trame)?;
+    let debit = match format {
+        "wav" => sample_rate.checked_mul(u32::from(channels) * u32::from(bit_depth / 8))?,
+        // DSD : sample_rate est la fréquence des BITS (11 289 600 pour
+        // DSD256), pas une fréquence PCM. Diviser avant de multiplier la
+        // profondeur tronquerait le bit unique à zéro. Le DST compressé
+        // n'est pas servi comme DFF : il est reconstruit en DSF (#6221).
+        "dsf" | "dff" if bit_depth == 1 && sample_rate.is_multiple_of(8) => {
+            (sample_rate / 8).checked_mul(u32::from(channels))?
+        }
+        _ => return None,
+    };
     (debit > 0).then_some(debit)
 }
 
@@ -5604,16 +5610,50 @@ mod terrain_perdu_4645 {
         );
     }
 
-    /// Hors WAV, on ne rend RIEN plutôt qu'un chiffre faux : sur un format
+    /// Hors formats non compressés, on ne rend RIEN : sur un format
     /// compressé la correspondance octets ↔ temps n'est pas linéaire.
     #[test]
-    fn hors_wav_aucun_nominal_nest_rendu() {
-        for format in ["flac", "mp3", "aac", "dsf", ""] {
+    fn hors_formats_non_compresses_aucun_nominal_nest_rendu() {
+        for format in ["flac", "mp3", "aac", "dst", ""] {
             assert_eq!(
                 debit_nominal_octets_par_seconde(format, 44_100, 24, 2),
                 None,
                 "{format} : un nominal calculé sur un format compressé mentirait"
             );
+        }
+    }
+
+    #[test]
+    fn dsd256_dsf_et_dff_mesurent_le_retard_du_k17_6478() {
+        for format in ["dsf", "dff"] {
+            let nominal = debit_nominal_octets_par_seconde(format, 11_289_600, 1, 2)
+                .expect("DSD256 natif : la livraison doit avoir un débit nominal");
+            assert_eq!(nominal, 2_822_400, "DSD256 stéréo : bits / 8 × canaux");
+            // Première connexion du journal #6478 : sous le temps réel.
+            assert_eq!(
+                avance_de_livraison_ms(759_103_488, nominal, 274_046),
+                -5_090
+            );
+            assert_eq!(
+                avance_de_livraison_ms(u64::from(nominal), nominal, 1_000),
+                0
+            );
+            assert_eq!(
+                debit_nominal_octets_par_seconde(format, 2_822_400, 1, 6),
+                Some(2_116_800)
+            );
+            for (rate, depth, channels) in [
+                (0, 1, 2),
+                (11_289_600, 1, 0),
+                (11_289_600, 24, 2),
+                (1, 1, 2),
+                (u32::MAX - 7, 1, u16::MAX),
+            ] {
+                assert_eq!(
+                    debit_nominal_octets_par_seconde(format, rate, depth, channels),
+                    None
+                );
+            }
         }
     }
 
