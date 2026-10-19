@@ -857,10 +857,20 @@ async fn l_agent_qui_revoque_le_maitre_fait_supprimer_ses_zones_chez_le_maitre()
     assert_eq!(r.status(), 200);
     attendre(
         || {
-            let visible = zone_visible(&maitre, &device_id).is_some();
-            async move { !visible }
+            let maitre = &maitre;
+            let device_id = &device_id;
+            let agent_id = &agent_id;
+            async move {
+                // La zone est masquée AVANT le retrait asynchrone de la sortie.
+                // Attendre la révocation entière, pas cet état intermédiaire.
+                zone_visible(maitre, device_id).is_none()
+                    && !maitre.state.outputs.lock().await.contains(device_id)
+                    && tune_server::agent_tune::maitre::agents(&maitre.state)
+                        .iter()
+                        .all(|a| &a.agent_id != agent_id)
+            }
         },
-        "la zone de l'agent qui a révoqué le maître est supprimée chez le maître",
+        "révocation incomplète : zone, sortie ou appairage encore présent chez le maître",
     )
     .await;
     assert!(!maitre.state.outputs.lock().await.contains(&device_id));
