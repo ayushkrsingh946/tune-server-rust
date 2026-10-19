@@ -1,0 +1,11 @@
+database_v1_extrait.jsonl — onze lignes copiées telles quelles de la base OPRA
+(https://opra.roonlabs.net/database_v1.jsonl, relevée le 19/10/2026), pour les
+témoins de tune-core/src/audio/opra_base.rs.
+
+Source : OPRA, The OPRA Contributors — https://github.com/opra-project/OPRA
+Courbes : oratory1990 (Sennheiser HD650, Fostex T-X0, FiiO FT1).
+
+Ces données (fabricants, produits, courbes d'égalisation) sont publiées sous
+licence Creative Commons Attribution-ShareAlike 4.0 International
+(CC BY-SA 4.0) : https://creativecommons.org/licenses/by-sa/4.0/legalcode
+Elles restent sous cette licence ici. Elles ne sont pas modifiées.

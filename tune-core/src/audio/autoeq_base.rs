@@ -132,7 +132,7 @@ fn analyser_ligne(ligne: &str) -> Option<EntreeAutoEq> {
 }
 
 /// Minuscules, sans accents.
-fn normaliser(s: &str) -> String {
+pub(crate) fn normaliser(s: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     s.nfd()
         .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
@@ -141,7 +141,7 @@ fn normaliser(s: &str) -> String {
 }
 
 /// Sans espaces ni ponctuation : « HD650 » trouve « HD 650 », « HD-650 ».
-fn compacter(s: &str) -> String {
+pub(crate) fn compacter(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
@@ -449,7 +449,7 @@ fn fichier_de_profil(chemin: &str) -> String {
     format!("profils/{hex}.txt")
 }
 
-fn ecrire_atomiquement(chemin: &Path, texte: &str) -> std::io::Result<()> {
+pub(crate) fn ecrire_atomiquement(chemin: &Path, texte: &str) -> std::io::Result<()> {
     if let Some(parent) = chemin.parent() {
         std::fs::create_dir_all(parent)?;
     }

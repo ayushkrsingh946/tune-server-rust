@@ -7,6 +7,8 @@ pub mod audiophile;
 pub mod autoeq;
 /// #6388 — la base AutoEq en ligne : index, recherche, copie locale.
 pub mod autoeq_base;
+/// #6532 — la recherche de casques unifiée : AutoEq et OPRA dans une liste.
+pub mod bases_casques;
 pub mod canaux_declares;
 pub mod canaux_reseau_4573;
 
@@ -96,6 +98,8 @@ pub mod mono_downmix;
 /// Greffons natifs tiers : paquets signés hors des quatre emplacements
 /// intégrés, toujours Premium, branchés sur l'étage casque de la chaîne.
 pub mod natifs_tiers;
+/// #6532 — la base OPRA : seconde source de corrections de casques.
+pub mod opra_base;
 pub mod opus_ogg;
 /// L'ordonnancement temps réel du fil de rendu local (#3206). Hors
 /// `local-audio` pour la même raison que `periode_alsa` : la décision de

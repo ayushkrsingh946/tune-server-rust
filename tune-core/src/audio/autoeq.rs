@@ -275,11 +275,11 @@ impl std::error::Error for ErreurAutoEq {}
 /// Elles sont recopiées ici pour REFUSER ce qui les dépasse plutôt que de le
 /// rogner en silence : un fichier qui demande +40 dB ne serait pas reproduit,
 /// et l'utilisateur mérite de l'apprendre à l'import, pas à l'oreille.
-const GAIN_MAX_DB: f64 = 24.0;
-const Q_MIN: f64 = 0.1;
-const Q_MAX: f64 = 30.0;
+pub(crate) const GAIN_MAX_DB: f64 = 24.0;
+pub(crate) const Q_MIN: f64 = 0.1;
+pub(crate) const Q_MAX: f64 = 30.0;
 /// Au-delà, aucune fréquence d'échantillonnage ne place le filtre sous Nyquist.
-const FREQ_MAX_HZ: f64 = 192_000.0;
+pub(crate) const FREQ_MAX_HZ: f64 = 192_000.0;
 
 /// Analyse un profil AutoEq au format ParametricEQ.
 ///
