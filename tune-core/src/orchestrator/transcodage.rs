@@ -501,7 +501,9 @@ pub(super) async fn transcode_source_to_file_avec_crossfeed(
         let (debut_s, duree_s) = tranche
             .map(|t| (t.debut_s, t.duree_s))
             .unwrap_or((0.0, 0.0));
-        crate::audio::decode::decode_to_pcm(
+        // #6057 — le repli de canaux pour le renderer route par la
+        // disposition que le fichier déclare.
+        crate::audio::decode::decode_to_pcm_routee(
             &source,
             Some(out_sr),
             Some(channels as u32),
