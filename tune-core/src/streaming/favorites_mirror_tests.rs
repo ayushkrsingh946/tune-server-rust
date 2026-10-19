@@ -24,6 +24,8 @@ struct Compte {
     panne: bool,
     /// Journal des écritures reçues : `"add tracks 71"`, `"remove albums 9"`.
     appels: Vec<String>,
+    /// Jamais connecté (#6369) : `auth_status` le dit, `utilisable` suit.
+    deconnecte: bool,
 }
 
 struct ServiceSimule {
@@ -97,7 +99,7 @@ impl StreamingService for ServiceSimule {
     }
     async fn auth_status(&self) -> AuthStatus {
         AuthStatus {
-            authenticated: true,
+            authenticated: !self.compte.lock().unwrap().deconnecte,
             ..Default::default()
         }
     }
@@ -704,4 +706,54 @@ async fn pg_5997_favoris_miroir_sur_postgresql() {
             )
             .unwrap();
     }
+}
+
+/// #6369 — un service en miroir jamais connecté (Tidal, toujours au
+/// registre) n'est pas un échec : Qobuz rafraîchi sans erreur et Tidal non
+/// connecté publient `ok`, pas `echec`. Fil 2279 : le bandeau « le dernier
+/// rafraîchissement a échoué » restait affiché en permanence.
+#[tokio::test]
+async fn un_service_non_connecte_n_est_pas_un_echec_6369() {
+    let (backend, profils, _dir) = base(1);
+    let pid = profils[0];
+    let (qobuz, _) = ServiceSimule::nouveau("miroir-6369-qobuz");
+    let (tidal, compte_tidal) = ServiceSimule::nouveau("miroir-6369-tidal");
+    compte_tidal.lock().unwrap().deconnecte = true;
+
+    let bilan = rafraichir(&qobuz, &backend, pid).await;
+    assert_eq!(bilan.echecs, 0, "{bilan:?}");
+    let bilan = rafraichir(&tidal, &backend, pid).await;
+    assert_eq!(bilan.echecs, 0, "rien n'a été tenté : {bilan:?}");
+    assert_eq!(etat("miroir-6369-tidal").statut, STATUT_NON_CONNECTE);
+
+    let noms = vec![
+        "miroir-6369-qobuz".to_string(),
+        "miroir-6369-tidal".to_string(),
+    ];
+    assert_eq!(
+        statut_global(&noms),
+        "ok",
+        "Tidal non connecté fait publier un échec alors que Qobuz s'est rafraîchi"
+    );
+    // Seul le service non connecté : « aucun service en miroir n'est connecté ».
+    assert_eq!(statut_global(&noms[1..]), "aucun");
+}
+
+/// #6369 — un service CONNECTÉ en panne reste un échec, même à côté d'un
+/// service non connecté.
+#[tokio::test]
+async fn une_panne_d_un_service_connecte_reste_un_echec_6369() {
+    let (backend, profils, _dir) = base(1);
+    let pid = profils[0];
+    let (qobuz, compte_qobuz) = ServiceSimule::nouveau("miroir-6369b-qobuz");
+    let (tidal, compte_tidal) = ServiceSimule::nouveau("miroir-6369b-tidal");
+    compte_tidal.lock().unwrap().deconnecte = true;
+    panne(&compte_qobuz, true);
+    rafraichir(&qobuz, &backend, pid).await;
+    rafraichir(&tidal, &backend, pid).await;
+    let noms = vec![
+        "miroir-6369b-qobuz".to_string(),
+        "miroir-6369b-tidal".to_string(),
+    ];
+    assert_eq!(statut_global(&noms), "echec");
 }

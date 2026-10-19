@@ -190,7 +190,7 @@ pub struct BilanMiroir {
 pub struct EtatMiroir {
     pub miroir: bool,
     pub dernier_rafraichissement: Option<String>,
-    /// `jamais`, `ok` ou `echec`.
+    /// `jamais`, `ok`, `echec` ou `non_connecte` ([`STATUT_NON_CONNECTE`]).
     pub statut: &'static str,
     pub erreur: Option<String>,
     pub en_attente: usize,
@@ -252,6 +252,47 @@ pub fn invalider(service: &str) {
 pub fn est_perime(service: &str, ttl: Duration) -> bool {
     let e = etat(service);
     e.perime || e.instant.is_none_or(|i| i.elapsed() >= ttl)
+}
+
+/// Le statut d'un service en miroir qui n'est pas connecté (jamais
+/// configuré, session fermée) : ce n'est PAS un échec de rafraîchissement
+/// (#6369). Tidal est toujours au registre ; le compter en échec faisait
+/// afficher « le dernier rafraîchissement a échoué » à quiconque n'a que
+/// Qobuz, à chaque ouverture des Favoris.
+pub const STATUT_NON_CONNECTE: &str = "non_connecte";
+
+/// L'état global des miroirs `noms`, publié dans `X-Tune-Favoris-Miroir` :
+/// `aucun`, `echec`, `en_attente` ou `ok`.
+///
+/// Un service non connecté ne décide ni de `echec` ni de `ok` : il ne compte
+/// que par ses écritures en attente (elles attendent bel et bien). Si aucun
+/// service n'est connecté et que rien n'attend, c'est `aucun` — « aucun
+/// service en miroir n'est connecté », le sens que le client lui donne.
+pub fn statut_global(noms: &[String]) -> &'static str {
+    let etats: Vec<EtatMiroir> = noms.iter().map(|n| etat(n)).collect();
+    let connectes: Vec<&EtatMiroir> = etats
+        .iter()
+        .filter(|e| e.statut != STATUT_NON_CONNECTE)
+        .collect();
+    if connectes.iter().any(|e| e.statut == "echec") {
+        "echec"
+    } else if etats.iter().any(|e| e.en_attente > 0) {
+        "en_attente"
+    } else if connectes.is_empty() {
+        "aucun"
+    } else {
+        "ok"
+    }
+}
+
+fn noter_non_connecte(service: &str, en_attente: usize) {
+    let mut e = etats().lock().unwrap_or_else(|p| p.into_inner());
+    let etat = e.entry(service.to_string()).or_default();
+    etat.instant = Some(Instant::now());
+    etat.perime = false;
+    etat.statut = STATUT_NON_CONNECTE;
+    etat.erreur = Some("service non connecté".into());
+    etat.en_attente = en_attente;
 }
 
 fn noter_rafraichissement(service: &str, bilan: &BilanMiroir) {
@@ -767,11 +808,11 @@ pub async fn rafraichir(
         let svc = arc.read().await;
         let service = svc.name().to_string();
         if !svc.utilisable().await {
-            bilan.echecs = 1;
+            // #6369 — non connecté n'est pas un échec : rien n'a été tenté.
             bilan.erreur = Some("service non connecté".into());
             drop(svc);
             bilan.en_attente = compter_en_attente(backend, &service);
-            noter_rafraichissement(&service, &bilan);
+            noter_non_connecte(&service, bilan.en_attente);
             return bilan;
         }
         let mut lectures = Vec::new();
