@@ -1535,7 +1535,10 @@ impl OutputTarget for OaatOutput {
                     };
 
                     let mut buf = file_data;
-                    let si = match detect_and_parse(&mut buf) {
+                    // Le fichier est lu en entier : la tranche rendue s'arrête
+                    // à la fin du chunk `data`, sans les étiquettes ni la
+                    // pochette rangées derrière (#6497).
+                    let si = match super::helpers::detect_and_parse_fichier(&mut buf) {
                         Some(info) => info,
                         None => {
                             debug!("format not natively supported, falling back to HTTP stream");
