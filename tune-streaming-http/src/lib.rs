@@ -551,6 +551,11 @@ where
         )
         // #4993 — crédits d'une piste et d'un album de SERVICE, dans la forme
         // de `/library/tracks/{id}/credits` (501 si le service n'en a pas).
+        // #6481 — les livrets PDF que le service publie pour un album.
+        .route(
+            "/{service}/albums/{album_id}/booklets",
+            get(service_album_booklets),
+        )
         .route(
             "/{service}/tracks/{track_id}/credits",
             get(service_track_credits),
@@ -1040,6 +1045,18 @@ async fn service_album_context(
 ) -> Response {
     with_svc!(&state, &service, |svc| svc
         .get_album_context(&album_id)
+        .await)
+}
+
+/// #6481 — les livrets PDF d'un album de service (cpadiou77 et Patatorz, fil
+/// forum 2326) : `[{"name": "…", "url": "https://…pdf"}]`, vide s'il n'y en a
+/// pas.
+async fn service_album_booklets(
+    State(state): State<StreamingHttpState>,
+    Path((service, album_id)): Path<(String, String)>,
+) -> Response {
+    with_svc!(&state, &service, |svc| svc
+        .get_album_booklets(&album_id)
         .await)
 }
 
@@ -3653,3 +3670,139 @@ mod service_desactive_jamais_appele_tests;
 
 #[cfg(test)]
 mod youtube_decouverte_tests;
+
+/// #6481 — `GET /streaming/{service}/albums/{id}/booklets` : les livrets PDF
+/// d'un album de service (cpadiou77 et Patatorz, fil forum 2326).
+#[cfg(test)]
+mod tests_livrets_album_6481 {
+    use super::*;
+    use tower::ServiceExt;
+    use tune_core::TuneError;
+    use tune_core::db::sqlite::SqliteDb;
+    use tune_core::streaming::traits::{
+        AuthStatus, SearchResults, StreamAlbum, StreamArtist, StreamBooklet, StreamPlaylist,
+        StreamTrack, StreamUrl,
+    };
+
+    struct ServiceAvecLivret {
+        nom: String,
+    }
+
+    const PANNE: &str = "hors sujet";
+
+    #[async_trait::async_trait]
+    impl StreamingService for ServiceAvecLivret {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+        fn name(&self) -> &str {
+            &self.nom
+        }
+        fn enabled(&self) -> bool {
+            true
+        }
+        fn set_enabled(&mut self, _e: bool) {}
+        async fn authenticate(&mut self, _c: &Value) -> Result<AuthStatus, TuneError> {
+            Ok(AuthStatus::default())
+        }
+        async fn auth_status(&self) -> AuthStatus {
+            AuthStatus::default()
+        }
+        async fn logout(&mut self) -> Result<(), TuneError> {
+            Ok(())
+        }
+        async fn search(&self, _q: &str, _l: usize) -> Result<SearchResults, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_track(&self, _t: &str) -> Result<StreamTrack, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_track_url(&self, _t: &str, _q: Option<&str>) -> Result<StreamUrl, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_album(&self, _a: &str) -> Result<StreamAlbum, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_album_tracks(&self, _a: &str) -> Result<Vec<StreamTrack>, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_artist(&self, _a: &str) -> Result<StreamArtist, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_playlist(&self, _p: &str) -> Result<StreamPlaylist, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_playlist_tracks(&self, _p: &str) -> Result<Vec<StreamTrack>, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_user_playlists(&self) -> Result<Vec<StreamPlaylist>, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_user_albums(&self) -> Result<Vec<StreamAlbum>, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_user_artists(&self) -> Result<Vec<StreamArtist>, TuneError> {
+            Err(TuneError::Streaming(PANNE.into()))
+        }
+        async fn get_album_booklets(
+            &self,
+            album_id: &str,
+        ) -> Result<Vec<StreamBooklet>, TuneError> {
+            Ok(if album_id == "a-1" {
+                vec![StreamBooklet {
+                    name: "Livret".into(),
+                    url: "https://static.qobuz.com/goodies/1.pdf".into(),
+                }]
+            } else {
+                vec![]
+            })
+        }
+    }
+
+    async fn appel(nom: &str, album: &str) -> (StatusCode, String) {
+        let backend: Arc<dyn DbBackend> =
+            Arc::new(SqliteDb::open_in_memory().expect("sqlite en memoire"));
+        let mut registre = ServiceRegistry::new();
+        registre.register(Box::new(ServiceAvecLivret {
+            nom: nom.to_string(),
+        }));
+        let etat = StreamingHttpState::new(
+            backend,
+            Arc::new(Mutex::new(registre)),
+            Arc::new(EventBus::new()),
+        );
+        let app = Router::new().nest("/api/v1/streaming", router().with_state(etat));
+        let r = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/streaming/{nom}/albums/{album}/booklets"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let statut = r.status();
+        let octets = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        (statut, String::from_utf8_lossy(&octets).into_owned())
+    }
+
+    #[tokio::test]
+    async fn les_livrets_d_un_album_de_service_sont_servis() {
+        let (statut, corps) = appel("livret-6481", "a-1").await;
+        assert_eq!(
+            statut,
+            StatusCode::OK,
+            "GET /streaming/{{service}}/albums/{{id}}/booklets doit exister (#6481) : {corps}"
+        );
+        let v: Value = serde_json::from_str(&corps).unwrap();
+        assert_eq!(
+            v,
+            json!([{"name": "Livret", "url": "https://static.qobuz.com/goodies/1.pdf"}])
+        );
+        let (statut, corps) = appel("sans-livret-6481", "a-2").await;
+        assert_eq!((statut, corps.as_str()), (StatusCode::OK, "[]"));
+    }
+}

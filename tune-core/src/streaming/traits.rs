@@ -507,6 +507,15 @@ pub struct AlbumContext {
     pub label_name: Option<String>,
 }
 
+/// Un livret numérique publié par le service pour un album (#6481) — les
+/// « goodies » de Qobuz. `url` est l'adresse du PDF chez le service, en
+/// `https`, à ouvrir telle quelle par le client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamBooklet {
+    pub name: String,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthStatus {
     pub authenticated: bool,
@@ -811,6 +820,12 @@ pub trait StreamingService: Send + Sync {
         Err(TuneError::Unsupported(
             "album context not supported for this service".into(),
         ))
+    }
+    /// Les livrets PDF que le service publie pour un album (#6481). Un
+    /// service qui n'en publie pas rend une liste vide : la fiche n'affiche
+    /// alors aucun bouton.
+    async fn get_album_booklets(&self, _album_id: &str) -> Result<Vec<StreamBooklet>, TuneError> {
+        Ok(vec![])
     }
     /// Crédits d'une piste du service (#4993), dans la forme de
     /// [`StreamCredit`]. Un service qui n'a AUCUNE source de crédits répond

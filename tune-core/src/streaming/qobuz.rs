@@ -3093,6 +3093,13 @@ impl StreamingService for QobuzService {
         })
     }
 
+    /// #6481 — les livrets numériques de l'album (`goodies` de `album/get`),
+    /// depuis la réponse déjà mise en cache par `detail_album`.
+    async fn get_album_booklets(&self, album_id: &str) -> Result<Vec<StreamBooklet>, TuneError> {
+        let data = self.detail_album(album_id).await?;
+        Ok(livrets_qobuz(&data))
+    }
+
     /// #4993 — crédits d'une piste Qobuz : la chaîne `performers` de
     /// `/track/get`.
     async fn get_track_credits(&self, track_id: &str) -> Result<Vec<StreamCredit>, TuneError> {
@@ -7538,5 +7545,97 @@ mod tests_playlists_proprietaire_2097 {
         assert_eq!(v[0]["editable"], json!(true));
         assert_eq!(v[1]["editable"], json!(false));
         assert!(v[2].get("editable").is_none());
+    }
+}
+
+/// Les livrets PDF d'un album Qobuz, depuis `goodies` de `album/get` (#6481).
+///
+/// Forme relevée par la sonde `raw-keys` sur le .18 le 19/10/2026 (Kind of
+/// Blue, 5099749522428, un élément) : chaque élément porte `id`,
+/// `file_format_id`, `name`, `description`, `url` et `original_url`. Les
+/// VALEURS des adresses ne sortent pas de la sonde : on ne retient donc qu'un
+/// élément dont l'adresse est en `https`, chez Qobuz, et désigne un PDF
+/// (extension `.pdf`, ou `file_format_id` 21, le livret numérique). Toute autre
+/// forme est écartée plutôt que proposée à l'ouverture.
+pub(crate) fn livrets_qobuz(album: &serde_json::Value) -> Vec<StreamBooklet> {
+    let Some(goodies) = album["goodies"].as_array() else {
+        return vec![];
+    };
+    goodies
+        .iter()
+        .filter_map(|g| {
+            let url = [&g["url"], &g["original_url"]]
+                .into_iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .find(|u| adresse_de_livret_qobuz(u, g["file_format_id"].as_u64()))?;
+            let nom = g["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .unwrap_or("Livret");
+            Some(StreamBooklet {
+                name: nom.to_string(),
+                url: url.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// `https://<…>.qobuz.com/…` et un PDF.
+fn adresse_de_livret_qobuz(url: &str, format: Option<u64>) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let hote_qobuz = u
+        .host_str()
+        .is_some_and(|h| h == "qobuz.com" || h.ends_with(".qobuz.com"));
+    let pdf = u.path().to_ascii_lowercase().ends_with(".pdf") || format == Some(21);
+    u.scheme() == "https" && hote_qobuz && pdf
+}
+
+#[cfg(test)]
+mod tests_livrets_qobuz_6481 {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn le_livret_qobuz_est_lu_dans_goodies() {
+        let album = json!({"goodies": [{
+            "id": 153842, "file_format_id": 21, "name": "Livret Numérique",
+            "description": "", "url": "https://static.qobuz.com/goodies/42/000153842.pdf",
+            "original_url": "https://static.qobuz.com/goodies/42/000153842.pdf"
+        }]});
+        assert_eq!(
+            livrets_qobuz(&album),
+            vec![StreamBooklet {
+                name: "Livret Numérique".into(),
+                url: "https://static.qobuz.com/goodies/42/000153842.pdf".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn sans_goodies_ou_goodies_vide_aucun_livret() {
+        assert!(livrets_qobuz(&json!({"id": "1"})).is_empty());
+        assert!(livrets_qobuz(&json!({"goodies": []})).is_empty());
+    }
+
+    #[test]
+    fn une_adresse_douteuse_n_est_pas_proposee() {
+        let album = json!({"goodies": [
+            {"name": "http", "url": "http://static.qobuz.com/goodies/a.pdf"},
+            {"name": "ailleurs", "url": "https://qobuz.com.exemple.net/a.pdf"},
+            {"name": "script", "url": "javascript:alert(1)//.pdf"},
+            {"name": "video", "file_format_id": 3, "url": "https://static.qobuz.com/goodies/a.mp4"},
+            {"name": "", "url": "", "original_url": "https://static.qobuz.com/goodies/b.pdf"}
+        ]});
+        assert_eq!(
+            livrets_qobuz(&album),
+            vec![StreamBooklet {
+                name: "Livret".into(),
+                url: "https://static.qobuz.com/goodies/b.pdf".into(),
+            }]
+        );
     }
 }

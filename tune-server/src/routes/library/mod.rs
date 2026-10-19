@@ -37,6 +37,8 @@ mod genres;
 pub(crate) use genres::genres_de_l_album;
 pub(crate) mod identification_lot;
 mod ingest;
+/// #6481 — le livret PDF rangé dans le dossier d'un album.
+mod livrets;
 mod lyrics_pass;
 mod proposals;
 mod query_multi;
@@ -485,6 +487,9 @@ pub fn router() -> Router<AppState> {
         .route("/artists/{id}/credits", get(credits::artist_credits))
         // #1572 — crédits d’un album : un aller-retour pour toute la fiche.
         .route("/albums/{id}/credits", get(credits::album_credits))
+        // #6481 — les livrets PDF du dossier de l'album, et le fichier.
+        .route("/albums/{id}/booklets", get(livrets::livrets_album))
+        .route("/albums/{id}/booklets/{name}", get(livrets::livret_album))
         .route(
             "/tracks/{id}/credits/enrich",
             post(credits::enrich_track_credits),
