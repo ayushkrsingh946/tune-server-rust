@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tune_assistant_ia::Passerelle;
-use tune_assistant_ia::coffre::Coffre;
 use tune_assistant_ia::reglages::{self, Modification};
 use tune_core::db::backend::DbBackend;
 use tune_core::db::settings_repo::SettingsRepo;
@@ -130,7 +129,7 @@ async fn le_dialogue_a_outils_part_chez_un_fournisseur_compatible_openai() {
     let (adresse, recues) = faux_serveur("/chat/completions", false).await;
     reglages::appliquer(
         &db,
-        &Coffre::new(dossier.path()),
+        &tune_assistant_ia::coffre::du_greffon(dossier.path()),
         &Modification {
             fournisseur: Some("compatible_openai".into()),
             modele: Some("mon-modele".into()),
@@ -198,7 +197,7 @@ async fn le_dialogue_a_outils_part_chez_ollama_sans_cle_et_sans_cout() {
     let (adresse, recues) = faux_serveur("/api/chat", true).await;
     reglages::appliquer(
         &db,
-        &Coffre::new(dossier.path()),
+        &tune_assistant_ia::coffre::du_greffon(dossier.path()),
         &Modification {
             fournisseur: Some("ollama".into()),
             modele: Some("llama3.2".into()),

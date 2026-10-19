@@ -34,9 +34,8 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 # La clé du cache des réponses.
 sha2 = { workspace = true }
-# La clé d'API chiffrée au repos : les mêmes primitives que
-# `tune_core::secret_envelope` et `db_backup`.
-chacha20poly1305 = "0.10"
+# Le hasard des identifiants de lot (`suggestions`). La clé d'API, elle, est
+# scellée par le coffre de `tune-core` (`tune_core::coffre`).
 getrandom = "0.2"
 
 [dev-dependencies]

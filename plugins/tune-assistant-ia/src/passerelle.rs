@@ -61,7 +61,7 @@ impl Passerelle {
     ) -> Self {
         Self {
             backend,
-            coffre: Arc::new(Coffre::new(dossier_secret)),
+            coffre: Arc::new(crate::coffre::du_greffon(dossier_secret)),
             fabrique,
             verrou: appel::verrou_de_consommation(),
         }

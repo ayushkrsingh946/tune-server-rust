@@ -178,7 +178,7 @@ mod tests {
     fn aller_la_cle_en_clair_est_scellee_puis_effacee() {
         let db = base();
         let dir = tempfile::tempdir().unwrap();
-        let coffre = Coffre::new(dir.path());
+        let coffre = crate::coffre::du_greffon(dir.path());
         SettingsRepo::with_backend(db.clone())
             .set("anthropic_api_key", CLE)
             .unwrap();
@@ -207,7 +207,7 @@ mod tests {
     fn idempotence_une_seconde_migration_ne_change_rien() {
         let db = base();
         let dir = tempfile::tempdir().unwrap();
-        let coffre = Coffre::new(dir.path());
+        let coffre = crate::coffre::du_greffon(dir.path());
         SettingsRepo::with_backend(db.clone())
             .set("anthropic_api_key", CLE)
             .unwrap();
@@ -240,7 +240,7 @@ mod tests {
     fn cle_absente_rien_n_est_ecrit_pas_meme_la_cle_maitresse() {
         let db = base();
         let dir = tempfile::tempdir().unwrap();
-        let coffre = Coffre::new(dir.path());
+        let coffre = crate::coffre::du_greffon(dir.path());
         // Une clé blanche ne compte pas.
         SettingsRepo::with_backend(db.clone())
             .set("openai_api_key", "   ")
@@ -262,7 +262,7 @@ mod tests {
     fn une_autre_cle_de_l_assistant_n_est_pas_ecrasee_l_heritee_est_conservee_scellee() {
         let db = base();
         let dir = tempfile::tempdir().unwrap();
-        let coffre = Coffre::new(dir.path());
+        let coffre = crate::coffre::du_greffon(dir.path());
         let s = SettingsRepo::with_backend(db.clone());
         s.set(CLE_FOURNISSEUR, "gemini").unwrap();
         s.set(

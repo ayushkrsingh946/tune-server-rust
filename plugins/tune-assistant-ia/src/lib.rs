@@ -95,7 +95,7 @@ impl Etat {
     ) -> Self {
         Self {
             backend,
-            coffre: Arc::new(coffre::Coffre::new(dossier_secret)),
+            coffre: Arc::new(coffre::du_greffon(dossier_secret)),
             cache: Arc::new(cache::Cache::new(dossier_cache)),
             criteres: Arc::new(criteres),
             fabrique,

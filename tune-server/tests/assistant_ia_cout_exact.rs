@@ -17,7 +17,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use tune_assistant_ia::coffre::Coffre;
 use tune_assistant_ia::reglages::{self, Modification};
 use tune_core::db::settings_repo::SettingsRepo;
 use tune_server::state::AppState;
@@ -95,7 +94,7 @@ async fn ai_query_rend_le_cout_exact_de_chaque_question() {
     let (adresse, recues) = faux_fournisseur().await;
     reglages::appliquer(
         &state.backend,
-        &Coffre::new(dossier.path()),
+        &tune_assistant_ia::coffre::du_greffon(dossier.path()),
         &Modification {
             fournisseur: Some("compatible_openai".into()),
             modele: Some("mon-modele".into()),
