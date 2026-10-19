@@ -1286,7 +1286,8 @@ pub fn deviceless_radio_refresh_due(
 /// - le démarrage est daté (`last_play_started_at` est `#[serde(skip)]` :
 ///   après une restauration d'état il vaut `None`, et on ne conclut rien),
 ///   et il remonte à plus que [`DELAI_SILENCE_ETABLI`] ;
-/// - le streamer CONNAÎT ce flux et déclare `0` octet servi. `None`
+/// - le streamer CONNAÎT ce flux et n'en a servi au plus qu'une sonde
+///   ([`super::TAILLE_MAXIMALE_D_UNE_SONDE`], #6066). `None`
 ///   (session inconnue, disparue, requête en échec) n'est pas une preuve
 ///   de silence : on laisse la lecture tranquille.
 ///
@@ -1296,8 +1297,10 @@ pub fn lecture_sans_destination_abandonnee(
     depuis_le_demarrage: Option<std::time::Duration>,
     octets_servis: Option<u64>,
 ) -> bool {
+    // #6066 — une sonde de plage (AVPlayer : deux octets, puis le refus) ne
+    // fait pas une destination : la lecture reste sans auditeur.
     depuis_le_demarrage.is_some_and(|d| d >= super::DELAI_SILENCE_ETABLI)
-        && octets_servis == Some(0)
+        && octets_servis.is_some_and(|n| !super::octets_d_une_ecoute(n))
 }
 
 /// L'autoplay doit-il chercher DANS LE SERVICE de la piste en cours ?
