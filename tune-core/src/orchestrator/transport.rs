@@ -2124,15 +2124,15 @@ impl PlaybackOrchestrator {
                     .downcast_ref::<crate::outputs::local::LocalOutput>()
                 {
                     local_output.set_pure_bypass(zone_audiophile);
-                    // #6522, #6524 — ce que PURE contourne, lu dans les
-                    // réglages : la chaîne posée plus bas sera vide en PURE.
-                    self.poser_ce_que_pure_contourne(zone_id, local_output);
                     // #3973 — « bit-perfect strict » de la zone, posé à chaque
                     // lecture comme PURE : c'est lui que `play_url` transmet à
                     // l'ouverture cpal (`DemandeDOuverture::strict_bitperfect`).
                     local_output.set_strict_bitperfect(
                         crate::audio::bitperfect_strict::zone_enabled(&self.db, zone_id),
                     );
+                    // #6522, #6524 — ce que PURE contourne, lu dans les
+                    // réglages : la chaîne posée plus bas sera vide en PURE.
+                    self.poser_ce_que_pure_contourne(zone_id, local_output);
                     // ReplayGain, applied by the output itself for a local DAC.
                     // A PURE zone is left strictly alone: applying a gain would
                     // multiply every sample and the path would no longer be
