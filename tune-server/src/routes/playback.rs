@@ -494,6 +494,14 @@ async fn jouer_playlist_mixte(
     {
         depart = p;
     }
+    // #6526 — sous l'aléatoire, la file neuve part de la ligne lancée.
+    let depart = tune_core::playback::melange::sur_file_neuve(
+        &state.backend,
+        &state.playback,
+        zone_id,
+        depart,
+    )
+    .await;
     info!(
         zone_id,
         lignes = items.len(),
@@ -564,8 +572,17 @@ fn persist_queue_async(state: &AppState, zone_id: i64) {
     let playback = state.playback.clone();
     tokio::spawn(async move {
         let zone_state = playback.get_state(zone_id).await;
+        // #6526 — l'ordre d'avant l'aléatoire voyage avec l'instantané, pour
+        // être rétabli même après un redémarrage.
+        let ordre_d_origine = playback.ordre_d_origine(zone_id);
         tokio::task::spawn_blocking(move || {
-            tune_core::queue_persistence::save_queue(&db, &db_path, zone_id, &zone_state);
+            tune_core::queue_persistence::save_queue_avec_ordre_d_origine(
+                &db,
+                &db_path,
+                zone_id,
+                &zone_state,
+                &ordre_d_origine,
+            );
         });
     });
 }
@@ -1620,6 +1637,10 @@ mod depart_hors_bannis_6368;
 #[cfg(test)]
 mod saut_hors_file_4283;
 
+/// #6526 — l'aléatoire mélange réellement la file.
+#[cfg(test)]
+mod aleatoire_dans_la_file_6526;
+
 #[path = "playback/lecture_navigateur.rs"]
 mod lecture_navigateur;
 /// #5395 — la radio artiste à la demande.
@@ -2497,14 +2518,26 @@ async fn play(
         // #6079 — l'artiste de chaque piste chez le service, déjà dans la
         // réponse du service : aucune requête de plus.
         let artist_refs: Vec<Option<String>> = tracks.iter().map(|t| t.artist_id.clone()).collect();
-        if let Err(e) = queue_repo.set_streaming_queue_avec_references(
+        // #6526 — sous l'aléatoire, la file NEUVE part du titre lancé et le
+        // reste suit mélangé : `start` devient alors 0. Seulement si la file a
+        // bien été écrite — sinon on mélangerait l'ancienne.
+        let start = if let Err(e) = queue_repo.set_streaming_queue_avec_references(
             zone_id,
             &queue_items,
             &album_refs,
             &artist_refs,
         ) {
             warn!(zone_id, error = %e, "set_streaming_queue_failed");
-        }
+            start
+        } else {
+            tune_core::playback::melange::sur_file_neuve(
+                &state.backend,
+                &state.playback,
+                zone_id,
+                start as i64,
+            )
+            .await as usize
+        };
         // #5372 — la branche prise et la longueur de la file, en INFO : sans
         // elles, un rapport ne distingue pas un album d'un titre seul.
         info!(
@@ -2661,14 +2694,26 @@ async fn play(
         // #6079 — l'artiste de chaque piste chez le service, déjà dans la
         // réponse du service : aucune requête de plus.
         let artist_refs: Vec<Option<String>> = tracks.iter().map(|t| t.artist_id.clone()).collect();
-        if let Err(e) = queue_repo.set_streaming_queue_avec_references(
+        // #6526 — sous l'aléatoire, la file NEUVE part du titre lancé et le
+        // reste suit mélangé : `start` devient alors 0. Seulement si la file a
+        // bien été écrite — sinon on mélangerait l'ancienne.
+        let start = if let Err(e) = queue_repo.set_streaming_queue_avec_references(
             zone_id,
             &queue_items,
             &album_refs,
             &artist_refs,
         ) {
             warn!(zone_id, error = %e, "set_streaming_queue_failed");
-        }
+            start
+        } else {
+            tune_core::playback::melange::sur_file_neuve(
+                &state.backend,
+                &state.playback,
+                zone_id,
+                start as i64,
+            )
+            .await as usize
+        };
         state
             .playback
             .update_queue_info(zone_id, start as i64, tracks.len() as i64)
@@ -3202,6 +3247,19 @@ async fn play(
         queue_repo.set_current(zone_id, position).ok();
         queue_position = position;
         target_id = track_id;
+    }
+    // #6526 — une file NEUVE lancée sous l'aléatoire part du titre retenu
+    // (`target_id`, qui ne change pas) et le reste suit mélangé : son rang
+    // devient 0. Une file conservée (relance d'un titre déjà en file) ne se
+    // rebat pas.
+    if file_conservee.is_none() {
+        queue_position = tune_core::playback::melange::sur_file_neuve(
+            &state.backend,
+            &state.playback,
+            zone_id,
+            queue_position,
+        )
+        .await;
     }
     let track = track_repo.get(target_id).ok().flatten();
 
@@ -4119,16 +4177,58 @@ async fn set_volume(
     }
 }
 
+/// `POST /zones/{id}/shuffle[?enabled=true|false]` — l'aléatoire de la zone.
+///
+/// #6526 — la MÊME route, les mêmes paramètres et la même réponse
+/// (`{"shuffle": bool}`, champs ajoutés seulement), mais elle ne se contente
+/// plus d'armer un mode : elle RÉORDONNE la file. Activer rebat la suite à
+/// partir du titre en cours (titres joués et titre en cours figés) ; un nouvel
+/// appel avec `enabled=true` refait un tirage ; désactiver rétablit l'ordre
+/// d'origine. `GET /zones/{id}/queue` rend alors l'ordre réellement joué, et
+/// les clients déjà déployés en profitent sans changement : il leur suffit de
+/// relire la file, ce que `playback.shuffle` leur dit déjà de faire.
+///
+/// Champs ajoutés : `queue_reordered` (l'ordre a-t-il changé),
+/// `queue_position` (rang du titre en cours, qui bouge au rétablissement) et
+/// `queue_length`.
 async fn toggle_shuffle(
     State(state): State<AppState>,
     Path(zone_id): Path<i64>,
     Query(q): Query<ShuffleQuery>,
-) -> Json<Value> {
+) -> axum::response::Response {
     let current = state.playback.get_state(zone_id).await;
     let enabled = q.enabled.unwrap_or(!current.shuffle);
-    state.playback.set_shuffle(zone_id, enabled).await;
+    let bilan = match tune_core::playback::melange::basculer_l_aleatoire(
+        &state.backend,
+        &state.playback,
+        zone_id,
+        enabled,
+    )
+    .await
+    {
+        Ok(bilan) => bilan,
+        Err(e) => {
+            warn!(zone_id, enabled, error = %e, "aleatoire_reordonnancement_echoue");
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": e, "shuffle": current.shuffle })),
+            )
+                .into_response();
+        }
+    };
+    if bilan.reordonnee {
+        // L'ordre a changé : ce qui était préchargé comme « suivant » ne l'est
+        // plus. Même geste que `queue_move`.
+        state.orchestrator.clear_prefetch().await;
+    }
     persist_queue_async(&state, zone_id);
-    Json(json!({ "shuffle": enabled }))
+    Json(json!({
+        "shuffle": bilan.shuffle,
+        "queue_reordered": bilan.reordonnee,
+        "queue_position": bilan.queue_position,
+        "queue_length": bilan.queue_length,
+    }))
+    .into_response()
 }
 
 async fn set_repeat(
@@ -5563,7 +5663,9 @@ async fn set_eq(
         return resp;
     }
 
-    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, "equalizer") {
+    if let Err(response) =
+        crate::premium_audio_plugins::require_installed(&state, "equalizer", &headers)
+    {
         return response;
     }
 
@@ -9504,12 +9606,15 @@ mod precedent_aleatoire_tests {
         assert_eq!(position_precedente(&s), 3);
     }
 
-    /// Le handler `POST /previous` s'en sert bel et bien : la réponse annonce
-    /// la position du titre tiré juste avant.
+    /// #6526 — sous l'aléatoire, la file EST l'ordre joué : `POST /previous`
+    /// rejoue la ligne qui précède dans la file relue, c'est-à-dire le titre
+    /// entendu juste avant. (Le tirage caché que le reste de ce module décrit
+    /// n'est plus matérialisé ; `position_precedente` le suit encore s'il
+    /// existait, et retombe sinon sur la file.)
     #[tokio::test]
-    async fn la_route_previous_suit_le_tirage() {
+    async fn la_route_previous_suit_la_file_melangee() {
         use crate::state::AppState;
-        use axum::extract::{Path, State};
+        use axum::extract::{Path, Query, State};
         use axum::response::IntoResponse;
         use tune_core::db::play_queue_repo::{PlayQueueRepo, QueueInput};
         use tune_core::db::zone_repo::ZoneRepo;
@@ -9535,9 +9640,8 @@ mod precedent_aleatoire_tests {
                 artist_ref: None,
             })
             .collect();
-        PlayQueueRepo::with_backend(state.backend.clone())
-            .append(zid, &items)
-            .expect("mise en file");
+        let repo = PlayQueueRepo::with_backend(state.backend.clone());
+        repo.append(zid, &items).expect("mise en file");
         state
             .playback
             .play(
@@ -9552,20 +9656,24 @@ mod precedent_aleatoire_tests {
             )
             .await;
         state.playback.update_queue_info(zid, 0, longueur).await;
-        state.playback.set_shuffle(zid, true).await;
-        let ordre = state.playback.get_state(zid).await.shuffle_order;
-        assert_eq!(ordre.len() as i64, longueur);
-
-        // Un rang du tirage où le recul linéaire et le recul dans le tirage
-        // DIFFÈRENT, sinon le test ne prouverait rien.
-        let rang = (1..ordre.len())
-            .find(|&k| (ordre[k] as i64 - 1).max(0) != ordre[k - 1] as i64)
-            .expect("un tirage de 20 pistes n'est pas l'ordre linéaire");
-        // On « joue » le tirage jusqu'à ce rang, comme `next` l'aurait fait.
-        state
-            .playback
-            .update_queue_info(zid, ordre[rang] as i64, longueur)
-            .await;
+        let _ = super::toggle_shuffle(
+            State(state.clone()),
+            Path(zid),
+            Query(super::ShuffleQuery {
+                enabled: Some(true),
+            }),
+        )
+        .await;
+        let titres: Vec<String> = repo
+            .get_ordered(zid)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.title.unwrap_or_default())
+            .collect();
+        assert_eq!(titres[0], "t0", "le titre en cours ne bouge pas");
+        // On « joue » la file mélangée jusqu'au rang 5, comme `next` l'aurait
+        // fait.
+        state.playback.update_queue_info(zid, 5, longueur).await;
 
         let reponse = super::previous(
             State(state.clone()),
@@ -9580,12 +9688,9 @@ mod precedent_aleatoire_tests {
         let v: serde_json::Value = serde_json::from_slice(&octets).unwrap();
         assert_eq!(
             v.get("queue_position"),
-            Some(&serde_json::json!(ordre[rang - 1])),
-            "tirage {ordre:?}, piste courante {} (rang {rang}) : précédent \
-             doit rejouer {} (le titre tiré avant), pas {} (l'ordre linéaire) : {v}",
-            ordre[rang],
-            ordre[rang - 1],
-            (ordre[rang] as i64 - 1).max(0),
+            Some(&serde_json::json!(4)),
+            "file jouée {titres:?} : précédent doit rejouer {} (rang 4) : {v}",
+            titres[4],
         );
     }
 }

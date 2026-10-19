@@ -630,13 +630,8 @@ async fn probe_hqplayer(host: &str, port: u16) -> Result<bool, String> {
 /// L'état de transport **reconnu** dans une réponse `<Status>` de HQPlayer,
 /// ou `None` quand son champ d'état n'est pas reconnu.
 ///
-/// Séparé de [`parse_state_from_xml`] pour une raison précise : la valeur de
-/// repli est `Stopped`, et `Stopped` n'est pas un état neutre pour le
-/// sondeur. C'est **lui** qui déclenche l'avance de file après cinq sondes
-/// (`STOPPED_TICKS_THRESHOLD`) et l'arrêt de zone après trente
-/// (`STOPPED_FAILURE_THRESHOLD`). « Je n'ai pas compris la réponse » et « le
-/// lecteur est à l'arrêt » ne peuvent donc pas rendre la même chose sans que
-/// personne ne le sache : le repli reste, mais il est désormais **dit**.
+/// Un état inconnu n'est pas un arrêt : `get_status` le rend comme erreur
+/// de sondage, pour que le sondeur ne le prenne pas pour une fin de piste.
 fn etat_reconnu(xml: &str) -> Option<TransportState> {
     use quick_xml::{Reader, events::Event};
 
@@ -701,15 +696,6 @@ fn etat_reconnu(xml: &str) -> Option<TransportState> {
             _ => {}
         }
     }
-}
-
-/// Parse transport state from HQPlayer XML status response.
-///
-/// Le comportement ne change pas : une réponse non reconnue vaut `Stopped`.
-/// Voir [`etat_reconnu`] pour ce que cela coûte, et `get_status` pour la
-/// ligne qui le signale.
-fn parse_state_from_xml(xml: &str) -> TransportState {
-    etat_reconnu(xml).unwrap_or(TransportState::Stopped)
 }
 
 /// Extract an attribute value from XML by attribute name.
@@ -910,29 +896,19 @@ impl OutputTarget for HqplayerOutput {
     async fn get_status(&self) -> Result<OutputStatus, String> {
         let response = self.command(r#"<Status subscribe="0" />"#).await?;
 
-        // #4023 — une réponse dont l'état n'est pas reconnu retombe sur
-        // `Stopped`, et `Stopped` est ce qui fait avancer la file au bout de
-        // cinq sondes puis arrêter la zone au bout de trente. Si un jour un
-        // HQPlayer répond dans une forme que ce parseur ne couvre pas, le
-        // symptôme est « l'album s'arrête après une piste » et RIEN dans le
-        // journal ne le dit. Une ligne, UNE seule par sortie : ce sondage
-        // tourne en boucle et #4025 vient justement de le faire taire.
-        if etat_reconnu(&response).is_none() && !self.etat_inconnu_dit.swap(true, Ordering::Relaxed)
-        {
-            warn!(
-                device = %self.name,
-                reponse = %response.trim().chars().take(400).collect::<String>(),
-                "hqplayer_status_etat_inconnu — aucun etat reconnu dans la reponse Status ; \
-                 lue comme `stopped`, ce qui fait avancer la file puis arreter la zone"
-            );
-        }
-
-        let state = parse_state_from_xml(&response);
-        // #6115 — seul un état RECONNU est retenu : le repli `Stopped` d'une
-        // réponse incomprise ne doit pas faire sauter l'arrêt de `play_media`.
-        if let Some(reconnu) = etat_reconnu(&response) {
-            *self.dernier_etat() = Some(reconnu);
-        }
+        // #6515 — ne jamais fabriquer Stopped à partir d'une réponse
+        // inconnue : le sondeur pourrait l'interpréter comme une fin de piste.
+        let Some(state) = etat_reconnu(&response) else {
+            if !self.etat_inconnu_dit.swap(true, Ordering::Relaxed) {
+                warn!(
+                    device = %self.name,
+                    reponse = %response.trim().chars().take(400).collect::<String>(),
+                    "hqplayer_status_etat_inconnu — état absent ou non reconnu ; sondage rejeté"
+                );
+            }
+            return Err("hqplayer_status_etat_inconnu: état Status absent ou non reconnu".into());
+        };
+        *self.dernier_etat() = Some(state);
         let position = extract_xml_attr(&response, "position")
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0);
@@ -1042,19 +1018,28 @@ mod tests {
     #[test]
     fn parse_state_playing() {
         let xml = r#"<Status state="playing" position="10.5" duration="300.0"/>"#;
-        assert_eq!(parse_state_from_xml(xml), TransportState::Playing);
+        assert_eq!(
+            etat_reconnu(xml).expect("état reconnu"),
+            TransportState::Playing
+        );
     }
 
     #[test]
     fn parse_state_paused() {
         let xml = r#"<Status state="paused" position="10.5"/>"#;
-        assert_eq!(parse_state_from_xml(xml), TransportState::Paused);
+        assert_eq!(
+            etat_reconnu(xml).expect("état reconnu"),
+            TransportState::Paused
+        );
     }
 
     #[test]
     fn parse_state_stopped() {
         let xml = r#"<Status state="stopped"/>"#;
-        assert_eq!(parse_state_from_xml(xml), TransportState::Stopped);
+        assert_eq!(
+            etat_reconnu(xml).expect("état reconnu"),
+            TransportState::Stopped
+        );
     }
 
     #[test]

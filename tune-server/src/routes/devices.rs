@@ -27,6 +27,8 @@ pub fn router() -> Router<AppState> {
         .route("/list", get(list_devices))
         // Catalogue statique marque→modèles (+ quirks) pour l'UI de config zone.
         .route("/catalog", get(device_catalog))
+        // #6546 — la table des plages MAC reconnues, en lecture seule.
+        .route("/oui-audio", get(oui_audio_table))
         .route("/add", post(add_device))
         .route("/scan", post(scan_devices))
         .route("/rescan", post(rescan_local_devices))
@@ -406,7 +408,45 @@ fn build_device_list(
         }
     }
 
+    for item in &mut items {
+        inserer_plage_mac(item);
+    }
     items
+}
+
+/// #6546 — la plage MAC reconnue (`AA:BB:CC`) et sa marque, dérivées de
+/// `mac_address` par `tune_core::discovery::mac::plage_et_marque`, qui lit la
+/// même table que la déduction de marque. Les deux clés sont TOUJOURS posées
+/// (`null` quand il n'y a rien à dire) : un client y lit que ce serveur sait
+/// les publier, et distingue « plage hors table » (`mac_prefix` seul) de
+/// « pas de MAC » (les deux à `null`).
+fn inserer_plage_mac(item: &mut Value) {
+    let (plage, marque) =
+        tune_core::discovery::mac::plage_et_marque(item.get("mac_address").and_then(Value::as_str));
+    if let Some(obj) = item.as_object_mut() {
+        obj.insert("mac_prefix".into(), json!(plage));
+        obj.insert("mac_vendor".into(), json!(marque));
+    }
+}
+
+/// `GET /devices/oui-audio` — la table des plages MAC reconnues, groupée par
+/// marque (#6546). Lecture seule : c'est la table embarquée, celle que lit
+/// `vendor_for_mac`, rien n'est recopié. Marques triées par nom, plages dans
+/// l'ordre ; `total` compte les plages.
+async fn oui_audio_table() -> Json<Value> {
+    Json(corps_oui_audio())
+}
+
+fn corps_oui_audio() -> Value {
+    let groupes = tune_core::discovery::mac::plages_par_marque();
+    let total: usize = groupes.iter().map(|(_, plages)| plages.len()).sum();
+    json!({
+        "vendors": groupes
+            .into_iter()
+            .map(|(name, prefixes)| json!({ "name": name, "prefixes": prefixes }))
+            .collect::<Vec<_>>(),
+        "total": total,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3133,5 +3173,156 @@ mod liste_appareils_ignores_1280 {
             items[0].get("name").and_then(Value::as_str),
             Some("Cabasse Pearl Akoya")
         );
+    }
+}
+
+/// #6546 — plage MAC et marque par appareil, et la table entière.
+#[cfg(test)]
+mod plages_mac_6546 {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+    use tune_core::discovery::device::{DiscoveredDevice, OutputType};
+
+    fn appareil(id: &str, host: &str, mac: Option<&str>) -> DiscoveredDevice {
+        let mut d =
+            DiscoveredDevice::new(id.into(), id.into(), OutputType::Dlna, host.into(), 1400);
+        d.mac_address = mac.map(str::to_string);
+        d
+    }
+
+    /// Les trois cas, plus l'entrée de rattrapage d'une sortie enregistrée
+    /// que la découverte ne voit pas (sans MAC par construction).
+    #[test]
+    fn chaque_appareil_porte_sa_plage_et_sa_marque() {
+        let output_info = vec![json!({
+            "device_id": "dlna:rattrapage",
+            "name": "Rattrapage",
+            "type": "dlna",
+            "host": "192.168.1.99",
+        })];
+        let items = build_device_list(
+            vec![
+                // 00:0E:58 : plage Sonos de la table générée.
+                appareil("sonos", "192.168.1.10", Some("00:0E:58:12:34:56")),
+                appareil("inconnu", "192.168.1.11", Some("02:00:00:AA:BB:CC")),
+                appareil("sans-mac", "192.168.1.12", None),
+            ],
+            &std::collections::HashSet::new(),
+            &output_info,
+        );
+        let par_id = |id: &str| items.iter().find(|i| i["id"] == id).unwrap().clone();
+
+        let sonos = par_id("sonos");
+        assert_eq!(sonos["mac_prefix"], json!("00:0E:58"), "{sonos}");
+        assert_eq!(sonos["mac_vendor"], json!("Sonos"), "{sonos}");
+
+        let inconnu = par_id("inconnu");
+        assert_eq!(inconnu["mac_prefix"], json!("02:00:00"), "{inconnu}");
+        assert_eq!(inconnu["mac_vendor"], Value::Null, "{inconnu}");
+
+        for id in ["sans-mac", "dlna:rattrapage"] {
+            let item = par_id(id);
+            let obj = item.as_object().unwrap();
+            assert!(
+                obj.contains_key("mac_prefix") && obj.contains_key("mac_vendor"),
+                "{item}"
+            );
+            assert_eq!(item["mac_prefix"], Value::Null, "{item}");
+            assert_eq!(item["mac_vendor"], Value::Null, "{item}");
+        }
+    }
+
+    /// La route est servie par le routeur assemblé, en GET, et rend la table
+    /// entière : chaque plage une fois, sous sa marque, marques et plages
+    /// triées, `total` exact.
+    #[tokio::test]
+    async fn la_route_rend_la_table_entiere_groupee_par_marque() {
+        let state = crate::state::AppState::new(":memory:", 0, Default::default()).unwrap();
+        let app = crate::routes::router(state);
+        let rep = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/devices/oui-audio")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rep.status(), StatusCode::OK);
+        let octets = axum::body::to_bytes(rep.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let corps: Value = serde_json::from_slice(&octets).unwrap();
+
+        let vendors = corps["vendors"].as_array().expect("vendors est une liste");
+        assert!(
+            vendors.len() >= 30,
+            "35 marques attendues, {} rendues",
+            vendors.len()
+        );
+        let noms: Vec<&str> = vendors
+            .iter()
+            .map(|v| v["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            noms.windows(2).all(|w| w[0] < w[1]),
+            "marques triées sans doublon : {noms:?}"
+        );
+
+        let mut vues = std::collections::HashSet::new();
+        let mut somme = 0;
+        for v in vendors {
+            let nom = v["name"].as_str().unwrap();
+            let plages: Vec<&str> = v["prefixes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().unwrap())
+                .collect();
+            assert!(!plages.is_empty(), "{nom} sans plage");
+            assert!(
+                plages.windows(2).all(|w| w[0] < w[1]),
+                "{nom} : plages non triées"
+            );
+            for p in &plages {
+                assert!(vues.insert(p.to_string()), "plage {p} publiée deux fois");
+                assert_eq!(
+                    tune_core::discovery::mac::vendor_for_mac(&format!("{p}:00:00:00")),
+                    Some(nom),
+                    "{p} publiée sous {nom}"
+                );
+            }
+            somme += plages.len();
+        }
+        assert_eq!(corps["total"], json!(somme));
+        assert!(somme > 3000, "table entière attendue, {somme} plages");
+        let sonos = vendors.iter().find(|v| v["name"] == "Sonos").unwrap();
+        assert!(
+            sonos["prefixes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("00:0E:58"))
+        );
+    }
+
+    /// Contre-épreuve permanente de la sonde : une route inconnue sous
+    /// `/devices` ne rend pas 200 — sans quoi le test ci-dessus prouverait
+    /// le routeur et non la route.
+    #[tokio::test]
+    async fn une_route_voisine_inconnue_n_est_pas_servie() {
+        let state = crate::state::AppState::new(":memory:", 0, Default::default()).unwrap();
+        let app = crate::routes::router(state);
+        let rep = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/devices/oui-audio-inexistante")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(rep.status(), StatusCode::OK);
     }
 }
