@@ -962,18 +962,43 @@ pub async fn refresh_radio_logos(state: &AppState) -> RattrapageLogos {
     }
 
     let repo = RadioRepo::with_backend(state.backend.clone());
-    // #6516 — le rapprochement de départ, idempotent : chaque station qui
-    // retrouve sûrement sa fiche reçoit son `external_id`, et c'est par lui
-    // que les passes suivantes la retrouvent.
-    super::radios_annuaire::lier_les_stations(&repo, &annuaire);
-    let liens = repo.liens_annuaire().unwrap_or_default();
     let mut bilan = RattrapageLogos {
         annuaire_a_jour: releve.a_jour(),
         ..RattrapageLogos::default()
     };
+    rattraper_les_logos(&repo, &annuaire, &mut bilan);
+    if bilan.updated > 0 {
+        state.event_bus.emit(
+            "library.radios_changed",
+            json!({"action": "logos_refreshed", "updated": bilan.updated}),
+        );
+    }
+    tracing::info!(
+        updated = bilan.updated,
+        sans_logo = bilan.sans_logo,
+        annuaire_a_jour = bilan.annuaire_a_jour,
+        "radio_logos_refreshed_from_directory"
+    );
+    bilan
+}
+
+/// La passe de `refresh_radio_logos` sur un relevé déjà en main : le
+/// rapprochement de départ, PUIS le choix du logo de chaque station. Séparée
+/// pour que la séquence entière se teste sans réseau — c'est elle, et non
+/// `logo_a_poser` seul, qui laissait passer un lien posé par le nom.
+pub(crate) fn rattraper_les_logos(
+    repo: &RadioRepo,
+    annuaire: &[StationAnnuaire],
+    bilan: &mut RattrapageLogos,
+) {
+    // #6516 — le rapprochement de départ, idempotent : chaque station qui
+    // retrouve sa fiche par l'ADRESSE de son flux reçoit son `external_id`, et
+    // c'est par lui que les passes suivantes la retrouvent (jamais par le nom).
+    super::radios_annuaire::lier_les_stations(repo, annuaire);
+    let liens = repo.liens_annuaire().unwrap_or_default();
     for mut st in repo.list().unwrap_or_default() {
         let lien = st.id.and_then(|id| liens.get(&id)).map(String::as_str);
-        match logo_a_poser(&annuaire, &st, lien) {
+        match logo_a_poser(annuaire, &st, lien) {
             DecisionLogo::Garder => {
                 if st.logo_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
                     bilan.sans_logo += 1;
@@ -989,19 +1014,6 @@ pub async fn refresh_radio_logos(state: &AppState) -> RattrapageLogos {
             }
         }
     }
-    if bilan.updated > 0 {
-        state.event_bus.emit(
-            "library.radios_changed",
-            json!({"action": "logos_refreshed", "updated": bilan.updated}),
-        );
-    }
-    tracing::info!(
-        updated = bilan.updated,
-        sans_logo = bilan.sans_logo,
-        annuaire_a_jour = bilan.annuaire_a_jour,
-        "radio_logos_refreshed_from_directory"
-    );
-    bilan
 }
 
 /// Ce que le rattrapage fait du logo d'une station.

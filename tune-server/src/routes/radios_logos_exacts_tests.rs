@@ -141,3 +141,50 @@ fn une_station_liee_suit_sa_fiche_meme_apres_un_changement_d_adresse() {
     // Sans le lien, l'adresse ne la retrouve plus : rien n'est posé.
     assert_eq!(logo_a_poser(&[f], &st, None), DecisionLogo::Garder);
 }
+
+/// Revue de #6538 : `refresh_radio_logos` pose les liens `external_id` AVANT de
+/// choisir les logos, et `logo_a_poser` fait confiance au lien. Un lien posé
+/// par le seul NOM prêtait donc le logo d'une homonyme d'un AUTRE flux. On joue
+/// ici la séquence entière, sur une vraie base, sans réseau.
+#[test]
+fn deux_homonymes_aux_flux_differents_ne_sont_ni_liees_ni_logo_prete() {
+    let state = crate::state::AppState::new(":memory:", 0, Default::default()).unwrap();
+    let repo = RadioRepo::with_backend(state.backend.clone());
+    let mut locale = station("BBC Radio 3", "https://autre-flux.example/radio3", None);
+    locale.id = None;
+    let id = repo.create(&locale).unwrap();
+    // Une seule fiche porte ce nom : le rapprochement d'AFFICHAGE la trouve.
+    let mut f = fiche("BBC Radio 3", U_BBC3, L_BBC);
+    f.external_id = Some("S000365".into());
+    let annuaire = [f];
+
+    let mut bilan = RattrapageLogos::default();
+    rattraper_les_logos(&repo, &annuaire, &mut bilan);
+
+    assert!(
+        !repo.liens_annuaire().unwrap().contains_key(&id),
+        "un rapprochement par le nom seul ne doit enregistrer aucun external_id"
+    );
+    assert_eq!(
+        repo.get(id).unwrap().unwrap().logo_url,
+        None,
+        "aucun logo prêté à une homonyme d'un autre flux"
+    );
+    assert_eq!(bilan.updated, 0);
+
+    // Témoin : la même station, à l'adresse de la fiche, est liée et reçoit le
+    // logo — la passe fonctionne, seul le nom est refusé.
+    let mut meme_flux = station("Radio Trois", U_BBC3, None);
+    meme_flux.id = None;
+    let id2 = repo.create(&meme_flux).unwrap();
+    rattraper_les_logos(&repo, &annuaire, &mut RattrapageLogos::default());
+    assert_eq!(
+        repo.liens_annuaire().unwrap().get(&id2).map(String::as_str),
+        Some("S000365")
+    );
+    assert_eq!(
+        repo.get(id2).unwrap().unwrap().logo_url.as_deref(),
+        Some(L_BBC)
+    );
+    assert!(!repo.liens_annuaire().unwrap().contains_key(&id));
+}

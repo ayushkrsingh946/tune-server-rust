@@ -478,10 +478,18 @@ pub fn rattacher_a_l_annuaire(state: &AppState, corps: &mut Value) {
     }
 }
 
-/// Le rapprochement de départ : chaque station SANS lien qui retrouve sûrement
-/// sa fiche (adresse de flux exacte, ou nom porté par une seule fiche) reçoit
-/// son `external_id`. Idempotent : un lien déjà posé n'est jamais réécrit.
+/// Le rapprochement de départ : chaque station SANS lien dont l'adresse de
+/// flux est, à la normalisation près, celle d'une fiche reçoit son
+/// `external_id`. Idempotent : un lien déjà posé n'est jamais réécrit.
 /// Rend le nombre de liens posés.
+///
+/// ⛔ Jamais par le NOM seul (revue de #6538). `refresh_radio_logos` lie AVANT
+/// de choisir les logos, et `logo_a_poser` fait confiance au lien : un lien
+/// posé par le nom prêtait donc le logo d'une homonyme d'un autre flux, ce que
+/// la règle « pas de logo par le seul nom » interdit (BBC Radio 3 / Berliner
+/// Rundfunk). Le nom reste un rapprochement d'AFFICHAGE (`rapproche_par:
+/// "nom"`, sans logo) ; seul le geste « Ajouter » depuis l'annuaire, choisi par
+/// l'utilisateur, enregistre un lien sans adresse commune.
 pub fn lier_les_stations(repo: &RadioRepo, fiches: &[StationAnnuaire]) -> usize {
     let liens = repo.liens_annuaire().unwrap_or_default();
     let index = IndexAnnuaire::new(fiches);
@@ -491,7 +499,7 @@ pub fn lier_les_stations(repo: &RadioRepo, fiches: &[StationAnnuaire]) -> usize 
         if liens.contains_key(&id) {
             continue;
         }
-        if let Some((i, Lien::Flux | Lien::Nom)) = index.lien(None, &st.name, &st.url)
+        if let Some((i, Lien::Flux)) = index.lien(None, &st.name, &st.url)
             && let Some(ext) = index.fiche(i).and_then(|f| f.external_id.as_deref())
             && repo.lier_a_l_annuaire(id, Some(ext)).is_ok()
         {
