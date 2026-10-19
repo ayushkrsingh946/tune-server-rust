@@ -370,6 +370,13 @@ pub(super) async fn get_config(
         // from the one above, and default ON since it always behaved that way.
         // The web toggle writes "false" to opt out (JP Borderies).
         ("scan_import_playlists", json!(true)),
+        // #6554 (fil 2294) — « Coffrets automatiques », section Bibliothèque.
+        // Publié même absent de la base, pour que l'interface affiche la case
+        // COCHÉE (le comportement d'avant) plutôt que « je ne sais pas ».
+        (
+            tune_core::db::coffrets_auto::CLE_REGLAGE_AUTO,
+            json!(tune_core::db::coffrets_auto::REGLAGE_AUTO_DEFAUT),
+        ),
         // #4051 — le consentement LRCLIB, publié comme ses deux voisins de la
         // MÊME section « Bibliothèque » (`metadata_readonly`, `enrich_on_scan`).
         //
