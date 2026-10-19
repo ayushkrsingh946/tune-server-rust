@@ -7160,3 +7160,50 @@ mod relance_apres_installation_5461 {
         assert_eq!(lire(&installe), "0.9.169");
     }
 }
+
+#[cfg(test)]
+mod extraction_zip_confinee {
+    use super::extract_zip;
+    use std::io::Write;
+
+    #[test]
+    fn une_archive_piegee_reste_dans_son_dossier() {
+        let racine = tempfile::tempdir().unwrap();
+        let dest = racine.path().join("maj");
+        std::fs::create_dir_all(&dest).unwrap();
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let o = zip::write::SimpleFileOptions::default();
+        z.start_file("tune-server", o).unwrap();
+        z.write_all(b"binaire").unwrap();
+        z.start_file("../evade.txt", o).unwrap();
+        z.write_all(b"non").unwrap();
+        z.start_file("outil", o.unix_permissions(0o6755)).unwrap();
+        z.write_all(b"#!/bin/sh").unwrap();
+        z.add_symlink("lien", "../..", o).unwrap();
+        z.add_symlink("absolu", "/etc", o).unwrap();
+        let data = z.finish().unwrap().into_inner();
+
+        extract_zip(&data, &dest).unwrap();
+
+        assert!(dest.join("tune-server").is_file());
+        assert!(!racine.path().join("evade.txt").exists());
+        for lien in ["lien", "absolu"] {
+            let meta = std::fs::symlink_metadata(dest.join(lien));
+            assert!(
+                meta.map(|m| !m.file_type().is_symlink()).unwrap_or(true),
+                "lien symbolique {lien} restauré"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in ["outil", "tune-server"] {
+                let mode = std::fs::metadata(dest.join(f))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o7000, 0, "{f} : bits spéciaux restaurés ({mode:o})");
+            }
+        }
+    }
+}
