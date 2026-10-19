@@ -2879,6 +2879,10 @@ where
 #[path = "parc_local_pendant_la_lecture_6119_tests.rs"]
 mod parc_local_pendant_la_lecture_6119_tests;
 
+#[cfg(all(test, feature = "local-audio"))]
+#[path = "sortie_locale_disparue_6551_tests.rs"]
+mod sortie_locale_disparue_6551_tests;
+
 /// Whether ANY zone (local or network) is currently playing, read from the
 /// in-memory playback state — no device or network probing. Used on Linux to
 /// suppress the periodic audio re-enumeration during a listening session:
@@ -2978,6 +2982,70 @@ pub async fn rescan_local_audio_devices(state: &AppState) {
         None => return,
     };
 
+    appliquer_le_parc_local(state, &devices, &configured_backend, is_asio_configured).await;
+}
+
+/// Ce que le rescan à chaud peut dire d'une sortie locale ABSENTE de son
+/// balayage (#6551).
+#[cfg(feature = "local-audio")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PorteeDuRescanLocal {
+    /// Le balayage couvre l'hôte de cette sortie : son absence veut dire
+    /// qu'elle a disparu (AirPods éloignés, DAC USB débranché).
+    Balayee,
+    /// Le balayage ne PEUT pas la voir : son absence ne prouve rien, et la
+    /// retirer du registre appellerait le `Drop` du pilote ASIO (`abort()`,
+    /// DEvir, 19/06).
+    HorsDePortee,
+}
+
+/// #6551 — la sortie absente du balayage a-t-elle disparu, ou le balayage
+/// ne pouvait-il simplement pas la voir ?
+///
+/// Le rescan à chaud n'ouvre JAMAIS l'hôte ASIO : il force WASAPI quand ASIO
+/// est configuré, et seule la valeur `asio` ouvre cet hôte
+/// (`plan_audio_enumeration`, `select_host`). Une sortie ASIO est donc
+/// toujours hors de sa portée ; toute autre sortie locale y est.
+///
+/// `sortie` vaut `(hôte d'origine, backend d'ouverture)` d'une `LocalOutput`,
+/// ou `None` pour une sortie `local:` d'un autre type : on ne sait pas ce qui
+/// l'a énumérée, on la garde.
+///
+/// La garde qu'elle remplace (`was_in_scan_scope`, 19/06) cherchait le nom de
+/// la sortie dans le balayage même dont elle était absente : elle était
+/// toujours fausse, et AUCUNE sortie disparue n'était retirée, sur aucune
+/// plateforme — la zone restait « en ligne » (alec_eiffel, fil 2340).
+#[cfg(feature = "local-audio")]
+pub(crate) fn portee_du_rescan_local(sortie: Option<(Option<&str>, &str)>) -> PorteeDuRescanLocal {
+    let Some((origine, backend_d_ouverture)) = sortie else {
+        return PorteeDuRescanLocal::HorsDePortee;
+    };
+    let asio = match origine.map(str::trim).filter(|o| !o.is_empty()) {
+        Some(o) => o.eq_ignore_ascii_case("asio"),
+        // Origine inconnue : le backend d'ouverture vaut alors le réglage tel
+        // quel (`openable_local_backend`), `asio` compris.
+        None => backend_d_ouverture.eq_ignore_ascii_case("asio"),
+    };
+    if asio {
+        PorteeDuRescanLocal::HorsDePortee
+    } else {
+        PorteeDuRescanLocal::Balayee
+    }
+}
+
+/// Le parc que vient de rendre le balayage, appliqué au registre et aux zones :
+/// enregistrer les nouvelles sorties, retirer les disparues et mettre leurs
+/// zones hors ligne, remettre en ligne celles qui reviennent.
+///
+/// Séparé de [`rescan_local_audio_devices`] pour qu'un test puisse lui donner
+/// un parc sans matériel (#6551).
+#[cfg(feature = "local-audio")]
+pub(crate) async fn appliquer_le_parc_local(
+    state: &AppState,
+    devices: &[tune_core::outputs::local::AudioDevice],
+    configured_backend: &str,
+    is_asio_configured: bool,
+) {
     {
         let zone_repo = tune_core::db::zone_repo::ZoneRepo::with_backend(state.backend.clone());
         // #2269 — l'identité des sorties locales, AVANT d'enregistrer ou de
@@ -3071,7 +3139,7 @@ pub async fn rescan_local_audio_devices(state: &AppState) {
 
         let mut registered_count = 0;
 
-        for dev in &devices {
+        for dev in devices {
             let device_id = format!("local:{}", dev.name);
 
             // Already registered — still ensure a zone exists (may have been deleted)
@@ -3121,21 +3189,16 @@ pub async fn rescan_local_audio_devices(state: &AppState) {
             new_devices_to_zone.push((device_id, dev.name.clone(), dev.is_default));
         }
 
-        // Remove WASAPI devices that have disappeared (USB DAC unplugged),
-        // but only if not actively playing.
-        // On Windows, only remove devices that were found in the current
-        // scan backend (WASAPI). Devices registered by ASIO at startup
-        // won't appear in WASAPI scans — don't remove them, as dropping
+        // Remove devices that have disappeared (AirPods out of range, USB DAC
+        // unplugged), but only if not actively playing.
+        // Devices registered by ASIO at startup never appear in this scan
+        // (it never opens the ASIO host) — don't remove them, as dropping
         // ASIO outputs can crash the process via the driver FFI.
         for old_id in &existing_ids {
             if new_device_ids.contains(old_id) {
                 continue;
             }
 
-            // Only remove if the device name matches one we could have
-            // discovered with the current scan backend.  If the scan used
-            // WASAPI but this device was registered by ASIO at startup,
-            // it won't be in new_device_ids but we must NOT remove it.
             // If the scan returned nothing, skip all removals — an empty
             // result means the backend couldn't enumerate (e.g. WASAPI held
             // exclusively by foobar2000), not that everything disappeared.
@@ -3143,24 +3206,31 @@ pub async fn rescan_local_audio_devices(state: &AppState) {
                 debug!("local_audio_rescan_empty_skipping_all_removals");
                 break;
             }
-            let old_name = old_id.strip_prefix("local:").unwrap_or(old_id);
-            let was_in_scan_scope = devices.iter().any(|d| d.name == old_name);
-            if !was_in_scan_scope {
-                debug!(device_id = %old_id, "local_audio_skipping_removal_different_backend");
-                continue;
-            }
 
-            let is_playing = if let Some(output) = outputs.get(old_id) {
+            // #6551 — l'absence ne vaut disparition que pour une sortie que ce
+            // balayage pouvait voir : on le demande à l'hôte qui l'a énumérée.
+            let (portee, is_playing) = if let Some(output) = outputs.get(old_id) {
                 let output = output.lock().await;
-                match output.get_status().await {
+                let portee = portee_du_rescan_local(
+                    output
+                        .as_any()
+                        .downcast_ref::<tune_core::outputs::local::LocalOutput>()
+                        .map(|l| (l.origin_host(), l.audio_backend())),
+                );
+                let is_playing = match output.get_status().await {
                     Ok(status) => {
                         status.state == tune_core::outputs::traits::TransportState::Playing
                     }
                     Err(_) => false,
-                }
+                };
+                (portee, is_playing)
             } else {
-                false
+                (PorteeDuRescanLocal::HorsDePortee, false)
             };
+            if portee == PorteeDuRescanLocal::HorsDePortee {
+                debug!(device_id = %old_id, "local_audio_skipping_removal_different_backend");
+                continue;
+            }
 
             if !is_playing {
                 outputs.remove(old_id);
@@ -3209,12 +3279,27 @@ pub async fn rescan_local_audio_devices(state: &AppState) {
         .map(str::to_owned);
 
         for (device_id, dev_name, is_default) in &new_devices_to_zone {
+            let zone_connue = zone_repo.get_by_device_id(device_id).ok().flatten();
+            // #6551 — une zone mise hors ligne par la phase 2a revient en
+            // ligne d'elle-même avec son appareil, et les télécommandes le
+            // savent (miroir de l'événement `online: false`).
+            let revient_en_ligne = zone_connue.as_ref().is_some_and(|z| !z.online);
+            if revient_en_ligne {
+                state.event_bus.emit_typed(
+                    tune_core::event_types::EventType::ZoneUpdated,
+                    serde_json::json!({ "device_id": device_id, "online": true }),
+                );
+                info!(device_id = %device_id, "local_audio_zone_back_online");
+            }
             // When ASIO is configured, don't create new zones for WASAPI
             // devices discovered by the fallback rescan. Users should only
             // see ASIO zones (e.g. "HoloAudio ASIO Driver"), not confusing
             // generic WASAPI names like "Haut-parleurs" for the same DAC.
             // Only update online status for WASAPI zones that already exist.
             if is_asio_configured {
+                if zone_connue.is_some() {
+                    let _ = zone_repo.set_online_by_device(device_id, true);
+                }
                 continue;
             }
             // #1770 : même règle qu'au démarrage — l'étiquette générique ne se
@@ -3231,11 +3316,7 @@ pub async fn rescan_local_audio_devices(state: &AppState) {
             // système. Les autres sorties restent enregistrées pour que
             // l'interface puisse les proposer à la création manuelle. Une zone
             // déjà connue est reconnectée normalement.
-            let zone_exists = zone_repo
-                .get_by_device_id(device_id)
-                .ok()
-                .flatten()
-                .is_some();
+            let zone_exists = zone_connue.is_some();
             let is_system_default = system_default_device_id.as_deref() == Some(device_id.as_str());
             let action =
                 crate::startup::local_zone_action(zone_exists, auto_create, is_system_default);
