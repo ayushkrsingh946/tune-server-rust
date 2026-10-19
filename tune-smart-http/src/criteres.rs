@@ -187,6 +187,58 @@ pub(crate) const CRITERES: &[Critere] = &[
 /// décision, qui se lit dans la revue.
 pub(crate) const PROPRES_AUX_PISTES: &[&str] = &["title", "comments"];
 
+impl Famille {
+    /// Le nom de la famille, dans les mots du client (`TypeChamp` de
+    /// `smartRegles.ts`), pour un lecteur hors de cette caisse.
+    pub(crate) const fn nom(self) -> &'static str {
+        match self {
+            Famille::Texte => "text",
+            Famille::Nombre => "int",
+            Famille::Source => "source",
+            Famille::Repertoire => "folder",
+            Famille::Vide => "nullable",
+            Famille::Horodatage => "timestamp",
+            Famille::Compte => "count",
+            Famille::Credit => "credit",
+            Famille::RefCollection => "collection_ref",
+            Famille::RefPlaylist => "playlist_ref",
+            Famille::Favori => "favorite",
+            Famille::Etiquette => "tag_ref",
+            Famille::Marquage => "marquage",
+        }
+    }
+}
+
+/// Un critère tel qu'un lecteur EXTÉRIEUR le voit — le greffon « Assistant
+/// IA » (chantier assistant-ia, étape 1) en tire le schéma qu'il impose au
+/// modèle et la liste contre laquelle il valide sa réponse. Lire LE tableau
+/// au lieu d'en recopier un : une règle que le moteur ne connaît pas ne peut
+/// pas être proposée, et un critère ajouté ici l'est aussi là-bas.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CritereExpose {
+    /// Le nom dans une règle de COLLECTION, `None` s'il n'y existe pas.
+    pub collection: Option<&'static str>,
+    /// Le nom dans une règle de PLAYLIST, `None` s'il n'y existe pas.
+    pub piste: Option<&'static str>,
+    /// La famille, dans les mots du client (`text`, `int`, `timestamp`…).
+    pub famille: &'static str,
+    /// Les opérateurs que le moteur traduit pour cette famille.
+    pub operateurs: &'static [&'static str],
+}
+
+/// Tous les critères, dans l'ordre du client.
+pub fn criteres_exposes() -> Vec<CritereExpose> {
+    CRITERES
+        .iter()
+        .map(|c| CritereExpose {
+            collection: c.collection,
+            piste: c.piste,
+            famille: c.famille.nom(),
+            operateurs: c.famille.operateurs(),
+        })
+        .collect()
+}
+
 // « Note » (`rating`) a été la seule entrée d'une liste `CASSES` : les deux
 // moteurs compilaient `t.rating`, colonne absente, et l'aperçu rendait une
 // erreur 500. Réparée par décision de Bertrand (30/09/2026, #5547) : la note

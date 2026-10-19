@@ -5222,6 +5222,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "tune-assistant-ia"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chacha20poly1305",
+ "chrono",
+ "getrandom 0.2.17",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "tune-core",
+ "tune-http-types",
+ "tune-smart-http",
+]
+
+[[package]]
 name = "tune-bandcamp"
 version = "1.0.0"
 dependencies = [
@@ -5653,6 +5676,7 @@ dependencies = [
  "tower-service",
  "tracing",
  "tracing-subscriber",
+ "tune-assistant-ia",
  "tune-bandcamp",
  "tune-cd",
  "tune-circle",
