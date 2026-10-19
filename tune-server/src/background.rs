@@ -68,6 +68,9 @@ pub async fn spawn_background_tasks(state: &AppState, config: &TuneConfig) {
     // Sauvegarde cloud automatique des personnalisations (#5654). Un test de
     // câblage garde la ligne.
     crate::routes::system::sauvegarde_cloud::spawn(state);
+    // « Mes écoutes, tous serveurs » (#6510) : l'envoi des écoutes au compte,
+    // opt-in et désactivé par défaut. Un test de câblage garde la ligne.
+    tune_core::cloud::ecoutes_au_compte::spawn(state.backend.clone(), state.http_client.clone());
     spawn_local_audio_rescan(state);
     // Scan programmé (#2469). Cet appel manquait depuis la PR #1230 :
     // `spawn_scan_scheduler` était du code mort, la bascule des clients écrivait
@@ -3471,6 +3474,24 @@ mod tests_licence_proprietaire_battement {
         assert!(
             source[debut..fin].contains("routes::system::sauvegarde_cloud::spawn(state);"),
             "la passe de sauvegarde cloud n'est plus lancee au demarrage"
+        );
+    }
+
+    /// #6510 — sans cet appel, l'envoi des écoutes au compte serait du code
+    /// mort : la bascule dirait « activé » et rien ne partirait jamais.
+    #[test]
+    fn l_envoi_des_ecoutes_au_compte_est_lance() {
+        let source = include_str!("background.rs");
+        let debut = source
+            .find("pub async fn spawn_background_tasks")
+            .expect("spawn_background_tasks a disparu");
+        let fin = debut + source[debut..].find("\n}\n").expect("fin du corps");
+        assert!(
+            source[debut..fin].contains(concat!(
+                "tune_core::cloud::ecoutes_au_compte::",
+                "spawn(state.backend.clone(), state.http_client.clone());"
+            )),
+            "l'envoi des écoutes au compte n'est plus lancé au démarrage"
         );
     }
 
