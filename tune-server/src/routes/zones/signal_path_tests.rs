@@ -4874,3 +4874,75 @@ fn un_dst_decode_en_pcm_garde_sa_conversion_et_aucun_dsf() {
         Some("DST décompressé \u{2192} DSF")
     );
 }
+
+#[test]
+fn descriptions_eq_et_replaygain_suivent_les_douze_langues_6496() {
+    let (backend, zone) = dlna_zone_migrated();
+    let (_, ps) = flac_track_with_rg_tag(&backend, "+6.00 dB");
+    let settings = SettingsRepo::with_backend(backend.clone());
+    settings
+        .set(tune_core::audio::replaygain::MODE_KEY, "track")
+        .unwrap();
+    settings.set("plugin_equalizer_installed", "true").unwrap();
+    let profile = tune_core::audio::eq::EqProfile {
+        enabled: true,
+        bands: vec![tune_core::audio::eq::EqBandSpec {
+            gain: 6.0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    settings
+        .set(
+            &format!("zone_{}_eq_profile", zone.id.unwrap()),
+            &serde_json::to_string(&profile).unwrap(),
+        )
+        .unwrap();
+    let mut descriptions = std::collections::HashSet::new();
+    for (lang, prefixe) in [
+        ("fr", "EQ actif"),
+        ("en", "EQ active"),
+        ("de", "EQ aktiv"),
+        ("es", "EQ activo"),
+        ("it", "EQ attivo"),
+        ("zh", "EQ 已启用"),
+        ("ja", "EQ 有効"),
+        ("ko", "EQ 활성"),
+        ("ro", "EQ activ"),
+        ("sv", "EQ aktiv"),
+        ("vi", "EQ hoạt động"),
+        ("hu", "EQ aktív"),
+    ] {
+        let sp = build_signal_path_lang(
+            lang,
+            &ps,
+            &zone,
+            &backend,
+            Some("DAC"),
+            "none",
+            Some(&wire("flac", 96_000, 24)),
+        )
+        .unwrap();
+        let eq = step_desc(&sp, "DSP").unwrap();
+        assert!(eq.starts_with(prefixe), "EQ en {lang} : {eq}");
+        assert!(
+            descriptions.insert(eq),
+            "chaque langue a sa propre description complète"
+        );
+        let rg = step_desc(&sp, "ReplayGain").unwrap();
+        assert!(
+            rg.contains("+6.0"),
+            "la traduction doit conserver le gain : {rg}"
+        );
+        if lang != "fr" {
+            assert!(
+                !rg.contains("refusés"),
+                "ReplayGain encore français en {lang} : {rg}"
+            );
+        }
+        assert_eq!(
+            step_field(&sp, "ReplayGain", "clipping_guard"),
+            Some(&json!("refused_no_peak"))
+        );
+    }
+}

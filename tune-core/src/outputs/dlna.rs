@@ -624,11 +624,13 @@ pub struct DlnaOutput {
     /// Dernier volume que **Tune** a posé, en pour-cent. `u64::MAX` = jamais.
     /// Seule valeur disponible en mode silence si le renderer n'a jamais
     /// poussé de `Volume`.
+    ///
+    /// #6472 / #6008 — c'est aussi la SEULE consigne que la réimposition après
+    /// pose d'URI repose. Une valeur lue sur l'appareil n'y entre jamais : un
+    /// renderer qui rapporte 0 pendant une radio (Reivax66, fil 2307) ou qui
+    /// remonte seul à 80 % entre deux pistes (Cabasse Abyss, fil 2315) faisait
+    /// de cette lecture la consigne de la piste suivante.
     dernier_volume_pct: AtomicU64,
-    /// #6008 — le volume que l'appareil tenait avant la dernière pose d'URI,
-    /// en pour-cent : le dernier que Tune a posé, ou à défaut le dernier lu
-    /// hors de la fenêtre qui suit une pose. `u64::MAX` = inconnu.
-    volume_connu_pct: AtomicU64,
     /// #6008 — instant de la dernière pose d'URI acceptée. Ouvre la fenêtre
     /// pendant laquelle un volume remonté par l'appareil est corrigé.
     uri_posee_a: std::sync::Mutex<Option<std::time::Instant>>,
@@ -816,7 +818,6 @@ impl DlnaOutput {
             incoherence_depuis: tokio::sync::Mutex::new(None),
             derniere_position_ms: AtomicU64::new(u64::MAX),
             dernier_volume_pct: AtomicU64::new(u64::MAX),
-            volume_connu_pct: AtomicU64::new(u64::MAX),
             uri_posee_a: std::sync::Mutex::new(None),
             scpd_rendering_control: std::sync::RwLock::new(None),
             profil_volume: tokio::sync::OnceCell::new(),
@@ -1351,8 +1352,17 @@ impl DlnaOutput {
     async fn memoriser_volume(&self, niveau_pct: u64, niveau_appareil: u32) {
         let niveau_pct = niveau_pct.min(100);
         self.dernier_volume_pct.store(niveau_pct, Ordering::Relaxed);
-        self.volume_connu_pct.store(niveau_pct, Ordering::Relaxed);
         self.event_state.lock().await.volume = Some(niveau_appareil);
+    }
+
+    /// Banc #6472 : fait comme si la dernière pose d'URI datait d'au-delà de
+    /// [`FENETRE_VOLUME_APRES_URI`], pour lire le volume hors de la fenêtre.
+    #[cfg(test)]
+    pub(crate) fn vieillir_la_pose_d_uri(&self) {
+        let mut pose = self.uri_posee_a.lock().unwrap_or_else(|e| e.into_inner());
+        *pose = pose.and_then(|t| {
+            t.checked_sub(FENETRE_VOLUME_APRES_URI + std::time::Duration::from_secs(1))
+        });
     }
 
     /// #6008 — ouvre la fenêtre de surveillance du volume : une URI vient
@@ -1362,9 +1372,10 @@ impl DlnaOutput {
             Some(std::time::Instant::now());
     }
 
-    /// #6008 — le volume que l'appareil tenait avant la pose, en fraction.
+    /// #6008 — la dernière consigne de volume de Tune, en fraction. Jamais une
+    /// lecture de l'appareil (#6472) : `None` tant que Tune n'a rien posé.
     fn volume_connu(&self) -> Option<f64> {
-        match self.volume_connu_pct.load(Ordering::Relaxed) {
+        match self.dernier_volume_pct.load(Ordering::Relaxed) {
             u64::MAX => None,
             v => Some(v as f64 / 100.0),
         }
@@ -1397,10 +1408,10 @@ impl DlnaOutput {
     /// #6008 — le volume LU sur l'appareil, corrigé s'il a remonté de
     /// lui-même juste après une pose d'URI.
     ///
-    /// Hors de la fenêtre [`FENETRE_VOLUME_APRES_URI`], la lecture devient le
-    /// volume connu et passe telle quelle. Dans la fenêtre, un écart avec le
-    /// volume connu ne vient pas de Tune (ses commandes mettent le volume
-    /// connu à jour) : l'appareil a bougé seul. Une HAUSSE d'au moins
+    /// Hors de la fenêtre [`FENETRE_VOLUME_APRES_URI`], la lecture passe telle
+    /// quelle, et elle ne devient PAS la consigne (#6472) : seule une commande
+    /// de Tune la fixe. Dans la fenêtre, un écart avec la consigne ne vient
+    /// pas de Tune (ses commandes la mettent à jour) : l'appareil a bougé seul. Une HAUSSE d'au moins
     /// [`HAUSSE_QUI_APPREND`] apprend la règle ; un appareil qui la porte voit
     /// toute hausse de plus de 2 points corrigée sur-le-champ, et le sondeur
     /// reçoit le volume réimposé, pas le saut.
@@ -1412,10 +1423,6 @@ impl DlnaOutput {
             .is_some_and(|t| t.elapsed() <= FENETRE_VOLUME_APRES_URI);
         let connu = self.volume_connu();
         let (true, Some(connu)) = (dans_la_fenetre, connu) else {
-            self.volume_connu_pct.store(
-                (lu * 100.0).round().clamp(0.0, 100.0) as u64,
-                Ordering::Relaxed,
-            );
             return lu;
         };
         // Seule une HAUSSE se corrige : une baisse dans la fenêtre est plus
