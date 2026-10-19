@@ -148,6 +148,9 @@ pub struct AppState {
     /// avec le semis de la migration 90, gelé au 30/08 et jamais remis à jour
     /// (#2119).
     pub annuaire_radios: Arc<std::sync::RwLock<Vec<crate::routes::radios::StationAnnuaire>>>,
+    /// #6516 — d'où vient le relevé de l'annuaire (réseau, cache local), sa
+    /// date et son `ETag`. Voir `routes::radios_annuaire`.
+    pub annuaire_etat: Arc<std::sync::RwLock<crate::routes::radios_annuaire::EtatAnnuaire>>,
     pub license: Arc<tune_core::license::LicenseManager>,
     pub skin_manager: Arc<tune_core::skins::SkinManager>,
     /// Compiled-in plugins. Empty until [`crate::plugins::init`] runs, which
@@ -630,6 +633,7 @@ impl AppState {
             mdns_scanner: Arc::new(std::sync::Mutex::new(None)),
             active_audio_backend: Arc::new(std::sync::RwLock::new(None)),
             annuaire_radios: Arc::new(std::sync::RwLock::new(Vec::new())),
+            annuaire_etat: Arc::new(std::sync::RwLock::new(Default::default())),
             license,
             skin_manager,
             plugins,

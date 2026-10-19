@@ -121,7 +121,12 @@ oaat-core = { git = "https://github.com/renesenses/oaat", rev = "a5d5503", defau
 oaat-controller = { git = "https://github.com/renesenses/oaat", rev = "a5d5503", default-features = false }
 flate2 = "1"
 tar = "0.4"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# zip 9 (RUSTSEC-2026-0367/0368/0369). En 9.x la feature `deflate` tire le
+# moteur `zlib-rs` de flate2, qui l'emporte alors sur `miniz_oxide` pour TOUT
+# l'espace de travail (gzip compris). `deflate-flate2` + `deflate-zopfli`
+# reprennent exactement le contenu de l'ancienne `deflate` de zip 2 ; le
+# moteur reste celui que fixe `flate2 = "1"` ci-dessus (rust_backend).
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2", "deflate-zopfli"] }
 dotenvy = "0.15"
 
 [profile.dev]

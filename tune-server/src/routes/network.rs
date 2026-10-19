@@ -2450,8 +2450,15 @@ fn parse_didl_browse_response(xml: &str) -> (Vec<Value>, Vec<Value>) {
                         .and_then(|v| numero_didl(&v));
                     let disc_number = extract_xml_tag(element, "upnp:originalDiscNumber")
                         .and_then(|v| numero_didl(&v));
+                    // #6500 — la classe et le parent ne servaient à personne
+                    // et n'étaient pas rendus. L'indexation en a besoin pour
+                    // écarter une station de radio (`audioBroadcast`, ou un
+                    // `radio/N` du rayon `radios` d'un autre Tune).
+                    let class = extract_xml_tag(element, "upnp:class");
                     items.push(json!({
                         "id": id,
+                        "parent_id": parent_id,
+                        "class": class,
                         "title": title,
                         "artist": artist,
                         "album": album,
