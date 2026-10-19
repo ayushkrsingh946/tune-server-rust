@@ -57,7 +57,18 @@ pub struct RelayRegistered {
     pub msg_type: &'static str,
     pub ok: bool,
     pub server_id: String,
+    /// Ce que ce pont sait lire en plus du protocole d'origine (#6564). Un
+    /// serveur rc4 a rc6 ignore le champ ; un serveur recent n'envoie ses
+    /// morceaux en binaire que s'il y lit [`CAPACITE_MORCEAUX_BINAIRES`].
+    pub capabilities: &'static [&'static str],
 }
+
+/// Le pont lit les morceaux de flux en trames WebSocket binaires (#6564).
+/// Meme chaine que `tune-core/src/cloud/relay.rs`.
+pub const CAPACITE_MORCEAUX_BINAIRES: &str = "binary_stream_chunks_v1";
+
+/// Les capacites annoncees dans `relay.registered`.
+pub const CAPACITES: &[&str] = &[CAPACITE_MORCEAUX_BINAIRES];
 
 #[derive(Debug, Serialize)]
 pub struct RelayRequest {

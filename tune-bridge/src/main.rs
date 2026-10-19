@@ -1,6 +1,7 @@
 mod api_proxy;
 mod circle;
 mod licence;
+mod morceau_binaire;
 mod protocol;
 #[cfg(test)]
 mod relais_par_url_tests;

@@ -5241,6 +5241,7 @@ name = "tune-bridge"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "bytes",
  "dashmap",
  "dotenvy",
@@ -5251,6 +5252,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "tower-http",
  "tracing",
  "tracing-subscriber",

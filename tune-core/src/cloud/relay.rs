@@ -17,7 +17,7 @@ pub struct RelayClient {
     pub relay_url: String,
     pub local_port: u16,
     connected: Arc<AtomicBool>,
-    ws_tx: Arc<tokio::sync::Mutex<Option<mpsc::Sender<String>>>>,
+    ws_tx: CanalVersLeRelais,
     http_client: reqwest::Client,
     /// Client des FLUX relayés (`/stream/…`, audio d'une piste de cercle) :
     /// sans délai total, voir [`client_de_flux`].
@@ -131,6 +131,10 @@ impl RelayClient {
             .ok_or("connection closed before ack")?
             .map_err(|e| format!("ws read ack: {e}"))?;
 
+        // #6564 — le format des morceaux se décide ICI, une fois par
+        // connexion : binaire si CE pont l'a annoncé, base64 sinon. Un pont
+        // antérieur (rc4 à rc6) n'annonce rien et reçoit le format d'avant.
+        let mut morceaux_binaires = false;
         if let tungstenite::Message::Text(text) = ack {
             let v: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("parse ack: {e}"))?;
@@ -141,20 +145,25 @@ impl RelayClient {
                     .unwrap_or("rejected");
                 return Err(format!("relay rejected: {err}"));
             }
+            morceaux_binaires = pont_accepte_les_morceaux_binaires(&v);
         }
 
-        info!(server_id = %self.server_id, "registered with relay");
+        info!(
+            server_id = %self.server_id,
+            morceaux_binaires,
+            "registered with relay"
+        );
         self.connected.store(true, Ordering::Relaxed);
 
-        let (msg_tx, mut msg_rx) = mpsc::channel::<String>(256);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<Trame>(256);
         *self.ws_tx.lock().await = Some(msg_tx);
 
         // Writer: forward outbound messages to WS
         let writer_connected = self.connected.clone();
         let writer_handle = tokio::spawn(async move {
-            while let Some(msg) = msg_rx.recv().await {
+            while let Some(trame) = msg_rx.recv().await {
                 if ws_tx
-                    .send(tungstenite::Message::Text(msg.into()))
+                    .send(trame.sur_le_fil(morceaux_binaires))
                     .await
                     .is_err()
                 {
@@ -444,16 +453,20 @@ pub(crate) fn client_de_flux(patience: Duration) -> reqwest::Client {
 }
 
 /// Lit `url` en local (avec le `Range` et l'agent reçus) et le pousse au relais :
-/// `relay.stream_start`, puis les morceaux `BINARY:<id>:<base64>`, puis
-/// `relay.stream_end`. Chemin commun à `relay.stream_request` et à
-/// `relay.circle_stream_request`.
+/// `relay.stream_start`, puis les morceaux ([`Trame::Morceau`], numérotés à
+/// partir de 0), puis `relay.stream_end`. Chemin commun à
+/// `relay.stream_request` et à `relay.circle_stream_request`.
+///
+/// Le format des morceaux sur le fil (binaire ou base64) n'est pas choisi ici
+/// mais par l'écrivain de la connexion, d'après ce que le pont a annoncé
+/// (#6564) : ce chemin est le même pour un pont ancien ou nouveau.
 pub(crate) async fn pomper_le_flux(
     http: &reqwest::Client,
     url: &str,
     range: Option<String>,
     user_agent: Option<String>,
     id: &str,
-    ws_tx: &Arc<tokio::sync::Mutex<Option<mpsc::Sender<String>>>>,
+    ws_tx: &CanalVersLeRelais,
 ) -> BilanDuFlux {
     let mut req = http.get(url);
     if let Some(r) = range {
@@ -485,28 +498,27 @@ pub(crate) async fn pomper_le_flux(
             emettre_vers_le_relais(ws_tx, start_msg.to_string()).await;
 
             let mut octets: u64 = 0;
+            let mut seq: u64 = 0;
             use futures_util::StreamExt;
             let mut stream = resp.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 match chunk {
                     Ok(bytes) => {
                         octets += bytes.len() as u64;
-                        // Trame TEXTE `BINARY:<id>:<base64>`. Le canal vers le
-                        // relais ne porte que du texte (`mpsc::Sender<String>`),
-                        // d'ou l'encodage. Une trame binaire prefixee de
-                        // l'identifiant etait assemblee ici puis jetee sans
-                        // etre envoyee : elle laissait croire a un second
-                        // format de fil qui n'a jamais existe.
-                        //
                         // C'est ICI que la liaison lente se fait sentir : ce
                         // `send` attend que le relais ait de la place. Il
                         // attend sans le verrou, sinon le `relay.pong` ne
                         // partirait plus et la session entiere serait coupee.
                         emettre_vers_le_relais(
                             ws_tx,
-                            format!("BINARY:{}:{}", id, base64_encode(&bytes)),
+                            Trame::Morceau {
+                                id: id.to_string(),
+                                seq,
+                                octets: bytes,
+                            },
                         )
                         .await;
+                        seq += 1;
                     }
                     Err(e) => {
                         warn!(id = %id, error = %e, "stream chunk error");
@@ -566,28 +578,140 @@ pub(crate) async fn pomper_le_flux(
 ///
 /// Rend `false` quand le canal est ferme (relais deconnecte).
 pub(crate) async fn emettre_vers_le_relais(
-    ws_tx: &Arc<tokio::sync::Mutex<Option<mpsc::Sender<String>>>>,
-    trame: String,
+    ws_tx: &CanalVersLeRelais,
+    trame: impl Into<Trame>,
 ) -> bool {
     // Le clone sort du verrou, le garde meurt ici : rien n'est tenu pendant le
     // `send` qui suit.
     let canal = { ws_tx.lock().await.clone() };
     match canal {
-        Some(tx) => tx.send(trame).await.is_ok(),
+        Some(tx) => tx.send(trame.into()).await.is_ok(),
         None => false,
     }
 }
 
+/// Le canal vers le relais, partagé par tous les émetteurs du client (voir
+/// [`emettre_vers_le_relais`]). `None` tant que la connexion n'est pas établie.
+pub(crate) type CanalVersLeRelais = Arc<tokio::sync::Mutex<Option<mpsc::Sender<Trame>>>>;
+
+/// Capacité annoncée par le pont dans `relay.registered` (`capabilities`) :
+/// il lit les morceaux de flux en trames WebSocket binaires (#6564).
+///
+/// Même chaîne que `tune-bridge/src/protocol.rs`.
+pub(crate) const CAPACITE_MORCEAUX_BINAIRES: &str = "binary_stream_chunks_v1";
+
+/// Premier octet d'une trame binaire de morceau : la version du format. Un
+/// pont qui reçoit une autre valeur jette la trame au lieu de la deviner.
+pub(crate) const VERSION_MORCEAU_BINAIRE: u8 = 1;
+
+/// Le pont a-t-il annoncé qu'il lit les morceaux binaires ?
+///
+/// Un pont antérieur (rc4 à rc6) n'envoie pas `capabilities` : non, et le
+/// serveur garde le base64 qu'il comprend.
+pub(crate) fn pont_accepte_les_morceaux_binaires(ack: &serde_json::Value) -> bool {
+    ack.get("capabilities")
+        .and_then(|c| c.as_array())
+        .is_some_and(|c| {
+            c.iter()
+                .any(|v| v.as_str() == Some(CAPACITE_MORCEAUX_BINAIRES))
+        })
+}
+
+/// Une trame pour le relais, avant d'être mise sur le fil.
+///
+/// Les messages de contrôle (début et fin de flux, réponses d'API, pong) sont
+/// du JSON texte. Un morceau de flux garde ses octets jusqu'à l'écrivain de la
+/// connexion, qui seul sait ce que le pont comprend : voir
+/// [`Trame::sur_le_fil`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Trame {
+    Texte(String),
+    Morceau {
+        id: String,
+        /// Rang du morceau dans son flux, à partir de 0. Le pont s'en sert
+        /// pour refuser un trou ou un désordre plutôt que de le faire entendre.
+        seq: u64,
+        octets: bytes::Bytes,
+    },
+}
+
+impl From<String> for Trame {
+    fn from(texte: String) -> Self {
+        Trame::Texte(texte)
+    }
+}
+
+impl Trame {
+    /// Le message WebSocket qui part vers le pont.
+    ///
+    /// `binaire` : le pont a annoncé [`CAPACITE_MORCEAUX_BINAIRES`]. Un
+    /// morceau part alors en trame binaire (voir [`trame_binaire_de_morceau`]),
+    /// sans le tiers de plus que coûte le base64. Sinon, il part comme avant,
+    /// en texte `BINARY:<id>:<base64>`.
+    pub(crate) fn sur_le_fil(self, binaire: bool) -> tokio_tungstenite::tungstenite::Message {
+        use tokio_tungstenite::tungstenite::Message;
+        match self {
+            Trame::Texte(texte) => Message::Text(texte.into()),
+            Trame::Morceau { id, seq, octets } => {
+                if binaire && let Some(trame) = trame_binaire_de_morceau(&id, seq, &octets) {
+                    return Message::Binary(trame.into());
+                }
+                Message::Text(texte_de_morceau(&id, &octets).into())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl Trame {
+    /// La trame telle qu'un pont ANCIEN la reçoit (texte, base64) : les tests
+    /// écrits avant #6564 lisent ce format.
+    pub(crate) fn en_texte(self) -> String {
+        match self.sur_le_fil(false) {
+            tokio_tungstenite::tungstenite::Message::Text(t) => t.to_string(),
+            autre => panic!("trame non textuelle pour un pont ancien : {autre:?}"),
+        }
+    }
+}
+
+/// L'ancien format, que tout pont comprend : `BINARY:<id>:<base64>` en trame
+/// texte. Le nom est trompeur, il est resté pour ce qu'il est — le contrat de
+/// fil des ponts déjà déployés.
+pub(crate) fn texte_de_morceau(id: &str, octets: &[u8]) -> String {
+    format!("BINARY:{}:{}", id, base64_encode(octets))
+}
+
+/// Trame binaire d'un morceau (#6564) :
+///
+/// ```text
+/// [version = 1][n = longueur de l'id, 1 octet][id, n octets UTF-8]
+/// [seq, 8 octets gros-boutiste][octets du morceau]
+/// ```
+///
+/// `None` si l'identifiant est vide ou dépasse 255 octets : le morceau part
+/// alors en base64, que le pont lit toujours. Les identifiants du pont sont
+/// des UUID (36 octets).
+pub(crate) fn trame_binaire_de_morceau(id: &str, seq: u64, octets: &[u8]) -> Option<Vec<u8>> {
+    let n = u8::try_from(id.len()).ok().filter(|n| *n > 0)?;
+    let mut trame = Vec::with_capacity(2 + id.len() + 8 + octets.len());
+    trame.push(VERSION_MORCEAU_BINAIRE);
+    trame.push(n);
+    trame.extend_from_slice(id.as_bytes());
+    trame.extend_from_slice(&seq.to_be_bytes());
+    trame.extend_from_slice(octets);
+    Some(trame)
+}
+
 #[cfg(test)]
 mod emission_vers_le_relais_tests {
-    use super::emettre_vers_le_relais;
+    use super::{CanalVersLeRelais, Trame, emettre_vers_le_relais};
     use std::sync::Arc;
     use tokio::sync::{Mutex, mpsc};
 
-    type Emetteur = Arc<Mutex<Option<mpsc::Sender<String>>>>;
+    type Emetteur = CanalVersLeRelais;
 
-    fn canal(capacite: usize) -> (Emetteur, mpsc::Receiver<String>) {
-        let (tx, rx) = mpsc::channel::<String>(capacite);
+    fn canal(capacite: usize) -> (Emetteur, mpsc::Receiver<Trame>) {
+        let (tx, rx) = mpsc::channel::<Trame>(capacite);
         (Arc::new(Mutex::new(Some(tx))), rx)
     }
 
@@ -629,7 +753,10 @@ mod emission_vers_le_relais_tests {
     async fn la_trame_arrive_intacte_au_relais() {
         let (ws_tx, mut rx) = canal(4);
         assert!(emettre_vers_le_relais(&ws_tx, "BINARY:req-1:ZkxhQw==".to_string()).await);
-        assert_eq!(rx.recv().await.as_deref(), Some("BINARY:req-1:ZkxhQw=="));
+        assert_eq!(
+            rx.recv().await,
+            Some(Trame::Texte("BINARY:req-1:ZkxhQw==".to_string()))
+        );
     }
 
     /// Deux flux, une seule place : le second attend, mais le verrou reste
@@ -647,16 +774,22 @@ mod emission_vers_le_relais_tests {
 
         // Le relais lit une trame : la place liberee doit profiter au flux en
         // attente, sans qu'aucun verrou n'ait ete retenu entre-temps.
-        assert_eq!(rx.recv().await.as_deref(), Some("BINARY:lent:AAAA"));
+        assert_eq!(
+            rx.recv().await,
+            Some(Trame::Texte("BINARY:lent:AAAA".to_string()))
+        );
         assert!(lent.await);
-        assert_eq!(rx.recv().await.as_deref(), Some("BINARY:lent:BBBB"));
+        assert_eq!(
+            rx.recv().await,
+            Some(Trame::Texte("BINARY:lent:BBBB".to_string()))
+        );
     }
 
     /// Relais deconnecte : `ws_tx` ne porte plus de canal. L'emission ne
     /// panique pas, elle dit non.
     #[tokio::test]
     async fn sans_canal_ouvert_lemission_echoue_sans_paniquer() {
-        let ws_tx: Arc<Mutex<Option<mpsc::Sender<String>>>> = Arc::new(Mutex::new(None));
+        let ws_tx: Emetteur = Arc::new(Mutex::new(None));
         assert!(!emettre_vers_le_relais(&ws_tx, "relay.pong".to_string()).await);
     }
 
@@ -991,12 +1124,12 @@ mod flux_de_cercle_tests {
     async fn client(
         port: u16,
         reglages: Option<Arc<dyn DbBackend>>,
-    ) -> (RelayClient, mpsc::Receiver<String>) {
+    ) -> (RelayClient, mpsc::Receiver<Trame>) {
         let mut c = RelayClient::new("srv".into(), "jeton-du-pont".into(), "ws://x".into(), port);
         if let Some(b) = reglages {
             c = c.avec_reglages(b);
         }
-        let (tx, rx) = mpsc::channel::<String>(64);
+        let (tx, rx) = mpsc::channel::<Trame>(64);
         *c.ws_tx.lock().await = Some(tx);
         (c, rx)
     }
@@ -1011,11 +1144,12 @@ mod flux_de_cercle_tests {
         .to_string()
     }
 
-    async fn trame(rx: &mut mpsc::Receiver<String>) -> String {
+    async fn trame(rx: &mut mpsc::Receiver<Trame>) -> String {
         tokio::time::timeout(PATIENCE, rx.recv())
             .await
             .expect("aucune trame vers le pont")
             .expect("canal ferme")
+            .en_texte()
     }
 
     fn json(t: &str) -> serde_json::Value {
@@ -1229,7 +1363,7 @@ mod reponse_dapi_tests {
 
     async fn reponse_a(port: u16, path: &str) -> serde_json::Value {
         let c = RelayClient::new("srv".into(), "jeton".into(), "ws://x".into(), port);
-        let (tx, mut rx) = mpsc::channel::<String>(8);
+        let (tx, mut rx) = mpsc::channel::<Trame>(8);
         *c.ws_tx.lock().await = Some(tx);
         c.handle_message(
             &serde_json::json!({
@@ -1245,7 +1379,8 @@ mod reponse_dapi_tests {
         let trame = tokio::time::timeout(PATIENCE, rx.recv())
             .await
             .expect("aucune reponse vers le pont")
-            .expect("canal ferme");
+            .expect("canal ferme")
+            .en_texte();
         serde_json::from_str(&trame).unwrap()
     }
 
@@ -1357,27 +1492,28 @@ mod flux_relaye_6453_tests {
     /// Le client d'essai : celui de l'API garde son délai TOTAL (raccourci),
     /// celui des flux son délai de lecture (raccourci aussi). Un flux qui
     /// passerait par le premier serait coupé à `COURT`.
-    async fn client(port: u16) -> (RelayClient, mpsc::Receiver<String>) {
+    async fn client(port: u16) -> (RelayClient, mpsc::Receiver<Trame>) {
         let mut c = RelayClient::new("srv".into(), "jeton".into(), "ws://x".into(), port);
         c.http_client = crate::http::client::builder()
             .timeout(COURT)
             .build()
             .unwrap();
         c.http_flux = client_de_flux(COURT);
-        let (tx, rx) = mpsc::channel::<String>(256);
+        let (tx, rx) = mpsc::channel::<Trame>(256);
         *c.ws_tx.lock().await = Some(tx);
         (c, rx)
     }
 
     /// Lit les trames jusqu'à `relay.stream_end` ; rend (statut, octets).
-    async fn lire_jusqu_a_la_fin(rx: &mut mpsc::Receiver<String>) -> (u64, usize) {
+    async fn lire_jusqu_a_la_fin(rx: &mut mpsc::Receiver<Trame>) -> (u64, usize) {
         let mut statut = 0;
         let mut octets = 0;
         loop {
             let t = tokio::time::timeout(Duration::from_secs(10), rx.recv())
                 .await
                 .expect("aucune trame vers le pont")
-                .expect("canal ferme");
+                .expect("canal ferme")
+                .en_texte();
             if let Some(reste) = t.strip_prefix("BINARY:") {
                 let (_, b64) = reste.split_once(':').unwrap();
                 use base64::Engine;
@@ -1455,7 +1591,7 @@ mod flux_relaye_6453_tests {
             .timeout(COURT)
             .build()
             .unwrap();
-        let (tx, mut rx) = mpsc::channel::<String>(256);
+        let (tx, mut rx) = mpsc::channel::<Trame>(256);
         let ws_tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
         let url = format!("http://127.0.0.1:{port}/stream/radio.flac");
         let bilan = pomper_le_flux(&http, &url, None, None, "t", &ws_tx).await;
@@ -1465,5 +1601,348 @@ mod flux_relaye_6453_tests {
             bilan.octets
         );
         let _ = lire_jusqu_a_la_fin(&mut rx).await;
+    }
+}
+
+/// #6564 — les morceaux de flux en trames binaires, si le pont l'annonce.
+#[cfg(test)]
+mod morceaux_binaires_6564_tests {
+    use super::*;
+    use crate::db::migrations;
+    use crate::db::sqlite::SqliteDb;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::response::{IntoResponse, Response};
+    use tokio_tungstenite::tungstenite::Message;
+
+    const PATIENCE: Duration = Duration::from_secs(20);
+
+    /// Le vecteur de référence du format, recopié À L'IDENTIQUE dans
+    /// `tune-bridge/src/ws_server.rs` : les deux bouts du fil lisent le même
+    /// contrat. Id `req-1`, rang 2, morceau `fLaC`.
+    const VECTEUR: &[u8] = &[
+        1, 5, b'r', b'e', b'q', b'-', b'1', 0, 0, 0, 0, 0, 0, 0, 2, b'f', b'L', b'a', b'C',
+    ];
+
+    #[test]
+    fn la_trame_binaire_suit_le_format_de_reference() {
+        assert_eq!(
+            trame_binaire_de_morceau("req-1", 2, b"fLaC").as_deref(),
+            Some(VECTEUR)
+        );
+    }
+
+    #[test]
+    fn un_identifiant_vide_ou_trop_long_n_a_pas_de_trame_binaire() {
+        assert_eq!(trame_binaire_de_morceau("", 0, b"x"), None);
+        assert_eq!(trame_binaire_de_morceau(&"a".repeat(256), 0, b"x"), None);
+        assert!(trame_binaire_de_morceau(&"a".repeat(255), 0, b"x").is_some());
+    }
+
+    fn morceau(id: &str, seq: u64, octets: &'static [u8]) -> Trame {
+        Trame::Morceau {
+            id: id.to_string(),
+            seq,
+            octets: bytes::Bytes::from_static(octets),
+        }
+    }
+
+    #[test]
+    fn un_morceau_part_en_binaire_seulement_si_le_pont_l_accepte() {
+        assert_eq!(
+            morceau("req-1", 2, b"fLaC").sur_le_fil(true),
+            Message::Binary(VECTEUR.to_vec().into())
+        );
+        assert_eq!(
+            morceau("req-1", 2, b"fLaC").sur_le_fil(false),
+            Message::Text("BINARY:req-1:ZkxhQw==".into())
+        );
+    }
+
+    /// Un identifiant sans trame binaire possible repart en base64, que tout
+    /// pont lit : jamais de morceau perdu pour une question de format.
+    #[test]
+    fn un_identifiant_trop_long_repart_en_base64() {
+        let long = "a".repeat(300);
+        match (Trame::Morceau {
+            id: long.clone(),
+            seq: 0,
+            octets: bytes::Bytes::from_static(b"fLaC"),
+        })
+        .sur_le_fil(true)
+        {
+            Message::Text(t) => assert_eq!(t.as_str(), format!("BINARY:{long}:ZkxhQw==")),
+            autre => panic!("attendu du texte : {autre:?}"),
+        }
+    }
+
+    #[test]
+    fn le_controle_reste_du_json_texte() {
+        let fin = serde_json::json!({"type": "relay.stream_end", "id": "req-1"}).to_string();
+        assert_eq!(
+            Trame::Texte(fin.clone()).sur_le_fil(true),
+            Message::Text(fin.into())
+        );
+    }
+
+    #[test]
+    fn seul_un_pont_qui_l_annonce_recoit_du_binaire() {
+        // Pont rc4 à rc6 : pas de `capabilities`.
+        assert!(!pont_accepte_les_morceaux_binaires(&serde_json::json!({
+            "type": "relay.registered", "ok": true, "server_id": "srv"
+        })));
+        assert!(!pont_accepte_les_morceaux_binaires(&serde_json::json!({
+            "type": "relay.registered", "ok": true, "capabilities": ["autre_chose"]
+        })));
+        assert!(!pont_accepte_les_morceaux_binaires(&serde_json::json!({
+            "type": "relay.registered", "ok": true, "capabilities": CAPACITE_MORCEAUX_BINAIRES
+        })));
+        assert!(pont_accepte_les_morceaux_binaires(&serde_json::json!({
+            "type": "relay.registered", "ok": true,
+            "capabilities": ["autre_chose", CAPACITE_MORCEAUX_BINAIRES]
+        })));
+    }
+
+    // --- De bout en bout : un vrai client, un faux pont WebSocket ---------
+
+    /// Le flux de test : 3 Mio et des poussières, en morceaux de tailles
+    /// irrégulières, octets tous différents d'un rang à l'autre — un trou ou
+    /// une inversion change le contenu.
+    const TAILLE_DU_FLUX: usize = 3 * 1024 * 1024 + 17;
+
+    fn octet(i: usize) -> u8 {
+        (i.wrapping_mul(31) ^ (i >> 8) ^ (i >> 16)) as u8
+    }
+
+    fn flux_de_reference() -> Vec<u8> {
+        (0..TAILLE_DU_FLUX).map(octet).collect()
+    }
+
+    async fn servir_le_flux() -> Response {
+        let morceaux = futures_util::stream::unfold(0usize, |debut| async move {
+            if debut >= TAILLE_DU_FLUX {
+                return None;
+            }
+            // 1 Kio à 40 Kio, au gré du rang.
+            let taille = 1024 + (debut * 7919) % (39 * 1024);
+            let fin = (debut + taille).min(TAILLE_DU_FLUX);
+            let morceau: Vec<u8> = (debut..fin).map(octet).collect();
+            Some((Ok::<_, std::io::Error>(morceau), fin))
+        });
+        (
+            [("content-type", "audio/flac")],
+            Body::from_stream(morceaux),
+        )
+            .into_response()
+    }
+
+    async fn serveur_local() -> u16 {
+        let app = Router::new().fallback(|uri: axum::http::Uri| async move {
+            match uri.path() {
+                "/stream/abc" | "/api/v1/library/tracks/42/audio" => servir_le_flux().await,
+                _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+            }
+        });
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = ecoute.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(ecoute, app).await.unwrap();
+        });
+        port
+    }
+
+    /// Ce que le faux pont a reçu pour un flux.
+    #[derive(Debug, Default)]
+    struct Recu {
+        statut: u64,
+        contenu: Vec<u8>,
+        trames_binaires: usize,
+        trames_texte: usize,
+        /// Octets des trames de morceaux, tels qu'ils sont passés sur la
+        /// WebSocket (charge utile de chaque trame).
+        octets_sur_le_fil: usize,
+        fin_vue: bool,
+    }
+
+    /// Lit un morceau binaire selon le format de référence ; vérifie le rang.
+    fn lire_binaire(trame: &[u8], id: &str, attendu: u64) -> Vec<u8> {
+        assert_eq!(trame[0], VERSION_MORCEAU_BINAIRE);
+        let n = trame[1] as usize;
+        assert_eq!(&trame[2..2 + n], id.as_bytes());
+        let seq = u64::from_be_bytes(trame[2 + n..10 + n].try_into().unwrap());
+        assert_eq!(seq, attendu, "morceau perdu ou hors d'ordre");
+        trame[10 + n..].to_vec()
+    }
+
+    /// Le faux pont : accepte UNE connexion, répond à `relay.register` avec
+    /// (ou sans) la capacité, demande `demande`, et lit jusqu'à la fin.
+    async fn faux_pont(annonce: bool, demande: serde_json::Value) -> (String, Recu) {
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/ws/server", ecoute.local_addr().unwrap());
+        let port_local = serveur_local().await;
+        let mut client = RelayClient::new("srv".into(), "jeton".into(), url.clone(), port_local);
+        client = client.avec_reglages(base_circle_ouverte());
+        let client = Arc::new(client);
+        let client_tache = client.clone();
+        tokio::spawn(async move {
+            let _ = client_tache.connect_and_run().await;
+        });
+
+        let (socket, _) = tokio::time::timeout(PATIENCE, ecoute.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+
+        let register = ws.next().await.unwrap().unwrap();
+        let register: serde_json::Value =
+            serde_json::from_str(register.to_text().unwrap()).unwrap();
+        assert_eq!(register["type"], "relay.register");
+        let mut ack = serde_json::json!({
+            "type": "relay.registered", "ok": true, "server_id": "srv"
+        });
+        if annonce {
+            ack["capabilities"] = serde_json::json!([CAPACITE_MORCEAUX_BINAIRES]);
+        }
+        ws.send(Message::Text(ack.to_string().into()))
+            .await
+            .unwrap();
+        ws.send(Message::Text(demande.to_string().into()))
+            .await
+            .unwrap();
+
+        let id = demande["id"].as_str().unwrap().to_string();
+        let mut recu = Recu::default();
+        let mut seq = 0u64;
+        while !recu.fin_vue {
+            let m = tokio::time::timeout(PATIENCE, ws.next())
+                .await
+                .expect("le serveur s'est tu avant la fin du flux")
+                .expect("connexion fermée")
+                .unwrap();
+            match m {
+                Message::Binary(b) => {
+                    recu.trames_binaires += 1;
+                    recu.octets_sur_le_fil += b.len();
+                    recu.contenu.extend(lire_binaire(&b, &id, seq));
+                    seq += 1;
+                }
+                Message::Text(t) => {
+                    if let Some(reste) = t.as_str().strip_prefix("BINARY:") {
+                        recu.trames_texte += 1;
+                        recu.octets_sur_le_fil += t.len();
+                        let (i, b64) = reste.split_once(':').unwrap();
+                        assert_eq!(i, id);
+                        use base64::Engine;
+                        recu.contenu.extend(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(b64)
+                                .unwrap(),
+                        );
+                        continue;
+                    }
+                    let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+                    assert_eq!(v["id"], id.as_str());
+                    match v["type"].as_str() {
+                        Some("relay.stream_start") => recu.statut = v["status"].as_u64().unwrap(),
+                        Some("relay.stream_end") => recu.fin_vue = true,
+                        autre => panic!("trame inattendue : {autre:?}"),
+                    }
+                }
+                autre => panic!("trame inattendue : {autre:?}"),
+            }
+        }
+        (id, recu)
+    }
+
+    /// Greffon `circle` actif et écoute de contact ouverte.
+    fn base_circle_ouverte() -> Arc<dyn DbBackend> {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        migrations::run_migrations(&db).unwrap();
+        let backend: Arc<dyn DbBackend> = Arc::new(db);
+        let s = SettingsRepo::with_backend(backend.clone());
+        s.set("plugin_circle_installed", "true").unwrap();
+        s.set(crate::cloud::CLE_ECOUTE_DE_CERCLE, "true").unwrap();
+        backend
+    }
+
+    fn demande_de_flux() -> serde_json::Value {
+        serde_json::json!({
+            "type": "relay.stream_request",
+            "id": "6f1c2a9e-0b7d-4c3e-9a51-2d8f7e6b4c10",
+            "stream_id": "abc",
+        })
+    }
+
+    fn demande_de_cercle() -> serde_json::Value {
+        serde_json::json!({
+            "type": MESSAGE_FLUX_DE_CERCLE,
+            "id": "0d9b8c7a-6e5f-4a3b-8c2d-1e0f9a8b7c6d",
+            "track_id": "42",
+        })
+    }
+
+    /// L'ALLER-RETOUR : pont qui annonce la capacité → tous les morceaux en
+    /// binaire, rangs contigus, contenu identique octet pour octet, fin vue
+    /// après le dernier morceau.
+    #[tokio::test]
+    async fn un_pont_qui_l_annonce_recoit_le_flux_en_binaire_sans_perte() {
+        let (_, recu) = faux_pont(true, demande_de_flux()).await;
+        assert_eq!(recu.statut, 200);
+        assert_eq!(recu.trames_texte, 0, "un morceau est parti en base64");
+        assert!(recu.trames_binaires > 1);
+        assert!(recu.contenu == flux_de_reference(), "flux altéré");
+    }
+
+    /// REPLI : un pont rc4 à rc6, qui n'annonce rien, reçoit le base64 qu'il
+    /// sait lire — et seulement lui.
+    #[tokio::test]
+    async fn un_pont_ancien_recoit_le_flux_en_base64() {
+        let (_, recu) = faux_pont(false, demande_de_flux()).await;
+        assert_eq!(recu.statut, 200);
+        assert_eq!(recu.trames_binaires, 0, "trame binaire vers un pont ancien");
+        assert!(recu.trames_texte > 1);
+        assert!(recu.contenu == flux_de_reference(), "flux altéré");
+    }
+
+    /// Tune Circle passe par le même `pomper_le_flux` : binaire avec un pont
+    /// qui l'annonce, base64 avec un pont ancien.
+    #[tokio::test]
+    async fn l_ecoute_de_contact_suit_le_format_du_pont() {
+        let (_, binaire) = faux_pont(true, demande_de_cercle()).await;
+        assert_eq!(binaire.statut, 200);
+        assert_eq!(binaire.trames_texte, 0);
+        assert!(binaire.contenu == flux_de_reference());
+
+        let (_, texte) = faux_pont(false, demande_de_cercle()).await;
+        assert_eq!(texte.trames_binaires, 0);
+        assert!(texte.contenu == flux_de_reference());
+    }
+
+    /// LA MESURE : le même flux de test, octets des morceaux sur la WebSocket
+    /// dans un format et dans l'autre. Le base64 coûte 4 octets pour 3 ; le
+    /// binaire doit rendre au moins 24 % du trafic.
+    #[tokio::test]
+    async fn le_binaire_rend_un_quart_du_trafic() {
+        let (_, binaire) = faux_pont(true, demande_de_flux()).await;
+        let (_, texte) = faux_pont(false, demande_de_flux()).await;
+        let gain = 1.0 - binaire.octets_sur_le_fil as f64 / texte.octets_sur_le_fil as f64;
+        eprintln!(
+            "#6564 mesure : flux de {TAILLE_DU_FLUX} octets — base64 {} octets en {} trames, \
+             binaire {} octets en {} trames, gain {:.2} %",
+            texte.octets_sur_le_fil,
+            texte.trames_texte,
+            binaire.octets_sur_le_fil,
+            binaire.trames_binaires,
+            gain * 100.0
+        );
+        assert!(
+            gain >= 0.24,
+            "gain de {:.2} % seulement (base64 {} / binaire {})",
+            gain * 100.0,
+            texte.octets_sur_le_fil,
+            binaire.octets_sur_le_fil
+        );
     }
 }
