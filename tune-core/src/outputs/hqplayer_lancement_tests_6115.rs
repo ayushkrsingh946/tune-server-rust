@@ -253,3 +253,44 @@ async fn l_ordre_est_stop_playlistclear_playlistadd_play() {
         "{recu:?}"
     );
 }
+
+/// #6177 (kiran, fil 2233) — sur le fil, la lecture ET la suivante portent
+/// les étiquettes du morceau : HQPlayer n'affiche plus « HTTP stream ».
+#[tokio::test]
+async fn la_lecture_et_la_suivante_portent_les_etiquettes_6177() {
+    let faux = FauxHqplayer::en_lecture(COURANTE, 60.0, 300.0).await;
+    let sortie = faux.sortie();
+    let avec_etiquettes = |url| PlayMedia {
+        url,
+        mime_type: "audio/flac",
+        title: Some("Echoes"),
+        artist: Some("Pink Floyd"),
+        album: Some("Meddle"),
+        ..Default::default()
+    };
+
+    sortie.play_media(&avec_etiquettes(AUTRE)).await.unwrap();
+    sortie
+        .set_next_media(&avec_etiquettes(SUIVANTE))
+        .await
+        .unwrap();
+
+    let ajouts: Vec<String> = faux
+        .recu()
+        .into_iter()
+        .filter(|c| c.starts_with("<PlaylistAdd"))
+        .collect();
+    let etiquettes = r#"<metadata artist="Pink Floyd" album="Meddle" song="Echoes" />"#;
+    assert_eq!(
+        ajouts,
+        vec![
+            format!(
+                r#"<PlaylistAdd uri="{AUTRE}" queued="0" clear="1">{etiquettes}</PlaylistAdd>"#
+            ),
+            format!(
+                r#"<PlaylistAdd uri="{SUIVANTE}" queued="0" clear="0">{etiquettes}</PlaylistAdd>"#
+            ),
+        ],
+        "#6177 : HQPlayer ne reçoit que l'URI et affiche « HTTP stream »"
+    );
+}

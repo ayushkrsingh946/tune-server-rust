@@ -822,10 +822,7 @@ impl OutputTarget for HqplayerOutput {
         })?;
 
         // Add URI to playlist (clear existing, start playing)
-        let xml = format!(
-            r#"<PlaylistAdd uri="{}" queued="0" clear="1"></PlaylistAdd>"#,
-            escape_xml(media.url)
-        );
+        let xml = playlist_add_xml(media, true);
         self.action(&xml).await.map_err(|e| {
             warn!(error = %e, "hqplayer_playlist_add_failed");
             e
@@ -880,10 +877,7 @@ impl OutputTarget for HqplayerOutput {
             self.retirer_la_suivante(&precedente).await?;
             self.enchainement().suivante = None;
         }
-        let xml = format!(
-            r#"<PlaylistAdd uri="{}" queued="0" clear="0"></PlaylistAdd>"#,
-            escape_xml(media.url)
-        );
+        let xml = playlist_add_xml(media, false);
         self.action(&xml).await.map_err(|e| {
             warn!(error = %e, "hqplayer_suivante_add_failed");
             e
@@ -1000,6 +994,38 @@ impl OutputTarget for HqplayerOutput {
 }
 
 /// Escape special XML characters in a string.
+/// La commande `PlaylistAdd` d'un média, `clear` vidant la playlist.
+///
+/// #6177 (kiran, fil 2233) — HQPlayer n'affichait que « HTTP stream » : seule
+/// l'URI partait. Le protocole porte les étiquettes dans un élément enfant
+/// `<metadata …/>`, dont chaque attribut est une étiquette (HQPlayer Control
+/// 6.0.1, `clControlInterface::playlistAdd` ; les mêmes clés sont relues dans
+/// `Status`). On n'écrit que ce que l'on sait : pas d'attribut vide, et aucun
+/// élément du tout sans étiquette — la commande reste alors celle d'avant.
+fn playlist_add_xml(media: &PlayMedia<'_>, clear: bool) -> String {
+    let etiquettes: String = [
+        ("artist", media.artist),
+        ("album", media.album),
+        ("song", media.title),
+    ]
+    .into_iter()
+    .filter_map(|(cle, valeur)| {
+        let valeur = valeur.map(str::trim).filter(|v| !v.is_empty())?;
+        Some(format!(r#" {cle}="{}""#, escape_xml(valeur)))
+    })
+    .collect();
+    let metadonnees = if etiquettes.is_empty() {
+        String::new()
+    } else {
+        format!("<metadata{etiquettes} />")
+    };
+    format!(
+        r#"<PlaylistAdd uri="{}" queued="0" clear="{}">{metadonnees}</PlaylistAdd>"#,
+        escape_xml(media.url),
+        if clear { 1 } else { 0 }
+    )
+}
+
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -1071,6 +1097,38 @@ mod tests {
         let xml = r#"<Status><Title>Test Song</Title><Artist>Test Artist</Artist></Status>"#;
         assert_eq!(extract_xml_text(xml, "Title"), Some("Test Song".into()));
         assert_eq!(extract_xml_text(xml, "Artist"), Some("Test Artist".into()));
+    }
+
+    /// #6177 — l'URI seule faisait afficher « HTTP stream » à HQPlayer.
+    #[test]
+    fn playlist_add_porte_les_etiquettes_du_morceau_6177() {
+        let media = PlayMedia {
+            url: "http://10.0.0.2:8888/stream/abc.flac",
+            title: Some("Echoes"),
+            artist: Some("Pink Floyd"),
+            album: Some("Meddle & co"),
+            ..Default::default()
+        };
+        assert_eq!(
+            playlist_add_xml(&media, true),
+            r#"<PlaylistAdd uri="http://10.0.0.2:8888/stream/abc.flac" queued="0" clear="1"><metadata artist="Pink Floyd" album="Meddle &amp; co" song="Echoes" /></PlaylistAdd>"#,
+            "#6177 : HQPlayer ne reçoit que l'URI et affiche « HTTP stream »"
+        );
+        assert!(playlist_add_xml(&media, false).contains(r#"clear="0"><metadata "#));
+    }
+
+    /// Sans étiquette connue, la commande est celle d'avant, sans élément vide.
+    #[test]
+    fn playlist_add_sans_etiquette_reste_nu() {
+        let media = PlayMedia {
+            url: "http://h/s.flac",
+            title: Some("  "),
+            ..Default::default()
+        };
+        assert_eq!(
+            playlist_add_xml(&media, false),
+            r#"<PlaylistAdd uri="http://h/s.flac" queued="0" clear="0"></PlaylistAdd>"#
+        );
     }
 
     #[test]
