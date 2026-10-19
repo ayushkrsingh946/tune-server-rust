@@ -1126,13 +1126,14 @@ impl PlaybackOrchestrator {
             // #5297 — la tranche d'une piste d'image SACD, déplacement de
             // l'utilisateur compris : le DoP part de ce début et s'arrête à
             // la fin de la piste, au lieu de jouer le disque entier.
-            let tranche = tranche_cue.map(|t| {
-                let seek = req.seek_ms.unwrap_or(0);
-                (
-                    t.debut_ms + seek,
-                    t.duree_ms.map(|d| t.debut_ms + d.max(seek)),
-                )
-            });
+            //
+            // #6456 — et le déplacement d'un `.dsf`/`.dff` ordinaire, sans
+            // tranche : le DoP part de `seek_ms`, comme la branche native
+            // juste au-dessus. Sans cela, un saut sur une sortie locale DoP
+            // relançait la piste depuis le début pendant que l'horloge de la
+            // zone repartait de la position visée — d'où une fin de piste
+            // déclarée bien avant la fin de l'audio entendu (Levente, fil 2305).
+            let tranche = tranche_dop(tranche_cue, req.seek_ms);
             return self
                 .anticiper_le_dop(
                     track,
@@ -3800,6 +3801,23 @@ impl PlaybackOrchestrator {
     }
 }
 
+/// #6456 — la fenêtre du DoP, sur l'horloge du fichier : la tranche CUE/ISO
+/// entamée par le déplacement, comme avant (#5297), ou — sans tranche — le
+/// seul déplacement, jusqu'au bout du fichier. `None` : depuis le début.
+fn tranche_dop(
+    tranche_cue: Option<TrancheCue>,
+    seek_ms: Option<u64>,
+) -> Option<(u64, Option<u64>)> {
+    let seek = seek_ms.unwrap_or(0);
+    match tranche_cue {
+        Some(t) => Some((
+            t.debut_ms + seek,
+            t.duree_ms.map(|d| t.debut_ms + d.max(seek)),
+        )),
+        None => (seek > 0).then_some((seek, None)),
+    }
+}
+
 /// La cadence et le nombre de canaux d'une source DSD, lus DANS LE FICHIER
 /// (DSF, DFF, ISO SACD) — `None` si l'en-tête est illisible. Partagé par le
 /// DoP (`anticiper_le_dop`, #1894) et le DSD natif (#5643) : une seule
@@ -3822,5 +3840,45 @@ fn sonder_l_entete_dsd(file_path: &str) -> Option<(u32, u32)> {
         crate::audio::dsf::parse_dsf(file_path)
             .ok()
             .map(|i| (i.sample_rate, i.channels))
+    }
+}
+
+#[cfg(test)]
+mod tranche_dop_tests_6456 {
+    use super::{TrancheCue, tranche_dop};
+
+    /// #6456 — un `.dsf` ordinaire (pas de tranche) déplacé à 2:12 : le DoP
+    /// doit partir de 2:12, pas du début.
+    #[test]
+    fn un_deplacement_sans_tranche_cue_est_transmis_au_dop() {
+        assert_eq!(tranche_dop(None, Some(132_581)), Some((132_581, None)));
+    }
+
+    #[test]
+    fn sans_deplacement_ni_tranche_le_dop_part_du_debut() {
+        assert_eq!(tranche_dop(None, None), None);
+        assert_eq!(tranche_dop(None, Some(0)), None);
+    }
+
+    /// La tranche CUE/ISO garde sa règle d'avant (#5297).
+    #[test]
+    fn la_tranche_cue_garde_sa_regle() {
+        let t = TrancheCue {
+            debut_ms: 60_000,
+            duree_ms: Some(30_000),
+        };
+        assert_eq!(
+            tranche_dop(Some(t), Some(5_000)),
+            Some((65_000, Some(90_000)))
+        );
+        assert_eq!(tranche_dop(Some(t), None), Some((60_000, Some(90_000))));
+        let derniere = TrancheCue {
+            debut_ms: 60_000,
+            duree_ms: None,
+        };
+        assert_eq!(
+            tranche_dop(Some(derniere), Some(5_000)),
+            Some((65_000, None))
+        );
     }
 }
