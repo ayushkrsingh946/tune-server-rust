@@ -25,7 +25,7 @@ use crate::streaming::qobuz::QobuzService;
 
 /// Ce que le faux CDN fait d'un fichier.
 #[derive(Clone, Copy)]
-enum Cdn {
+pub(crate) enum Cdn {
     /// 200 et des octets.
     Sert,
     /// 500.
@@ -36,7 +36,7 @@ enum Cdn {
     Coupe,
 }
 
-struct Etat {
+pub(crate) struct Etat {
     base: String,
     /// L'adresse du CDN brut qui coupe, quand un format est en `Coupe`.
     coupe: Option<String>,
@@ -50,10 +50,10 @@ struct Etat {
 }
 
 impl Etat {
-    fn demandes(&self, format: &str) -> usize {
+    pub(crate) fn demandes(&self, format: &str) -> usize {
         *self.demandes.lock().unwrap().get(format).unwrap_or(&0)
     }
-    fn telechargements(&self, format: &str) -> usize {
+    pub(crate) fn telechargements(&self, format: &str) -> usize {
         *self
             .telechargements
             .lock()
@@ -157,7 +157,9 @@ async fn cdn_qui_coupe(telechargements: Arc<Mutex<HashMap<String, usize>>>) -> S
 }
 
 /// Monte le faux Qobuz. `getFileUrl` connaît 27 (24/192) et 6 (16/44,1).
-async fn faux_qobuz(cdn_27: Cdn, cdn_6: Cdn) -> (Arc<Etat>, QobuzService) {
+/// Monté aussi par les essais du préchargement sans blanc
+/// (`orchestrator/qobuz_repli_prechargement_6401_tests.rs`).
+pub(crate) async fn faux_qobuz(cdn_27: Cdn, cdn_6: Cdn) -> (Arc<Etat>, QobuzService) {
     let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("port libre");
