@@ -297,3 +297,151 @@ async fn une_station_refusee_quitte_l_annuaire_mais_reste_dans_mes_radios() {
     assert!(latino.get("annuaire").is_none(), "{latino}");
     assert_eq!(latino["favorite"], true);
 }
+
+// ---------------------------------------------------------------------------
+// Le lien `external_id` (SQLite 126 / PG 090, décision de Bertrand du 19/10)
+// ---------------------------------------------------------------------------
+
+use tune_server::routes::radios::StationAnnuaire;
+
+fn fiches_publiees(state: &tune_server::state::AppState) -> Vec<StationAnnuaire> {
+    state.annuaire_radios.read().unwrap().clone()
+}
+
+fn id_de(repo: &RadioRepo, url: &str) -> i64 {
+    repo.list()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.url == url)
+        .and_then(|r| r.id)
+        .expect("station semée")
+}
+
+const FIP: &str = "https://icecast.radiofrance.fr/fip-hifi.aac";
+
+#[tokio::test]
+async fn ajouter_depuis_l_annuaire_enregistre_le_lien_des_la_creation() {
+    let (state, app, _d) = etat_avec_annuaire().await;
+    let repo = RadioRepo::with_backend(state.backend.clone());
+    let jazz = id_de(&repo, "https://icecast.radiofrance.fr/fipjazz-hifi.aac");
+    repo.delete(jazz).unwrap();
+    let (s, cree) = requete(&app, "POST", "/api/v1/radios/directory/S000978/add", None).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let id = cree["id"].as_i64().unwrap();
+    assert_eq!(
+        repo.liens_annuaire().unwrap().get(&id).map(String::as_str),
+        Some("S000978")
+    );
+}
+
+#[tokio::test]
+async fn le_lien_survit_au_changement_d_adresse_et_propose_la_mise_a_jour_sans_rien_changer() {
+    let (state, app, _d) = etat_avec_annuaire().await;
+    let repo = RadioRepo::with_backend(state.backend.clone());
+    // Rapprochement de départ : FIP (semée) est liée par son adresse.
+    radios_annuaire::lier_les_stations(&repo, &fiches_publiees(&state));
+    let fip = id_de(&repo, FIP);
+    assert_eq!(
+        repo.liens_annuaire().unwrap().get(&fip).map(String::as_str),
+        Some("S000973")
+    );
+
+    // L'annuaire change TOUTES les adresses de FIP.
+    let neuve = "https://nouveau-flux.example/fip.aac";
+    let mut fiches = fiches_publiees(&state);
+    let f = fiches
+        .iter_mut()
+        .find(|f| f.external_id.as_deref() == Some("S000973"))
+        .unwrap();
+    f.stream_url = neuve.into();
+    f.stream_urls = vec![neuve.into()];
+    radios_annuaire::publier(&state, fiches);
+
+    let (_, radios) = requete(&app, "GET", "/api/v1/radios", None).await;
+    let st = radios
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == fip)
+        .unwrap();
+    assert_eq!(st["annuaire"]["external_id"], "S000973", "{st}");
+    assert_eq!(st["annuaire"]["rapproche_par"], "id");
+    assert_eq!(st["annuaire"]["flux_change"], true);
+    assert_eq!(st["annuaire"]["stream_url_annuaire"], neuve);
+    // Rien n'a changé tout seul.
+    assert_eq!(st["stream_url"], FIP);
+    assert_eq!(repo.get(fip).unwrap().unwrap().url, FIP);
+
+    // L'annuaire continue de la reconnaître : pas de doublon proposé.
+    let (_, ann) = requete(&app, "GET", "/api/v1/radios/directory?q=fip", None).await;
+    let item = ann["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["external_id"] == "S000973")
+        .unwrap();
+    assert_eq!(item["my_radio_id"], fip);
+
+    // Le geste de l'utilisateur : « Mettre à jour l'adresse du flux ».
+    let (s, maj) = requete(
+        &app,
+        "POST",
+        &format!("/api/v1/radios/directory/update-stream/{fip}"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{maj}");
+    assert_eq!(maj["stream_url"], neuve);
+    assert_eq!(maj["annuaire"]["flux_change"], false);
+    assert_eq!(repo.get(fip).unwrap().unwrap().url, neuve);
+}
+
+#[tokio::test]
+async fn un_nom_ambigu_ne_lie_rien_et_le_rapprochement_est_idempotent() {
+    let (state, _app, _d) = etat_avec_annuaire().await;
+    let repo = RadioRepo::with_backend(state.backend.clone());
+    let mut fiches = fiches_publiees(&state);
+    for (ext, url) in [
+        ("S990001", "https://a.example/jazz"),
+        ("S990002", "https://b.example/jazz"),
+    ] {
+        fiches.push(StationAnnuaire {
+            name: "Jazz Radio".into(),
+            stream_url: url.into(),
+            stream_urls: vec![url.into()],
+            external_id: Some(ext.into()),
+            ..Default::default()
+        });
+    }
+    let locale = repo
+        .create(&RadioStation {
+            id: None,
+            name: "Jazz Radio".into(),
+            url: "https://c.example/jazz".into(),
+            homepage: None,
+            logo_url: None,
+            country: None,
+            language: None,
+            genre: None,
+            codec: None,
+            bitrate: None,
+            is_favorite: false,
+            last_played: None,
+            play_count: 0,
+        })
+        .unwrap();
+    let premiers = radios_annuaire::lier_les_stations(&repo, &fiches);
+    assert!(premiers > 0, "les stations semées se lient");
+    assert!(
+        !repo.liens_annuaire().unwrap().contains_key(&locale),
+        "un nom porté par deux fiches ne lie rien"
+    );
+    // Rejouer ne pose rien de plus, et ne réécrit pas un lien existant.
+    let fip = id_de(&repo, FIP);
+    repo.lier_a_l_annuaire(fip, Some("S999999")).unwrap();
+    assert_eq!(radios_annuaire::lier_les_stations(&repo, &fiches), 0);
+    assert_eq!(
+        repo.liens_annuaire().unwrap().get(&fip).map(String::as_str),
+        Some("S999999")
+    );
+}

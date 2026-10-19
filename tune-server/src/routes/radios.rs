@@ -961,49 +961,32 @@ pub async fn refresh_radio_logos(state: &AppState) -> RattrapageLogos {
         return RattrapageLogos::injoignable();
     }
 
-    // Même règle d'adresse que la porte anti-doublon d'`add_from_web`.
-    let norm = flux_normalise;
-
-    let mut by_url: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut by_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for item in &annuaire {
-        let Some(abs) = item.logo_url.clone() else {
-            continue;
-        };
-        for su in std::iter::once(&item.stream_url).chain(item.stream_urls.iter()) {
-            by_url.entry(norm(su)).or_insert_with(|| abs.clone());
-        }
-        by_name
-            .entry(item.name.trim().to_ascii_lowercase())
-            .or_insert_with(|| abs.clone());
-    }
-
     let repo = RadioRepo::with_backend(state.backend.clone());
+    // #6516 — le rapprochement de départ, idempotent : chaque station qui
+    // retrouve sûrement sa fiche reçoit son `external_id`, et c'est par lui
+    // que les passes suivantes la retrouvent.
+    super::radios_annuaire::lier_les_stations(&repo, &annuaire);
+    let liens = repo.liens_annuaire().unwrap_or_default();
     let mut bilan = RattrapageLogos {
         annuaire_a_jour: releve.a_jour(),
         ..RattrapageLogos::default()
     };
     for mut st in repo.list().unwrap_or_default() {
-        if st.logo_url.as_deref().is_some_and(|s| !s.trim().is_empty()) {
-            continue; // keep an existing / user-set logo
-        }
-        let logo = by_url
-            .get(&norm(&st.url))
-            .or_else(|| by_name.get(&st.name.trim().to_ascii_lowercase()))
-            .cloned();
-        match logo {
-            Some(logo) => {
-                st.logo_url = Some(logo);
+        let lien = st.id.and_then(|id| liens.get(&id)).map(String::as_str);
+        match logo_a_poser(&annuaire, &st, lien) {
+            DecisionLogo::Garder => {
+                if st.logo_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+                    bilan.sans_logo += 1;
+                }
+            }
+            DecisionLogo::Poser(logo) => {
+                st.logo_url = logo;
                 if repo.update(&st).is_ok() {
                     bilan.updated += 1;
                 } else {
                     bilan.sans_logo += 1;
                 }
             }
-            // L'annuaire a répondu et ne connaît pas cette station, ni par URL
-            // de flux ni par nom : son logo restera vide tant que l'entrée n'y
-            // sera pas ajoutée (#2421).
-            None => bilan.sans_logo += 1,
         }
     }
     if bilan.updated > 0 {
@@ -1020,6 +1003,93 @@ pub async fn refresh_radio_logos(state: &AppState) -> RattrapageLogos {
     );
     bilan
 }
+
+/// Ce que le rattrapage fait du logo d'une station.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DecisionLogo {
+    /// Rien à changer.
+    Garder,
+    /// Poser ce logo (`None` : retirer un logo de l'annuaire posé à tort).
+    Poser(Option<String>),
+}
+
+/// Le logo qu'une station de « Mes radios » doit porter, d'après l'annuaire.
+///
+/// 🔴 Fil du 19/10/2026 (iPhone de Bertrand) : « BBC Radio 3 » portait le logo
+/// de Berliner Rundfunk 91.4. Le rapprochement par adresse était juste — c'est
+/// le FICHIER `bbc-radio-3.png` du site qui contient le mauvais logo — mais le
+/// rattrapage avait deux défauts qui rendaient l'erreur possible et durable :
+///
+/// 1. il rapprochait aussi par NOM, et une station locale pouvait ainsi
+///    recevoir le logo d'une fiche qui n'est pas la sienne ;
+/// 2. il ne réécrivait JAMAIS un logo déjà posé : une fiche corrigée sur le
+///    site (nouveau logo, logos de Rémi qui remplacent les anciens) n'atteignait
+///    jamais une station déjà servie.
+///
+/// La règle est désormais :
+///
+/// * le logo ne vient QUE de la fiche dont une adresse de flux est, à la
+///   normalisation près, celle de la station. Pas de nom, pas d'approximation :
+///   sans adresse commune, aucun logo n'est posé ;
+/// * un logo choisi par l'utilisateur (toute adresse hors du dossier des logos
+///   de l'annuaire, image téléversée, favicon…) n'est jamais touché ;
+/// * un logo de l'ANNUAIRE déjà posé suit sa fiche : si la fiche rapprochée par
+///   l'adresse porte un autre logo, il est remplacé ; s'il est le logo d'une
+///   AUTRE fiche, d'une autre adresse et d'un autre nom, alors que la station
+///   n'a pas de fiche à elle, il est retiré. Une station sortie de l'annuaire
+///   (retirée, refusée) garde le logo qu'elle avait.
+///
+/// #6516 — une station LIÉE (`external_id`) prend sa fiche par ce lien, même si
+/// l'adresse du flux a changé côté annuaire ; liée à une fiche sortie de
+/// l'annuaire, elle n'en a plus aucune (jamais de repli par l'adresse).
+pub(crate) fn logo_a_poser(
+    annuaire: &[StationAnnuaire],
+    st: &RadioStation,
+    lien: Option<&str>,
+) -> DecisionLogo {
+    let sa_fiche = match lien {
+        Some(ext) => annuaire
+            .iter()
+            .find(|f| f.external_id.as_deref() == Some(ext)),
+        None => annuaire
+            .iter()
+            .find(|f| super::radios_annuaire::flux_de_la_fiche(f, &st.url)),
+    };
+    let actuel = st
+        .logo_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match actuel {
+        None => match sa_fiche.and_then(|f| f.logo_url.clone()) {
+            Some(logo) => DecisionLogo::Poser(Some(logo)),
+            None => DecisionLogo::Garder,
+        },
+        Some(logo) if !logo.starts_with(LOGOS_DE_L_ANNUAIRE) => DecisionLogo::Garder,
+        Some(logo) => match sa_fiche {
+            Some(f) => match f.logo_url.as_deref() {
+                Some(neuf) if neuf != logo => DecisionLogo::Poser(Some(neuf.to_string())),
+                _ => DecisionLogo::Garder,
+            },
+            None => {
+                let nom = tune_core::radio_metadata_relais::nom_replie(&st.name);
+                let d_une_autre = annuaire.iter().any(|f| {
+                    f.logo_url.as_deref() == Some(logo)
+                        && tune_core::radio_metadata_relais::nom_replie(&f.name) != nom
+                });
+                if d_une_autre {
+                    DecisionLogo::Poser(None)
+                } else {
+                    DecisionLogo::Garder
+                }
+            }
+        },
+    }
+}
+
+/// Le dossier des logos servis par l'annuaire : seuls ceux-là suivent leur
+/// fiche. Tout autre logo est réputé choisi par l'utilisateur.
+pub(crate) const LOGOS_DE_L_ANNUAIRE: &str = "https://mozaiklabs.fr/storage/radio-logos/";
 
 async fn refresh_logos_handler(State(state): State<AppState>) -> Json<Value> {
     let bilan = refresh_radio_logos(&state).await;
@@ -3741,3 +3811,7 @@ mod tests_validation_url_flux {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "radios_logos_exacts_tests.rs"]
+mod tests_logos_exacts;

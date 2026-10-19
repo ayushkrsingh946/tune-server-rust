@@ -231,3 +231,37 @@ fn un_releve_sans_date_ou_vieux_d_un_jour_est_perime() {
     };
     assert!(releve_perime(&vieux));
 }
+
+#[test]
+fn une_fiche_rapprochee_par_le_nom_seul_ne_prete_pas_son_logo() {
+    // Fil du 19/10 : le logo d'une station ne vient que de la fiche qui lui
+    // est liée (`external_id`) ou qui partage son adresse de flux.
+    let f = fiches();
+    let fip = f.iter().find(|s| s.name == "FIP").unwrap();
+    let ailleurs = "https://ailleurs.example/fip";
+    let par_nom = rattachement(fip, Lien::Nom, ailleurs);
+    assert!(par_nom["logo_url"].is_null(), "{par_nom}");
+    assert_eq!(par_nom["rapproche_par"], "nom");
+    let par_flux = rattachement(fip, Lien::Flux, &fip.stream_url);
+    assert_eq!(par_flux["logo_url"], serde_json::json!(fip.logo_url));
+    assert_eq!(par_flux["flux_change"], false);
+    let par_id = rattachement(fip, Lien::Id, ailleurs);
+    assert_eq!(par_id["logo_url"], serde_json::json!(fip.logo_url));
+    assert_eq!(par_id["flux_change"], true);
+    assert_eq!(
+        par_id["stream_url_annuaire"],
+        serde_json::json!(fip.stream_url)
+    );
+    // Le nom suffit toujours au rapprochement (pas de doublon à l'ajout).
+    let index = IndexAnnuaire::new(&f);
+    assert_eq!(
+        index.lien(None, "FIP", ailleurs).map(|(_, l)| l),
+        Some(Lien::Nom)
+    );
+    assert_eq!(
+        index.lien(Some("S000973"), "x", ailleurs).map(|(_, l)| l),
+        Some(Lien::Id)
+    );
+    // Lié à une fiche sortie de l'annuaire : aucun repli par l'adresse.
+    assert_eq!(index.lien(Some("S999001"), "FIP", &fip.stream_url), None);
+}
