@@ -1842,6 +1842,10 @@ mod eq_en_vol_4407_tests;
 // bibliothèque native de test.
 #[cfg(test)]
 mod greffon_natif_tiers_tests;
+// #6522, #6524 — le verdict PURE de la sortie locale suit les réglages
+// enregistrés, dans l'état que la vraie bascule produit.
+#[cfg(all(test, feature = "local-audio"))]
+mod verdict_pure_reglages_6522_tests;
 
 /// Fil 2062 / #5550 — durée d'une piste UPnP lue dans les en-têtes du flux.
 mod duree_du_flux_2062;

@@ -444,6 +444,17 @@ impl PositionPoller {
                     ) {
                         ps.last_radio_poll = Instant::now();
                         self.refresh_radio_metadata(zone_id, zone_state).await;
+                    } else if decisions::relais_radio_du(
+                        zone_state.state == PlayState::Playing,
+                        zone_state.now_playing.as_ref().map(|np| np.source.as_str()),
+                        crate::radio_metadata_relais::zone_a_relire(
+                            zone_id,
+                            crate::radio_metadata_relais::periode_client(),
+                        ),
+                    ) {
+                        // #6516 — station suivie par radio-metadata.fr : le
+                        // relais se relit à sa propre cadence (5 s par défaut).
+                        self.refresh_radio_metadata(zone_id, zone_state).await;
                     }
 
                     // Zone navigateur : l'annonce « en écoute » que le
@@ -668,6 +679,20 @@ impl PositionPoller {
                 if contrat_radio_locale_6233::contrat_relu_entre_deux_sondages_radio(&device_id) {
                     self.relire_le_contrat_local_entre_deux_sondages_radio(zone_id, &device_id, ps)
                         .await;
+                }
+                // #6516 — entre deux sondages du renderer, une station suivie
+                // par radio-metadata.fr relit son titre sur le relais, à la
+                // cadence du relais. Aucun appel SOAP : le renderer garde le
+                // rythme de 15 s qui le ménage.
+                if decisions::relais_radio_du(
+                    zone_state.state == PlayState::Playing,
+                    zone_state.now_playing.as_ref().map(|np| np.source.as_str()),
+                    crate::radio_metadata_relais::zone_a_relire(
+                        zone_id,
+                        crate::radio_metadata_relais::periode_client(),
+                    ),
+                ) {
+                    self.refresh_radio_metadata(zone_id, zone_state).await;
                 }
                 continue;
             }
@@ -1871,6 +1896,63 @@ impl PositionPoller {
             }
 
             if position_reset {
+                // #6477 — un renderer qui lâche la piste en cours dès le
+                // `SetNext` (FiiO K17) : la règle s'apprend pour l'appareil,
+                // et les pistes suivantes ne lui envoient plus de `SetNext`
+                // (voir `armer_le_flux_suivant`).
+                // Un déplacement ou une relance de Tune depuis l'armement
+                // explique la retombée : rien à apprendre.
+                let geste_de_tune_depuis_l_armement = ps.gapless_sent_at.is_some_and(|arme| {
+                    zone_state.last_seek_at.is_some_and(|t| t >= arme)
+                        || zone_state.last_restart_at.is_some_and(|t| t >= arme)
+                });
+                // Le flux de la piste qui vient de retomber : l'a-t-il tiré
+                // jusqu'au bout ?
+                let flux_fini = zone_state
+                    .now_playing
+                    .as_ref()
+                    .and_then(|np| np.stream_id.clone());
+                let (servis, total) = match flux_fini.as_deref() {
+                    Some(sid) if ps.gapless_sent_at.is_some() => (
+                        self.orchestrator.streamer_bytes_sent(sid).await,
+                        self.orchestrator.streamer_total_bytes(sid).await,
+                    ),
+                    _ => (None, None),
+                };
+                if !geste_de_tune_depuis_l_armement
+                    && decisions::set_next_a_coupe_la_piste(
+                        ps.gapless_sent_at.map(|t| t.elapsed().as_millis() as u64),
+                        prev_position_ms,
+                        track_duration_ms,
+                        servis,
+                        total,
+                    )
+                {
+                    let est_dlna = {
+                        let outputs = self.outputs.lock().await;
+                        match outputs.get(&device_id) {
+                            Some(arc) => arc.lock().await.output_type() == "dlna",
+                            None => false,
+                        }
+                    };
+                    if est_dlna {
+                        warn!(
+                            zone_id,
+                            device_id = %device_id,
+                            prev_pos = prev_position_ms,
+                            track_dur = track_duration_ms,
+                            arm_to_advance_ms = ps
+                                .gapless_sent_at
+                                .map(|t| t.elapsed().as_millis() as u64),
+                            octets_servis = ?servis,
+                            octets_total = ?total,
+                            "dlna_set_next_coupe_la_piste_detecte"
+                        );
+                        crate::outputs::dlna_repli_set_uri::memoriser_set_next_coupe_la_piste(
+                            &device_id,
+                        );
+                    }
+                }
                 if !played_enough {
                     warn!(
                         zone_id,

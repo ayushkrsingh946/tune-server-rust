@@ -45,10 +45,12 @@ pub enum CloudScope {
     /// partagées avec le cercle (#6521). Son seau à part chez mozaiklabs ; un
     /// 429 ici ne doit pas retenir la synchro de bibliothèque.
     CircleThumbnails,
+    /// `POST /api/v1/listens` : l'envoi des écoutes au compte (#6510).
+    ListensSync,
 }
 
 impl CloudScope {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Telemetry,
         Self::InstanceHeartbeat,
         Self::BiosWrite,
@@ -64,6 +66,7 @@ impl CloudScope {
         Self::MetadataDecisionsWrite,
         Self::UserProfile,
         Self::CircleThumbnails,
+        Self::ListensSync,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -83,6 +86,7 @@ impl CloudScope {
             Self::MetadataDecisionsWrite => "metadata_decisions_write",
             Self::UserProfile => "user_profile",
             Self::CircleThumbnails => "circle_thumbnails",
+            Self::ListensSync => "listens_sync",
         }
     }
 

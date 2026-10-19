@@ -5498,7 +5498,9 @@ async fn set_eq(
         return resp;
     }
 
-    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, "equalizer") {
+    if let Err(response) =
+        crate::premium_audio_plugins::require_installed(&state, "equalizer", &headers)
+    {
         return response;
     }
 

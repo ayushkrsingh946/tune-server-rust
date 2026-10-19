@@ -43,9 +43,14 @@ impl PositionPoller {
                     (name, source_id.clone())
                 };
 
-            if let Some(meta) =
-                crate::radio_metadata::fetch_radio_metadata(&station_name, &stream_url).await
-            {
+            // #6516 — une station suivie par radio-metadata.fr se lit d'abord
+            // sur le relais ; la zone passe alors à la cadence du relais
+            // (`zone_a_relire`), les autres gardent celle du sondeur.
+            let (meta, par_le_relais) =
+                crate::radio_metadata::fetch_radio_metadata_suivie(&station_name, &stream_url)
+                    .await;
+            crate::radio_metadata_relais::noter_zone(zone_id, par_le_relais);
+            if let Some(meta) = meta {
                 // La pochette du titre quand la station la donne, le
                 // logo sinon. Bertrand : « mettre la pochette de
                 // l'album et non le logo de la radio ».

@@ -75,6 +75,7 @@ struct ExpertSettingsBody {
 
 async fn set_expert_settings(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ExpertSettingsBody>,
 ) -> Result<axum::response::Response, AppError> {
     if let Err(response) =
@@ -83,7 +84,9 @@ async fn set_expert_settings(
     {
         return Ok(response);
     }
-    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, "equalizer") {
+    if let Err(response) =
+        crate::premium_audio_plugins::require_installed(&state, "equalizer", &headers)
+    {
         return Ok(response);
     }
     if !EQ_EXPERT_BAND_CHOICES.contains(&body.expert_bands) {
@@ -216,7 +219,9 @@ async fn create_preset(
     {
         return Ok(resp);
     }
-    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, "equalizer") {
+    if let Err(response) =
+        crate::premium_audio_plugins::require_installed(&state, "equalizer", &headers)
+    {
         return Ok(response);
     }
 
@@ -270,7 +275,9 @@ async fn update_preset(
     {
         return Ok(resp);
     }
-    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, "equalizer") {
+    if let Err(response) =
+        crate::premium_audio_plugins::require_installed(&state, "equalizer", &headers)
+    {
         return Ok(response);
     }
 
@@ -316,7 +323,9 @@ async fn delete_preset(
     {
         return Ok(resp);
     }
-    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, "equalizer") {
+    if let Err(response) =
+        crate::premium_audio_plugins::require_installed(&state, "equalizer", &headers)
+    {
         return Ok(response);
     }
 
@@ -397,7 +406,9 @@ async fn activate_preset(
     {
         return resp;
     }
-    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, "equalizer") {
+    if let Err(response) =
+        crate::premium_audio_plugins::require_installed(&state, "equalizer", &headers)
+    {
         return response;
     }
 
@@ -577,7 +588,9 @@ async fn import_autoeq(
     {
         return Ok(resp);
     }
-    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, "equalizer") {
+    if let Err(response) =
+        crate::premium_audio_plugins::require_installed(&state, "equalizer", &headers)
+    {
         return Ok(response);
     }
 

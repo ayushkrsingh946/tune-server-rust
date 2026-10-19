@@ -30,6 +30,17 @@
 //! Éjection, changement de disque ou de lecteur, réglage désactivé : le
 //! chargement s'arrête au prochain bloc, la mémoire et le fichier sont
 //! rendus, et un flux qui attendait un bloc reçoit l'erreur d'éjection.
+//!
+//! ## Disque entier en mémoire : l'éjection ne coupe plus la lecture (#6410)
+//!
+//! Comme sur Daphile : une fois TOUT le disque chargé (`Fin::Termine`), le
+//! lecteur n'a plus rien à fournir. L'éjection garde alors le disque en
+//! mémoire ([`MemoireCd::garder_apres_ejection`]) et la file continue d'y
+//! ouvrir ses pistes ([`MemoireCd::disque_garde`]). La mémoire est rendue à
+//! la fin de la lecture du disque ou à l'arrêt (le surveillant, `ejection.rs`),
+//! ou au chargement d'un autre disque ([`MemoireCd::chargement`]). Un disque
+//! chargé en partie garde le comportement de #6043 : l'éjection libère et
+//! arrête.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -223,6 +234,9 @@ impl Etat {
 pub struct Chargement {
     pub disc_id: String,
     pub generation: u64,
+    /// #6410 — la TOC du disque chargé : une fois le disque éjecté, c'est
+    /// elle qui situe les pistes, le lecteur n'en a plus.
+    toc: Toc,
     secteurs_total: u64,
     etat: Mutex<Etat>,
     signal: Condvar,
@@ -250,6 +264,7 @@ impl Chargement {
         Self {
             disc_id,
             generation,
+            toc: toc.clone(),
             secteurs_total,
             etat: Mutex::new(Etat {
                 pistes,
@@ -271,6 +286,16 @@ impl Chargement {
 
     fn verrou(&self) -> std::sync::MutexGuard<'_, Etat> {
         self.etat.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// La TOC du disque chargé.
+    pub fn toc(&self) -> &Toc {
+        &self.toc
+    }
+
+    /// Tout le disque est en mémoire : le lecteur n'a plus rien à fournir.
+    pub fn complet(&self) -> bool {
+        self.verrou().fin == Some(Fin::Termine)
     }
 
     /// Lance le fil de chargement.
@@ -574,6 +599,9 @@ pub struct MemoireCd {
     reglages: RwLock<Reglages>,
     courant: Mutex<Option<Arc<Chargement>>>,
     ram_disponible: Option<u64>,
+    /// #6410 — le disque courant, entier en mémoire, a été éjecté : la
+    /// lecture continue depuis la mémoire.
+    garde: AtomicBool,
 }
 
 impl MemoireCd {
@@ -582,6 +610,7 @@ impl MemoireCd {
             reglages: RwLock::new(reglages),
             courant: Mutex::new(None),
             ram_disponible: ram_disponible(),
+            garde: AtomicBool::new(false),
         }
     }
 
@@ -649,6 +678,11 @@ impl MemoireCd {
             return Some(c.clone());
         }
         if let Some(ancien) = courant.take() {
+            // #6410 — un autre disque se charge : le disque gardé après son
+            // éjection rend sa mémoire.
+            if self.garde.swap(false, Ordering::SeqCst) {
+                tracing::info!(disc_id = %ancien.disc_id, "cd_memoire_gardee_liberee_autre_disque");
+            }
             ancien.liberer();
         }
         let c = Arc::new(Chargement::new(toc, disc_id.to_string(), generation));
@@ -670,10 +704,43 @@ impl MemoireCd {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take();
+        self.garde.store(false, Ordering::SeqCst);
         if let Some(c) = c {
             tracing::info!(disc_id = %c.disc_id, "cd_memoire_liberee");
             c.liberer();
         }
+    }
+
+    /// #6410 — le disque vient de quitter le lecteur. S'il est ENTIER en
+    /// mémoire, on le garde (la lecture continue) et on rend `true` ; sinon
+    /// on libère, comme #6043, et on rend `false`. Bloquant.
+    pub fn garder_apres_ejection(&self) -> bool {
+        let complet = self.courant().filter(|c| c.complet());
+        match complet {
+            Some(c) => {
+                if !self.garde.swap(true, Ordering::SeqCst) {
+                    tracing::info!(disc_id = %c.disc_id, "cd_memoire_gardee_apres_ejection");
+                }
+                true
+            }
+            None => {
+                self.liberer();
+                false
+            }
+        }
+    }
+
+    /// Le disque entier en mémoire, quel que soit l'état du lecteur.
+    pub fn disque_complet(&self) -> Option<Arc<Chargement>> {
+        self.courant().filter(|c| c.complet())
+    }
+
+    /// #6410 — le disque éjecté mais gardé en mémoire, s'il y en a un.
+    pub fn disque_garde(&self) -> Option<Arc<Chargement>> {
+        if !self.garde.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.disque_complet()
     }
 
     pub fn progression(&self) -> Option<Progression> {
