@@ -4304,6 +4304,54 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
         );",
     )
     .ok();
+    // Enrichissement MetaRust, lot 1 (#4805) : complétude d'album,
+    // instruments Wikidata, propositions Discogs, BPM estimés. Même régime
+    // que `musicbrainz_release_cache` juste au-dessus : sans numéro, et
+    // présentes aussi dans le CORE_SCHEMA de `sqlite.rs`.
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS album_completude (\
+            album_id INTEGER PRIMARY KEY,\
+            release_mbid TEXT NOT NULL,\
+            attendues INTEGER NOT NULL,\
+            presentes INTEGER NOT NULL,\
+            manquantes INTEGER NOT NULL,\
+            doublons INTEGER NOT NULL,\
+            detail TEXT NOT NULL,\
+            calcule_le TEXT NOT NULL\
+        );",
+    )
+    .ok();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS artiste_instruments (\
+            artist_mbid TEXT PRIMARY KEY,\
+            qid TEXT,\
+            instruments TEXT NOT NULL,\
+            lu_le TEXT NOT NULL\
+        );",
+    )
+    .ok();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS propositions_discogs (\
+            album_id INTEGER NOT NULL,\
+            discogs_release_id INTEGER NOT NULL,\
+            methode TEXT NOT NULL,\
+            proposition TEXT NOT NULL,\
+            statut TEXT NOT NULL,\
+            cree_le TEXT NOT NULL,\
+            decide_le TEXT,\
+            PRIMARY KEY (album_id, discogs_release_id)\
+        );",
+    )
+    .ok();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS bpm_estimes (\
+            file_path TEXT PRIMARY KEY,\
+            bpm REAL NOT NULL,\
+            source TEXT NOT NULL,\
+            mesure_le TEXT NOT NULL\
+        );",
+    )
+    .ok();
     // Rang manuel des favoris de service (migration 100, #2001 piste 2) —
     // jumelle de `favorites.position` posee plus haut, mais ICI parce que la
     // table vient seulement d'etre garantie. PG : migration 057.

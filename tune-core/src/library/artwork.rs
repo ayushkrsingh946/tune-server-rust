@@ -1993,7 +1993,9 @@ async fn batch_enrich_artist_artwork_inner(
     let contribution_consentie = crate::cloud::consent::contribution_autorisee(&settings);
     // Discogs token as configured in the app UI (stored in settings), so the
     // by-name Discogs image lookup actually works (Progman: no artist images).
-    let discogs_token = settings
+    // Le jeton PERSONNEL (Réglages ▸ Clés d'API, #4805 lot 1) passe devant ;
+    // l'intégré — réglage, puis environnement — sert à défaut.
+    let integre = settings
         .get("discogs_token")
         .ok()
         .flatten()
@@ -2008,6 +2010,12 @@ async fn batch_enrich_artist_artwork_inner(
                 .ok()
                 .filter(|s| !s.is_empty())
         });
+    let discogs_token = crate::cles_api::resoudre_pour_le_serveur(
+        &settings,
+        crate::cles_api::Service::Discogs,
+        integre,
+    )
+    .map(crate::cles_api::CleResolue::into_valeur);
 
     // La clé Last.fm, résolue comme le jeton Discogs juste au-dessus : le
     // réglage saisi dans Tune d'abord, l'environnement à défaut (#2257).

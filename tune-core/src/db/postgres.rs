@@ -213,6 +213,41 @@ pub(crate) const ENSURE_TABLES: &[&str] = &[
             corps BYTEA NOT NULL,\
             fetched_at TEXT NOT NULL\
         )",
+    // Enrichissement MetaRust, lot 1 (#4805). Même régime que la ligne
+    // ci-dessus : toute base PostgreSQL, à chaque démarrage ; `PG_FULL_SCHEMA`
+    // les porte aussi, à l'identique.
+    "CREATE TABLE IF NOT EXISTS album_completude (\
+            album_id BIGINT PRIMARY KEY,\
+            release_mbid TEXT NOT NULL,\
+            attendues INTEGER NOT NULL,\
+            presentes INTEGER NOT NULL,\
+            manquantes INTEGER NOT NULL,\
+            doublons INTEGER NOT NULL,\
+            detail TEXT NOT NULL,\
+            calcule_le TEXT NOT NULL\
+        )",
+    "CREATE TABLE IF NOT EXISTS artiste_instruments (\
+            artist_mbid TEXT PRIMARY KEY,\
+            qid TEXT,\
+            instruments TEXT NOT NULL,\
+            lu_le TEXT NOT NULL\
+        )",
+    "CREATE TABLE IF NOT EXISTS propositions_discogs (\
+            album_id BIGINT NOT NULL,\
+            discogs_release_id BIGINT NOT NULL,\
+            methode TEXT NOT NULL,\
+            proposition TEXT NOT NULL,\
+            statut TEXT NOT NULL,\
+            cree_le TEXT NOT NULL,\
+            decide_le TEXT,\
+            PRIMARY KEY (album_id, discogs_release_id)\
+        )",
+    "CREATE TABLE IF NOT EXISTS bpm_estimes (\
+            file_path TEXT PRIMARY KEY,\
+            bpm DOUBLE PRECISION NOT NULL,\
+            source TEXT NOT NULL,\
+            mesure_le TEXT NOT NULL\
+        )",
 ];
 
 // Every column SQLite gains via `add_column_if_missing` that the
