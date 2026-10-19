@@ -2171,6 +2171,9 @@ impl PlaybackOrchestrator {
                     // Built at the resolved stream's rate/channel count so the
                     // biquads match the DAC clock, mirroring the crossfeed.
                     let eq_ch = media.channels.unwrap_or(2).clamp(1, 8) as u16;
+                    // #6211 — une radio n'a pas de piste suivante : le
+                    // préampli gardé d'un égaliseur coupé s'y éteint en fondu.
+                    local_output.set_flux_sans_fin(media.live_stream);
                     local_output.set_eq(self.load_eq_processor(zone_id, cf_sr, eq_ch));
                     // Repli mono (#2362) — sortie LOCALE uniquement, comme le
                     // crossfeed juste au-dessus. `zone_mono_downmix` rend

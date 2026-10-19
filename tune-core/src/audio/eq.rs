@@ -30,6 +30,26 @@ pub const RAMPE_DE_BASCULE_MS: u32 = 300;
 /// biquad hérite de l'historique et ne claque pas.
 pub const SEUIL_DE_RAMPE_DB: f64 = 1.0;
 
+/// #6211 — durée du fondu qui éteint le préampli GARDÉ d'un égaliseur coupé
+/// sur un flux SANS FIN (radio).
+///
+/// Décision de Bertrand du 19/10 : la règle #5215 (le préampli gardé vaut
+/// jusqu'à la piste suivante) n'a pas de fin sur une radio, qui n'a pas de
+/// piste suivante — le niveau restait baissé jusqu'à la relance de la
+/// station (fil 2242). Sur un flux sans fin, le gain gardé revient donc à
+/// 0 dB par une rampe (linéaire en dB) de quelques secondes : assez lente
+/// pour ne faire entendre aucune marche, assez courte pour que « remettre à
+/// plat » rende le niveau d'avant l'égaliseur.
+pub const EXTINCTION_SUR_FLUX_SANS_FIN_MS: u32 = 3_000;
+
+/// #6211 — extinction en cours du préampli gardé : `depart` est le gain par
+/// coefficient au début de la rampe, `fait`/`total` comptent des trames.
+struct Extinction {
+    depart: Vec<f32>,
+    total: usize,
+    fait: usize,
+}
+
 /// Fondu enchaîné en cours : le signal passe de `depart` (l'égaliseur qu'on
 /// quitte, ou le signal SEC quand `None`) au traitement courant.
 struct Fondu {
@@ -56,6 +76,9 @@ pub struct EqProcessor {
     /// celui qu'on quitte, pour que le niveau perçu ne bouge pas. `None` :
     /// identité, le neutre se retire une fois son fondu fini.
     gain_garde: Option<Vec<f32>>,
+    /// #6211 — sur un flux sans fin, le préampli gardé s'éteint en fondu
+    /// (voir [`Self::eteindre_le_preampli_garde`]).
+    extinction: Option<Extinction>,
     clipping: CompteurDEcretage,
     closed: AtomicBool,
 }
@@ -109,6 +132,7 @@ impl EqProcessor {
             compensation: 1.0,
             gain_moyen_db,
             gain_garde: None,
+            extinction: None,
             clipping: Default::default(),
             closed: AtomicBool::new(false),
         }
@@ -141,6 +165,7 @@ impl EqProcessor {
             compensation: 1.0,
             gain_moyen_db: 0.0,
             gain_garde: (!identite).then_some(gains),
+            extinction: None,
             clipping: Default::default(),
             closed: AtomicBool::new(false),
         }
@@ -286,9 +311,41 @@ impl EqProcessor {
             compensation: 1.0,
             gain_moyen_db: 0.0,
             gain_garde: Some(gains),
+            extinction: None,
             clipping: Default::default(),
             closed: AtomicBool::new(false),
         })
+    }
+
+    /// #6211 (décision de Bertrand du 19/10) — sur un flux SANS FIN (radio),
+    /// le préampli gardé par un égaliseur coupé ne doit pas valoir à vie :
+    /// il revient à 0 dB par une rampe de [`EXTINCTION_SUR_FLUX_SANS_FIN_MS`],
+    /// linéaire en dB. Une fois la rampe finie, le neutre ne garde plus rien
+    /// et se retire ([`Self::est_neutre_au_repos`]).
+    ///
+    /// Sans effet sur un égaliseur actif, sur un neutre qui ne garde rien, ou
+    /// quand une extinction est déjà en cours. Les pistes n'appellent jamais
+    /// ceci : la règle #5215 y reste entière.
+    pub fn eteindre_le_preampli_garde(&mut self) {
+        if !self.est_neutre() || self.extinction.is_some() {
+            return;
+        }
+        let Some(depart) = self.gain_garde.clone() else {
+            return;
+        };
+        let total = (u64::from(self.sample_rate) * u64::from(EXTINCTION_SUR_FLUX_SANS_FIN_MS)
+            / 1000)
+            .max(1) as usize;
+        self.extinction = Some(Extinction {
+            depart,
+            total,
+            fait: 0,
+        });
+    }
+
+    /// #6211 — le préampli gardé est-il en train de s'éteindre ?
+    pub fn en_extinction(&self) -> bool {
+        self.extinction.is_some()
     }
 
     /// #5215 — égaliseur coupé dont le fondu est fini ET qui ne garde aucun
@@ -382,6 +439,11 @@ impl EqProcessor {
         stats
     }
     fn traiter_sans_fondu(&mut self, samples: &mut [f32]) -> EqProcessStats {
+        // #6211 — un neutre (compensation 1,0) dont le préampli s'éteint.
+        if self.extinction.is_some() {
+            self.appliquer_l_extinction(samples);
+            return EqProcessStats::default();
+        }
         let stats = match &mut self.engine {
             Engine::Bundled(p) => p.process_interleaved(samples),
             Engine::Native(p) => record_native(&mut self.clipping, p.process_f32(samples)),
@@ -405,6 +467,32 @@ impl EqProcessor {
             }
         }
         stats
+    }
+
+    /// #6211 — applique le préampli gardé en le ramenant vers 0 dB, trame par
+    /// trame, puis retient le gain atteint (un report vers une piste suivante
+    /// part de là). Rampe finie : plus rien de gardé.
+    fn appliquer_l_extinction(&mut self, samples: &mut [f32]) {
+        let Some(mut ext) = self.extinction.take() else {
+            return;
+        };
+        let canaux = usize::from(self.channels.max(1));
+        let coefs = ext.depart.len().max(1);
+        let gain_a = |ext: &Extinction, trame: usize, c: usize| -> f32 {
+            let t = ((ext.fait + trame) as f32 / ext.total as f32).min(1.0);
+            // Linéaire en dB : g^(1 - t), de g (t = 0) à 1 (t = 1).
+            ext.depart[c].powf(1.0 - t)
+        };
+        for (j, s) in samples.iter_mut().enumerate() {
+            *s *= gain_a(&ext, j / canaux + 1, j % coefs);
+        }
+        ext.fait += samples.len() / canaux;
+        if ext.fait >= ext.total {
+            self.gain_garde = None;
+        } else {
+            self.gain_garde = Some((0..coefs).map(|c| gain_a(&ext, 0, c)).collect());
+            self.extinction = Some(ext);
+        }
     }
 
     /// #6130 — l'étage tel que le journal le décrit : moteur et fréquence à

@@ -4233,6 +4233,70 @@ fn le_preampli_garde_vaut_pour_les_pistes_suivantes_5215() {
     assert!(!sortie.has_eq(), "l'égaliseur ne compte pas comme actif");
 }
 
+/// #6211 (décision de Bertrand du 19/10) — sur un flux SANS FIN (radio
+/// jouée en local), aucune piste suivante ne relaie le préampli gardé : il
+/// s'éteint en fondu jusqu'à 0 dB, sans marche, et le neutre se retire.
+/// Avant, le niveau restait baissé jusqu'à la relance de la station.
+#[test]
+fn sur_une_radio_le_preampli_garde_s_eteint_en_fondu_6211() {
+    let sortie = LocalOutput::new("Casque".to_string());
+    sortie.set_compensation_de_niveau(false);
+    sortie.set_flux_sans_fin(true);
+    let eq = egaliseur_a_preampli_negatif_5215();
+    let preampli = eq.preamp_db(0).expect("préampli chiffré");
+    assert!(
+        preampli < -10.0,
+        "prémisse : grosse réserve ({preampli} dB)"
+    );
+    let mut trame = 0;
+    // Avant l'égaliseur : le niveau de référence.
+    let sec = jouer_5215(&sortie, &mut trame, 20);
+    let reference = crete_5215(&sec);
+    sortie.replace_eq_live(Some(eq));
+    let mut signal = jouer_5215(&sortie, &mut trame, 60);
+    sortie.replace_eq_live(None);
+    // 3 s de rampe = 300 paquets de 10 ms ; 50 de marge.
+    signal.extend(jouer_5215(&sortie, &mut trame, 350));
+    let fin = crete_5215(&signal[signal.len() - 4800..]);
+    let ecart_db = 20.0 * f64::from(fin / reference).log10();
+    assert!(
+        ecart_db.abs() < 0.5,
+        "radio, égaliseur coupé, fondu fini : le niveau doit revenir à celui \
+         d'avant l'égaliseur ({ecart_db:+.2} dB ; préampli {preampli:.2} dB)"
+    );
+    let marche = plus_grande_marche_5215(&signal);
+    assert!(
+        marche <= MARCHE_MAX_5215,
+        "l'extinction du préampli fait une marche de {marche} (seuil {MARCHE_MAX_5215})"
+    );
+    assert!(
+        sortie.eq.lock().unwrap().is_none(),
+        "préampli éteint : le neutre doit quitter la chaîne"
+    );
+}
+
+/// #6211 — sur une PISTE, rien ne change : la règle #5215 garde le
+/// préampli après la coupure, même bien au-delà de la rampe des radios.
+#[test]
+fn sur_une_piste_le_preampli_reste_garde_au_dela_de_l_extinction_6211() {
+    let sortie = LocalOutput::new("Casque".to_string());
+    sortie.set_compensation_de_niveau(false);
+    sortie.set_flux_sans_fin(false);
+    let eq = egaliseur_a_preampli_negatif_5215();
+    let preampli = eq.preamp_db(0).expect("préampli chiffré");
+    sortie.set_eq(Some(eq));
+    let attendu = (AMPLITUDE_5215 * 10f64.powf(preampli / 20.0)) as f32;
+    let mut trame = 0;
+    let mut signal = jouer_5215(&sortie, &mut trame, 20);
+    sortie.replace_eq_live(None);
+    signal.extend(jouer_5215(&sortie, &mut trame, 350));
+    let crete = crete_5215(&signal[signal.len() - 4800..]);
+    assert!(
+        (crete / attendu - 1.0).abs() < 0.012,
+        "piste, égaliseur coupé : crête {crete}, attendu {attendu} (préampli gardé)"
+    );
+}
+
 /// Sous PURE, rien ne reste monté : le préampli gardé n'est pas reporté.
 #[test]
 fn sous_pure_le_preampli_garde_n_est_pas_reporte_5215() {
