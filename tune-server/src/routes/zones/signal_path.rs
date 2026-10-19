@@ -787,6 +787,7 @@ pub(super) fn libelle_de_transport(output_type: &str) -> &str {
     match output_type {
         "hqplayer" => "HQPlayer",
         "diretta" => "Diretta",
+        "devialet_air" => "Devialet AIR",
         autre => autre,
     }
 }
@@ -1967,6 +1968,7 @@ fn decrire_le_transport<'a>(
         is_lossless,
         is_dsd,
         bit_depth,
+        sample_rate,
         ..
     } = *source;
     let Forcages {
@@ -2074,6 +2076,15 @@ fn decrire_le_transport<'a>(
                 (true, transport, format_name)
             }
         }
+        // #6542 — Devialet AIR : PCM 24 bits, sans perte jusqu'à 96 kHz. Au-delà,
+        // la sortie rééchantillonne à 96 kHz (elle le déclare dans ses
+        // transformations réelles, d'où l'étape « Resampler ») ; une source
+        // DSD, avec perte ou plus profonde que 24 bits n'est pas bit-perfect.
+        "devialet_air" => (
+            is_lossless && !is_dsd && bit_depth <= 24 && sample_rate <= 96_000,
+            "Devialet AIR",
+            "PCM",
+        ),
         "browser" => (true, "Browser", format_name),
         "local" => {
             // #4172 — le contrat de signal (`runtime_signal_path`) n'est

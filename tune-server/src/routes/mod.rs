@@ -26,6 +26,7 @@ mod premium_audio_host;
 pub mod reaffectation_canaux;
 pub use tune_streaming_http::deezer_proxy_handler;
 pub mod developer_api;
+pub mod devialet_air;
 pub mod devices;
 pub mod diag_qobuz;
 pub mod digest;
@@ -485,6 +486,8 @@ pub fn router_with_plugins(
         .nest("/sonos", sonos::router())
         .nest("/squeezebox", squeezebox::router())
         .nest("/spotify-connect", spotify_connect::router())
+        // #6542 — sortie Devialet AIR expérimentale : ses réglages.
+        .nest("/devialet-air", devialet_air::router())
         .nest("/listenbrainz", listenbrainz::router())
         .nest("/scrobbler", scrobbler::router())
         .nest("/soundcloud", soundcloud::router())

@@ -520,7 +520,16 @@ pub async fn run_with(opts: RunOptions) {
     // Sans effet pour le binaire standard : `RunOptions::default()` n'a aucun
     // fournisseur. C'est l'appel dont la disparition a casse l'integration
     // partenaire pendant deux versions (#1510).
-    crate::discovery_setup::spawn_output_providers(&state, opts.output_providers);
+    // #6542 — Devialet AIR, fournisseur DANS l'arbre, sur le même chemin.
+    // Option expérimentale désactivée par défaut : tant qu'elle l'est, le
+    // fournisseur n'ouvre aucune écoute et ne rend aucune sortie.
+    let mut fournisseurs = opts.output_providers;
+    fournisseurs.push(std::sync::Arc::new(
+        tune_core::outputs::devialet_air::FournisseurDevialetAir::new(
+            tune_core::outputs::devialet_air::ContexteAir::depuis_la_base(state.backend.clone()),
+        ),
+    ));
+    crate::discovery_setup::spawn_output_providers(&state, fournisseurs);
 
     // Background tasks: squeezebox poller, session GC, position poller,
     // token refresh, UPnP advertiser, Deezer proxy, alarms, notifications, memory diag
