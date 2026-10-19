@@ -1839,6 +1839,13 @@ impl OutputTarget for OaatOutput {
                                     duration_ms_arc.store(next.duration_ms, Ordering::SeqCst);
                                     *current_title.lock().await = Some(next.title.clone());
                                     *current_artist.lock().await = Some(next.artist.clone());
+                                    // #6497 — la piste suivante n'a pas de flux :
+                                    // l'URI de la piste finie ne doit plus être
+                                    // rapportée, comme aux enchaînements DSD natif
+                                    // et HTTP. Sinon le garde-fou du rejeu (#5411)
+                                    // croit que la piste finie est rejouée et
+                                    // relance la suivante depuis zéro.
+                                    *current_uri.lock().await = Some(String::new());
                                     continue 'direct_tracks;
                                 }
                                 None => {

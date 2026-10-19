@@ -130,4 +130,61 @@ async fn greffon_natif_tiers_porte_par_l_etage_casque_en_premium_seulement() {
         s.get(&cle).unwrap().as_deref(),
         Some(r#"{"enabled":true,"gain":0.5}"#)
     );
+
+    // #6522 — en Premium, sur une sortie locale : PURE contourne le greffon,
+    // et le verdict le dit au lieu de « rien à contourner ».
+    #[cfg(feature = "local-audio")]
+    {
+        licence.set_account_premium(true, None).await;
+        pure_contourne_le_greffon_sur_la_sortie_locale(&orch, &id).await;
+    }
+}
+
+/// #6522 (fil 2333) — greffon natif tiers armé sur une zone LOCALE, piste
+/// démarrée hors PURE, puis la vraie bascule PURE : l'étage casque est vidé
+/// de la chaîne, et le verdict doit rester « DSP contourné par PURE ».
+#[cfg(feature = "local-audio")]
+async fn pure_contourne_le_greffon_sur_la_sortie_locale(orch: &PlaybackOrchestrator, id: &str) {
+    use crate::outputs::traits::{OutputDspState, OutputTarget};
+    let zone_id = crate::db::zone_repo::ZoneRepo::with_backend(orch.db.clone())
+        .create("USB DAC ASIO", Some("local"), Some("local:DAC"))
+        .unwrap();
+    SettingsRepo::with_backend(orch.db.clone())
+        .set(
+            &crate::audio::natifs_tiers::cle_de_zone(zone_id, id),
+            r#"{"enabled":true,"gain":0.5}"#,
+        )
+        .unwrap();
+    orch.outputs
+        .lock()
+        .await
+        .register(Box::new(crate::outputs::local::LocalOutput::new(
+            "DAC".to_string(),
+        )));
+    let arc = orch.outputs.lock().await.get("local:DAC").unwrap();
+    {
+        let sortie = arc.lock().await;
+        let local = sortie
+            .as_any()
+            .downcast_ref::<crate::outputs::local::LocalOutput>()
+            .unwrap();
+        local.declare_current_format_for_test(48_000, 2);
+        local.set_pure_bypass(false);
+        local.set_crossfeed(orch.load_crossfeed_processor(zone_id, 48_000));
+    }
+    SettingsRepo::with_backend(orch.db.clone())
+        .set(&format!("zone_{zone_id}_audiophile"), r#"{"enabled":true}"#)
+        .unwrap();
+    assert!(orch.refresh_zone_pure_dsp(zone_id).await);
+    let sortie = arc.lock().await;
+    let local = sortie
+        .as_any()
+        .downcast_ref::<crate::outputs::local::LocalOutput>()
+        .unwrap();
+    local.publier_le_contrat_pour_test();
+    assert_eq!(
+        local.signal_path_status().unwrap().dsp,
+        OutputDspState::BypassedPure,
+        "greffon natif armé + PURE = « DSP contourné par PURE » (#6522)"
+    );
 }

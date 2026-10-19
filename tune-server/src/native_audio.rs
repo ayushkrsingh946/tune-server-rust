@@ -375,6 +375,7 @@ async fn uninstall(
 async fn asset(
     State(state): State<AppState>,
     Path((id, name)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     if !managed(&id) {
         return refusal("unknown plugin".into());
@@ -383,7 +384,7 @@ async fn asset(
     {
         return response;
     }
-    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, &id) {
+    if let Err(response) = crate::premium_audio_plugins::require_installed(&state, &id, &headers) {
         return response;
     }
     let keys = match trusted_keys() {
