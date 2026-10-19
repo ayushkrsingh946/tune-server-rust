@@ -115,6 +115,11 @@ mod garde_ecriture_fichiers {
             "homonyme : `ecrire_atomiquement` y écrit la file d'attente (JSON), pas un fichier audio",
         ),
         (
+            "tune-core/src/audio/autoeq_base.rs",
+            "homonyme : `ecrire_atomiquement` y écrit le cache des profils AutoEq (texte), pas un \
+             fichier audio",
+        ),
+        (
             "tune-core/src/audio/iso9660/epreuves_5299.rs",
             "module d'essai (`#[cfg(test)] mod epreuves_5299;`)",
         ),
@@ -126,6 +131,7 @@ mod garde_ecriture_fichiers {
 
     /// Appels recensés au 05/10/2026, par fichier. Un écart fait échouer.
     const RECENSEMENT: &[(&str, usize)] = &[
+        ("tune-core/src/audio/autoeq_base.rs", 2),
         ("tune-core/src/audio/iso9660/epreuves_5299.rs", 2),
         ("tune-core/src/library/lyrics_pass.rs", 2),
         ("tune-core/src/metadata/lyrics.rs", 1),
