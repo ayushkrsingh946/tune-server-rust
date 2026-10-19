@@ -44,8 +44,8 @@ use tune_core::metadata::musicbrainz_release::{self, OrigineDeLaRecherche};
 use tune_core::taches_de_fond::{Tache, est_en_pause};
 
 use super::{
-    Disjoncteur, EchecIdentification, consigner_la_tentative, effet_sur_le_disjoncteur,
-    identifier_album, sql_candidats_identification,
+    Disjoncteur, EchecIdentification, Identification, consigner_la_tentative,
+    effet_sur_le_disjoncteur, identifier_album, sql_candidats_identification,
 };
 use crate::state::AppState;
 
@@ -217,9 +217,20 @@ pub(crate) fn spawn_passe_de_nuit(state: &AppState) {
     });
 }
 
+/// La passe est-elle allumée ? Relu par la veille ET à chaque album : une
+/// passe éteinte pendant qu'elle tourne s'arrête avant l'album suivant.
+fn passe_active(backend: &Arc<dyn DbBackend>) -> bool {
+    SettingsRepo::with_backend(backend.clone())
+        .get(CLE_ACTIVE)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("true")
+}
+
 async fn un_tour_de_veille(state: &AppState) {
     let reglages = SettingsRepo::with_backend(state.backend.clone());
-    let active = reglages.get(CLE_ACTIVE).ok().flatten().as_deref() == Some("true");
+    let active = passe_active(&state.backend);
     if !active {
         return;
     }
@@ -257,6 +268,28 @@ async fn un_tour_de_veille(state: &AppState) {
 
 /// La boucle de nuit : celle du lot, au débit réduit, et qui s'efface.
 async fn executer_la_nuit(state: &AppState, albums: Vec<i64>) {
+    executer_la_nuit_avec(
+        state,
+        albums,
+        || heure_et_date_locales().0,
+        |album_id| identifier_album(state, album_id, None, OrigineDeLaRecherche::Lot),
+    )
+    .await;
+}
+
+/// [`executer_la_nuit`], l'horloge et l'identification d'un album données
+/// par l'appelant (les essais n'interrogent pas MusicBrainz et ne dépendent
+/// pas de l'heure à laquelle ils tournent).
+async fn executer_la_nuit_avec<H, F, Fut>(
+    state: &AppState,
+    albums: Vec<i64>,
+    heure: H,
+    mut identifier: F,
+) where
+    H: Fn() -> u8,
+    F: FnMut(i64) -> Fut,
+    Fut: std::future::Future<Output = Result<Identification, EchecIdentification>>,
+{
     let _garde = state.background_tasks.begin(
         TACHE_NUIT,
         "Identification de nuit (albums refusés par MusicBrainz)…",
@@ -269,11 +302,16 @@ async fn executer_la_nuit(state: &AppState, albums: Vec<i64>) {
     let mut raison = "terminee";
 
     for (rang, album_id) in albums.into_iter().enumerate() {
+        // Éteinte depuis l'écran pendant la nuit : rien de plus ne part.
+        if !passe_active(&state.backend) {
+            raison = "desactivee";
+            break;
+        }
         if est_en_pause(Tache::Identification) {
             raison = "pause_utilisateur";
             break;
         }
-        if !dans_la_fenetre(heure_et_date_locales().0) {
+        if !dans_la_fenetre(heure()) {
             raison = "fin_de_fenetre";
             break;
         }
@@ -290,7 +328,7 @@ async fn executer_la_nuit(state: &AppState, albums: Vec<i64>) {
             musicbrainz_release::rate_limit_delay().await;
         }
         traites += 1;
-        match identifier_album(state, album_id, None, OrigineDeLaRecherche::Lot).await {
+        match identifier(album_id).await {
             Ok(issue) => {
                 if matches!(issue.verdict, "reidentified" | "unchanged") {
                     identifies += 1;
@@ -537,6 +575,63 @@ mod tests {
         assert_eq!(albums_a_reprendre(b).unwrap(), vec![1, 3]);
         // La liste est nettoyée de l'album sorti.
         assert_eq!(lire_refus(b).into_iter().collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    /// Une identification fictive : MusicBrainz n'a rien trouvé, sans refus.
+    fn introuvable() -> Identification {
+        Identification {
+            verdict: "not_found",
+            tracks_total: 1,
+            was_identified_before: false,
+            previous_release_id: None,
+            searched_title: "a".into(),
+            searched_artist: String::new(),
+            meilleur: None,
+            applied: None,
+            refus_musicbrainz: false,
+            source: None,
+            raison_ambigu: None,
+            candidats: Vec::new(),
+            concordance: None,
+            artistes: None,
+        }
+    }
+
+    /// Éteindre la passe depuis l'écran PENDANT qu'elle tourne arrête les
+    /// albums suivants : le réglage est relu avant chaque album, et le bilan
+    /// dit pourquoi la nuit s'est arrêtée.
+    ///
+    /// Contre-épreuve : retirer la relecture de `passe_active` dans la boucle
+    /// fait rougir ce test (les trois albums partent).
+    #[tokio::test]
+    async fn eteindre_la_passe_en_cours_de_route_arrete_les_albums_suivants() {
+        let etat = base();
+        let reglages = SettingsRepo::with_backend(etat.backend.clone());
+        reglages.set(CLE_ACTIVE, "true").unwrap();
+        let appels = std::sync::Mutex::new(Vec::new());
+        executer_la_nuit_avec(
+            &etat,
+            vec![1, 2, 3],
+            || HEURE_DEBUT,
+            |album_id| {
+                appels.lock().unwrap().push(album_id);
+                // L'utilisateur éteint la passe pendant le premier album.
+                SettingsRepo::with_backend(etat.backend.clone())
+                    .set(CLE_ACTIVE, "false")
+                    .unwrap();
+                async { Ok(introuvable()) }
+            },
+        )
+        .await;
+        assert_eq!(
+            *appels.lock().unwrap(),
+            vec![1],
+            "la passe éteinte a continué sur les albums suivants"
+        );
+        let bilan: Value =
+            serde_json::from_str(&reglages.get(CLE_BILAN).unwrap().unwrap()).unwrap();
+        assert_eq!(bilan["raison"], "desactivee", "{bilan}");
+        assert_eq!(bilan["traites"], 1, "{bilan}");
     }
 
     /// La veille est câblée au démarrage, et le lot à la main tient la liste.
