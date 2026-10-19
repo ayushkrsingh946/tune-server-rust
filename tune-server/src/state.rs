@@ -78,6 +78,10 @@ pub struct AppState {
     /// admet le réseau local (serveurs UPnP intégrés) — voir
     /// `artwork_proxy::pochette_de_bibliotheque`.
     pub relais_pochettes_lan: Arc<tune_core::library::artwork_proxy::Relais>,
+    /// #6388 — la base AutoEq en ligne (recherche d'un casque, import de sa
+    /// correction), lue par le SERVEUR et copiée dans `<données>/cache/autoeq`.
+    /// Champ public : un banc d'essai y pose un catalogue à faux réseau.
+    pub autoeq: Arc<tune_core::audio::autoeq_base::CatalogueAutoEq>,
     pub port: u16,
     /// Origine du compteur `uptime_seconds` : un `Instant` capturé à la
     /// construction de l'état, donc AU DÉMARRAGE DU PROCESSUS. Il repart
@@ -226,6 +230,22 @@ impl axum::extract::FromRef<AppState> for tune_smart_http::SmartHttpState {
             ))
             .avec_comptes(state.comptes_collections.clone())
     }
+}
+
+/// #6388 — la copie locale de la base AutoEq : `<données>/cache/autoeq`,
+/// le dossier de données étant résolu comme pour la base. Aucune copie pour
+/// une base en mémoire (essais) : rien n'est écrit dans le répertoire courant.
+fn dossier_autoeq(db_path: &str) -> Option<std::path::PathBuf> {
+    if db_path.is_empty() || db_path == ":memory:" {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let donnees = crate::gel_executeur::dossier_de_donnees(
+        std::env::var("TUNE_DATA_DIR").ok().as_deref(),
+        db_path,
+        &cwd,
+    );
+    Some(donnees.join("cache").join("autoeq"))
 }
 
 impl AppState {
@@ -590,6 +610,9 @@ impl AppState {
             relais_pochettes_lan: Arc::new(
                 tune_core::library::artwork_proxy::Relais::reseau_local(),
             ),
+            autoeq: Arc::new(tune_core::audio::autoeq_base::CatalogueAutoEq::production(
+                dossier_autoeq(db_path),
+            )),
             port,
             started_at: Instant::now(),
             process_started_at: time::OffsetDateTime::now_utc(),

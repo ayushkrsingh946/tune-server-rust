@@ -5,6 +5,8 @@ pub mod analyzer;
 pub mod ape;
 pub mod audiophile;
 pub mod autoeq;
+/// #6388 — la base AutoEq en ligne : index, recherche, copie locale.
+pub mod autoeq_base;
 pub mod canaux_declares;
 pub mod canaux_reseau_4573;
 
