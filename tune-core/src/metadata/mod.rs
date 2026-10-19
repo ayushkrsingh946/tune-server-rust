@@ -1951,7 +1951,10 @@ fn dsf_dff_fallback_complete(
             tags.year(),
             tags.original_year(),
             tags.original_date().map(|s| s.to_string()),
-            tags.release_date().map(|s| s.to_string()),
+            // web#2206 — à défaut de `TDRL`, la date complète de `TDRC`.
+            tags.release_date()
+                .map(|s| s.to_string())
+                .or_else(|| tags.get("TDRC").and_then(balises_brutes::date_precise)),
             genre,
             genres,
             tags.has_picture,
@@ -3638,6 +3641,9 @@ mod coffret_multicanal_tests_4846;
 
 #[cfg(test)]
 mod label_tests_4836;
+
+#[cfg(test)]
+mod date_de_sortie_tests_2206;
 #[cfg(test)]
 mod type_de_sortie_tests_5616;
 
@@ -3951,7 +3957,13 @@ fn try_read_metadata_unsanitized(path: &Path) -> Result<TrackMetadata, String> {
                 get(ItemKey::OriginalReleaseDate).and_then(|s| s.get(..4)?.parse::<u32>().ok())
             }),
         original_year,
-        release_date: get(ItemKey::ReleaseDate),
+        // web#2206 (fil 2300) — la date de sortie : RELEASEDATE / TDRL, et à
+        // défaut la date COMPLÈTE de la balise DATE / TDRC / ©day (Picard y
+        // écrit la date de sortie de l'édition). Sans elle, `release_date`
+        // restait vide sur toute une bibliothèque (0 album sur 4 255 sur le
+        // .18) et le tri « Date de sortie » retombait partout sur l'année.
+        release_date: get(ItemKey::ReleaseDate)
+            .or_else(|| get(ItemKey::RecordingDate).and_then(|d| balises_brutes::date_precise(&d))),
         original_date,
         genre,
         genres,
