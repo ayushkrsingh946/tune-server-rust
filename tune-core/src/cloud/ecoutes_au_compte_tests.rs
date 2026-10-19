@@ -321,7 +321,7 @@ async fn rien_ne_part_sans_le_reglage_ni_sans_compte() {
 /// Le défaut publié est bien « désactivé ».
 #[test]
 fn le_reglage_est_desactive_par_defaut() {
-    assert!(!ACTIVATION_DEFAUT);
+    const { assert!(!ACTIVATION_DEFAUT) };
     let b = base();
     assert!(!envoi_active(&reglages(&b)));
     reglages(&b).set(CLE_ACTIVATION, "true").unwrap();
