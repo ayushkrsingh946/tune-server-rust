@@ -286,6 +286,16 @@ jobs:
           TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
         run: cargo test --no-fail-fast -p tune-core --lib --no-default-features --features postgres pg_6179 -- --nocapture
 
+      # #6545 — notes de la communauté : l'instantané des notes d'album
+      # (`LIMIT ?` lié, `CAST(… AS BIGINT)`, jointures), l'upsert et le retrait
+      # d'une note, l'empreinte et le consentement gardés dans `settings`, et
+      # la lecture artiste/album de la route, contre un faux site. Tables
+      # TEMPORAIRES copiées des vraies : rien n'est écrit dans la base.
+      - name: Notes de la communauté sur PostgreSQL (#6545)
+        env:
+          TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
+        run: cargo test --no-fail-fast -p tune-core --lib --no-default-features --features postgres pg_6545 -- --nocapture
+
       # #5003 — les gardes de migration lisent le schéma COURANT : un schéma
       # voisin portant les mêmes tables (tout-TEXT, ou déjà BIGINT) ne doit
       # rien changer au schéma que Tune reçoit. Le test monte SES bases

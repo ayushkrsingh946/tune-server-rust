@@ -395,3 +395,179 @@ async fn sous_le_seuil_les_agregats_sont_nuls() {
         json!({"available": true, "rating": null, "listens": null})
     );
 }
+
+// ───────────── #6545 — le même parcours sur une VRAIE base PostgreSQL ─────────────
+//
+// Les témoins ci-dessus tournent sur SQLite, qui avale ce que PostgreSQL
+// refuse : un `LIMIT ?` lié en entier, un `CAST(… AS BIGINT)` sur une colonne
+// déjà entière, une jointure sur des colonnes de types différents, l'upsert
+// des notes. Le parcours ci-dessous passe par les SEULS chemins que la tâche
+// de fond et la route appellent (`instantane_des_notes`, `passe`,
+// `agregats_d_album`) ; il est joué sur SQLite (contre-épreuve du moteur) et
+// sur PostgreSQL, contre le schéma que les migrations ont posé (étape
+// « Apply PG migrations » de `test-postgres.yml`), dans des tables
+// TEMPORAIRES copiées des vraies : rien n'est écrit dans la base partagée.
+
+/// Artistes et albums du parcours, posés par des `INSERT` portables.
+fn semer(b: &Arc<dyn DbBackend>) {
+    for (id, nom) in [(20_i64, "Miles Davis"), (21, "Bill Evans")] {
+        b.execute(
+            "INSERT INTO artists (id, name) VALUES (?, ?)",
+            &[&id as &dyn ToSqlValue, &nom],
+        )
+        .unwrap();
+    }
+    for (id, titre, artiste) in [
+        (10_i64, "Kind of Blue", 20_i64),
+        (11, "Sunday at the Village Vanguard", 21),
+    ] {
+        b.execute(
+            "INSERT INTO albums (id, title, artist_id) VALUES (?, ?, ?)",
+            &[&id as &dyn ToSqlValue, &titre, &artiste],
+        )
+        .unwrap();
+    }
+}
+
+async fn parcours_communautaire(b: Arc<dyn DbBackend>) {
+    semer(&b);
+    noter(&b, 10, 1, 5, Some("COMMENTAIRE-SECRET"));
+    noter(&b, 10, 2, 3, None);
+    noter(&b, 11, 1, 4, None);
+
+    // L'instantané, lu tel quel : trié par album puis profil, sans
+    // commentaire ni identifiant local.
+    assert_eq!(
+        instantane_des_notes(&b, SERVEUR).unwrap(),
+        vec![
+            json!({"profile": empreinte_de_profil(SERVEUR, 1), "artist": "Miles Davis",
+                   "album": "Kind of Blue", "rating": 5}),
+            json!({"profile": empreinte_de_profil(SERVEUR, 2), "artist": "Miles Davis",
+                   "album": "Kind of Blue", "rating": 3}),
+            json!({"profile": empreinte_de_profil(SERVEUR, 1), "artist": "Bill Evans",
+                   "album": "Sunday at the Village Vanguard", "rating": 4}),
+        ]
+    );
+
+    let (url, site) = faux_site().await;
+    relier_au_site(&b, &url);
+    assert_eq!(passe(&b, &http()).await, Issue::Rien("disabled"));
+    assert!(recus(&site).is_empty(), "sans consentement, rien ne part");
+
+    consentir(&b, true);
+    assert_eq!(
+        passe(&b, &http()).await,
+        Issue::Transmis {
+            consentement: Some(true),
+            notes: Some(3)
+        }
+    );
+    let texte = recus(&site)[1].2.to_string();
+    assert!(!texte.contains("COMMENTAIRE-SECRET"), "{texte}");
+    // L'empreinte de l'instantané, relue en base : rien ne repart.
+    assert_eq!(passe(&b, &http()).await, Issue::Rien("unchanged"));
+
+    // Changement (upsert) puis retrait d'une note.
+    noter(&b, 10, 1, 2, None);
+    assert_eq!(
+        passe(&b, &http()).await,
+        Issue::Transmis {
+            consentement: None,
+            notes: Some(3)
+        }
+    );
+    noter(&b, 11, 1, 0, None);
+    assert_eq!(
+        passe(&b, &http()).await,
+        Issue::Transmis {
+            consentement: None,
+            notes: Some(2)
+        }
+    );
+    assert_eq!(
+        recus(&site).last().unwrap().2["ratings"][0]["rating"],
+        json!(2)
+    );
+
+    // Retrait du consentement, puis reprise : tout repart.
+    consentir(&b, false);
+    assert_eq!(
+        passe(&b, &http()).await,
+        Issue::Transmis {
+            consentement: Some(false),
+            notes: None
+        }
+    );
+    assert_eq!(reglages(&b).get(CLE_EMPREINTE_NOTES).unwrap(), None);
+    consentir(&b, true);
+    assert_eq!(
+        passe(&b, &http()).await,
+        Issue::Transmis {
+            consentement: Some(true),
+            notes: Some(2)
+        }
+    );
+
+    // La route : l'artiste et l'album lus en base partent au site.
+    assert_eq!(
+        agregats_d_album(&b, &http(), 999).await,
+        json!({"available": false, "reason": "album_not_found"})
+    );
+    site.lock().unwrap().agregats = Some(json!({
+        "album_key": "abc",
+        "rating": {"average": 4.2, "count": 37},
+        "listens": {"count": 1240, "listeners": 12},
+    }));
+    assert_eq!(
+        agregats_d_album(&b, &http(), 11).await["available"],
+        json!(true)
+    );
+    let lecture = recus(&site)
+        .into_iter()
+        .rfind(|r| r.1 == "albums")
+        .unwrap()
+        .2;
+    assert_eq!(
+        lecture,
+        json!({"server_id": SERVEUR, "artist": "Bill Evans",
+               "album": "Sunday at the Village Vanguard"})
+    );
+}
+
+/// Le parcours sur SQLite : la contre-épreuve du moteur.
+#[tokio::test]
+async fn sqlite_6545_parcours_communautaire() {
+    let db = SqliteDb::open_in_memory().unwrap();
+    db.init_schema().unwrap();
+    migrations::run_migrations(&db).unwrap();
+    parcours_communautaire(Arc::new(db)).await;
+}
+
+/// Le parcours sur PostgreSQL (`TUNE_TEST_PG_URL`, migrations appliquées).
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread")]
+async fn pg_6545_parcours_communautaire() {
+    let Ok(url) = std::env::var("TUNE_TEST_PG_URL") else {
+        eprintln!("SAUT: TUNE_TEST_PG_URL absent");
+        return;
+    };
+    // Une seule connexion : les tables temporaires n'existent que pour elle.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap();
+    let b: Arc<dyn DbBackend> = Arc::new(crate::db::backend::PostgresBackend::new(pool.clone()));
+    // Le schéma RÉEL : chaque copie échoue si la migration n'a pas posé la
+    // table. `album_ratings` garde son type de note (entier, PG 013) et sa
+    // contrainte d'unicité (album, profil), dont l'upsert a besoin.
+    for table in ["artists", "albums", "album_ratings", "settings"] {
+        b.execute(
+            &format!("CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING ALL)"),
+            &[],
+        )
+        .unwrap();
+    }
+    parcours_communautaire(b).await;
+    pool.close().await;
+}
