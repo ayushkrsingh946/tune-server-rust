@@ -1,6 +1,6 @@
 //! Chantier « Assistant IA », étape 2 — l'ancien assistant `POST /ai/query`
 //! ne lit plus la clé EN CLAIR `anthropic_api_key` : elle est migrée dans le
-//! coffre du greffon, et le plafond mensuel de l'assistant borne ses appels.
+//! coffre partagé du serveur, et le plafond mensuel de l'assistant borne ses appels.
 //!
 //! Par la ROUTE MONTÉE, sans aucun appel réseau : le plafond est posé à zéro,
 //! la requête est donc refusée AVANT de partir. Si la route lisait encore la
@@ -68,5 +68,8 @@ async fn l_ancienne_cle_en_clair_est_migree_et_le_plafond_borne_l_ancien_assista
             .is_some_and(|s| !s.contains("ANCIENNE")),
         "la clé doit être scellée"
     );
-    assert!(dossier.path().join("assistant-ia.cle").exists());
+    // Scellée sous la clé maîtresse PARTAGÉE du serveur (un seul coffre,
+    // décision du 12/10/2026) : l'ancien fichier du greffon ne naît plus.
+    assert!(dossier.path().join(tune_core::coffre::FICHIER_CLE).exists());
+    assert!(!dossier.path().join("assistant-ia.cle").exists());
 }
