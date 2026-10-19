@@ -416,6 +416,7 @@ fn le_greffon_s_appelle_circle_reste_opt_in_et_est_au_catalogue() {
         services,
         orchestrator,
         playback,
+        artwork_dir: std::env::temp_dir(),
     });
     assert_eq!(g.name(), "circle");
     assert!(!g.default_enabled(), "opt-in, comme cd");

@@ -191,6 +191,8 @@ async fn register_builtin_plugins(loader: &PluginLoader, state: &AppState) {
                 services: state.services.clone(),
                 orchestrator: state.orchestrator.clone(),
                 playback: state.playback.clone(),
+                // #6521 : les vignettes partagées avec le cercle.
+                artwork_dir: crate::routes::library::artwork_cache_dir(),
             },
         )))
         .await;

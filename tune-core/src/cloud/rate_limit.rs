@@ -41,10 +41,14 @@ pub enum CloudScope {
     /// Trente requêtes par minute et par client côté mozaiklabs : le refus est
     /// transitoire par construction, jamais un verdict sur le compte.
     UserProfile,
+    /// `…/cloud-library/{server}/thumbnails` : les vignettes des pochettes
+    /// partagées avec le cercle (#6521). Son seau à part chez mozaiklabs ; un
+    /// 429 ici ne doit pas retenir la synchro de bibliothèque.
+    CircleThumbnails,
 }
 
 impl CloudScope {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Telemetry,
         Self::InstanceHeartbeat,
         Self::BiosWrite,
@@ -59,6 +63,7 @@ impl CloudScope {
         Self::MetadataProposalsRead,
         Self::MetadataDecisionsWrite,
         Self::UserProfile,
+        Self::CircleThumbnails,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -77,6 +82,7 @@ impl CloudScope {
             Self::MetadataProposalsRead => "metadata_proposals_read",
             Self::MetadataDecisionsWrite => "metadata_decisions_write",
             Self::UserProfile => "user_profile",
+            Self::CircleThumbnails => "circle_thumbnails",
         }
     }
 
