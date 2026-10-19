@@ -22,12 +22,55 @@ pub struct IcyMetadata {
 
 /// Fetch metadata for the given radio station.
 ///
-/// The function first checks whether the station URL matches a known metadata
-/// API (Radio France / FIP, Radio Paradise, BBC) and uses those richer
-/// endpoints. As a fallback it attempts to read raw ICY metadata from the audio
-/// stream.
+/// Une station suivie par radio-metadata.fr est lue d'abord sur le relais de
+/// mozaiklabs.fr (#6516, décision du 13/10 avec Rémi). Sinon — station non
+/// suivie, relais muet — the function checks whether the station URL matches a
+/// known metadata API (Radio France / FIP, Radio Paradise, BBC) and uses those
+/// richer endpoints. As a fallback it attempts to read raw ICY metadata from
+/// the audio stream.
 pub async fn fetch_radio_metadata(station_name: &str, stream_url: &str) -> Option<IcyMetadata> {
-    fetch_radio_metadata_depuis(VoiesRadioFrance::REELLES, station_name, stream_url).await
+    fetch_radio_metadata_suivie(station_name, stream_url)
+        .await
+        .0
+}
+
+/// Le même parcours, qui dit en plus si le titre vient du relais.
+///
+/// Le sondeur s'en sert pour passer la zone à la cadence du relais
+/// (`RADIO_METADATA_CLIENT_REFRESH_PERIOD`) — et seulement elle : une station
+/// lue chez son diffuseur garde le rythme d'avant.
+pub async fn fetch_radio_metadata_suivie(
+    station_name: &str,
+    stream_url: &str,
+) -> (Option<IcyMetadata>, bool) {
+    titre_relais_puis_diffuseur(
+        crate::radio_metadata_relais::RELAIS_URL,
+        VoiesRadioFrance::REELLES,
+        station_name,
+        stream_url,
+    )
+    .await
+}
+
+/// radio-metadata.fr AVANT le code propre à chaque diffuseur (Rémi, 13/10) :
+/// ce code est très partiel, et radio-metadata.fr le couvre déjà pour les
+/// stations qu'il suit. Le diffuseur puis l'ICY restent le repli.
+async fn titre_relais_puis_diffuseur(
+    relais: &str,
+    voies: VoiesRadioFrance<'_>,
+    station_name: &str,
+    stream_url: &str,
+) -> (Option<IcyMetadata>, bool) {
+    if let Some(cle) = crate::radio_metadata_relais::cle_pour(station_name, stream_url)
+        && let Some(meta) = crate::radio_metadata_relais::titre_par_le_relais(relais, &cle).await
+    {
+        debug!(station = %station_name, cle = %cle, "radio_metadata_par_le_relais");
+        return (Some(meta), true);
+    }
+    (
+        fetch_radio_metadata_depuis(voies, station_name, stream_url).await,
+        false,
+    )
 }
 
 /// Le même parcours, les racines Radio France en paramètre.
@@ -3368,3 +3411,7 @@ mod tests_icy_direct_6373 {
         assert_eq!(blocs, vec![bloc]);
     }
 }
+
+#[cfg(test)]
+#[path = "radio_metadata_relais_ordre_tests.rs"]
+mod tests_relais_avant_diffuseur_6516;

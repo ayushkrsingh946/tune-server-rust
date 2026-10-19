@@ -3645,6 +3645,8 @@ mod label_tests_4836;
 #[cfg(test)]
 mod date_de_sortie_tests_2206;
 #[cfg(test)]
+mod interprete_tests_6232;
+#[cfg(test)]
 mod type_de_sortie_tests_5616;
 
 /// Les balises d'un fichier, lues par lofty sans charger les images.
@@ -4101,6 +4103,10 @@ pub fn read_metadata(path: &Path) -> Option<TrackMetadata> {
     try_read_metadata(path).ok()
 }
 
+/// #6232 — clé `track_metadata` de la balise ARTIST de la piste, telle
+/// qu'écrite dans le fichier (voir [`read_extended_metadata`]).
+pub const CLE_INTERPRETE_DE_LA_PISTE: &str = "track_artist";
+
 /// Read extended metadata tags beyond the core fields already stored in the tracks table.
 /// Returns a HashMap of key-value pairs suitable for the track_metadata table.
 /// This extracts tags like composer, conductor, lyricist, performer, remixer,
@@ -4138,6 +4144,18 @@ pub fn read_extended_metadata(path: &Path) -> HashMap<String, String> {
         }
         (!valeurs.is_empty()).then(|| valeurs.join("; "))
     };
+
+    // #6232 (forum 2218) — l'INTERPRÈTE de la piste, tel que la balise ARTIST
+    // l'écrit. Sur un album ordinaire, le scan donne à chaque piste l'artiste
+    // de l'ALBUM (`scan_import`, `TrackImporter`) : « The Beatles & Genesis »
+    // sur une piste d'un album des Beatles n'atteignait aucune colonne, et
+    // aucune règle ne pouvait trouver Genesis. La balise est gardée ici,
+    // telle quelle ; le critère « Interprète » des règles intelligentes la
+    // lit (`regles_sql::SQL_INTERPRETE_DE_LA_PISTE`). Toutes les trames, comme
+    // les crédits : un Vorbis peut porter un ARTIST par interprète.
+    if let Some(v) = toutes(ItemKey::TrackArtist) {
+        meta.insert(CLE_INTERPRETE_DE_LA_PISTE.into(), v);
+    }
 
     // Sort-order fields
     if let Some(v) = get(ItemKey::TrackArtistSortOrder) {

@@ -7,7 +7,9 @@
 //! * `POST /ejecter` — `{ "forcer": true }` facultatif : éjecte le disque du
 //!   lecteur courant (fil 2135). Si une zone le joue (ou le tient en pause),
 //!   refus `409 lecture_en_cours` qui nomme les zones ; avec `forcer`, ces
-//!   zones sont d'abord arrêtées, puis le disque est éjecté.
+//!   zones sont d'abord arrêtées, puis le disque est éjecté. #6410 : si le
+//!   disque est ENTIER en mémoire, ni refus ni arrêt — la lecture continue
+//!   depuis la mémoire (`lecture_continue` nomme les zones).
 //!
 //! * `GET  /memoire` — « Charger le CD en mémoire » (#6043) : réglages, RAM
 //!   disponible et progression du chargement ;
@@ -378,6 +380,34 @@ async fn ejecter(State(etat): State<EtatRoutes>, corps: Option<Json<DemandeEject
         Presence::Disque => {}
     }
 
+    // #6410 — le disque est ENTIER en mémoire : comme sur Daphile, la
+    // lecture continue après l'éjection, sans confirmation ni arrêt. Le
+    // surveillant garde la mémoire au passage à « vide ».
+    let m = etat.memoire.clone();
+    let en_memoire =
+        tokio::task::spawn_blocking(move || m.is_some_and(|m| m.disque_complet().is_some()))
+            .await
+            .unwrap_or(false);
+    if en_memoire {
+        let continuent = zones_qui_jouent_le_disque(&etat).await;
+        tracing::info!(zones = ?continuent, "cd_ejection_disque_entier_en_memoire");
+        let l = lecteur.clone();
+        let resultat = tokio::task::spawn_blocking(move || l.ejecter_disque())
+            .await
+            .unwrap_or_else(|e| Err(ErreurEjection::Echec(e.to_string())));
+        etat.reveil.notify_one();
+        return match resultat {
+            Ok(()) => Json(json!({
+                "ejecte": true,
+                "lecteur": lecteur.chemin(),
+                "zones_arretees": [],
+                "lecture_continue": continuent,
+            }))
+            .into_response(),
+            Err(e) => refus_d_ejection(e),
+        };
+    }
+
     let zones = zones_qui_jouent_le_disque(&etat).await;
     if !zones.is_empty() && !forcer {
         return (
@@ -423,21 +453,27 @@ async fn ejecter(State(etat): State<EtatRoutes>, corps: Option<Json<DemandeEject
             "zones_arretees": zones,
         }))
         .into_response(),
-        Err(ErreurEjection::AucunLecteur) => {
+        Err(e) => refus_d_ejection(e),
+    }
+}
+
+fn refus_d_ejection(e: ErreurEjection) -> Response {
+    match e {
+        ErreurEjection::AucunLecteur => {
             let (code, motif, message) = aucun_lecteur();
             refus(code, motif, message)
         }
-        Err(ErreurEjection::AucunDisque) => refus(
+        ErreurEjection::AucunDisque => refus(
             StatusCode::CONFLICT,
             "aucun_disque",
             "Le lecteur est vide.".into(),
         ),
-        Err(ErreurEjection::NonPrisEnCharge) => refus(
+        ErreurEjection::NonPrisEnCharge => refus(
             StatusCode::NOT_IMPLEMENTED,
             "ejection_non_prise_en_charge",
             "Ce lecteur ne peut pas être éjecté par Tune.".into(),
         ),
-        Err(ErreurEjection::Echec(raison)) => refus(
+        ErreurEjection::Echec(raison) => refus(
             StatusCode::BAD_GATEWAY,
             "ejection",
             format!("Le système a refusé l'éjection : {raison}"),
@@ -725,6 +761,48 @@ mod tests {
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(v["error"], "aucun_disque");
         assert_eq!(l.ejections(), 1);
+    }
+
+    /// #6410 — le disque est ENTIER en mémoire : l'éjection passe sans
+    /// confirmation, n'arrête aucune zone et ne rend pas la mémoire.
+    #[tokio::test]
+    async fn ejecter_un_disque_entier_en_memoire_ne_coupe_pas_la_lecture() {
+        use crate::memoire::{Fin, Reglages};
+        use crate::toc::PisteToc;
+        let p = |numero, debut| PisteToc {
+            numero,
+            debut,
+            audio: true,
+        };
+        let toc = Toc::nouvelle(vec![p(1, 0), p(2, 300)], 600).unwrap();
+        let l = Arc::new(LecteurSimule::new(toc.clone()));
+        let (mut e, hote) = etat(Some(l.clone()), Arc::new(SansReseau));
+        let m = Arc::new(MemoireCd::new(Reglages {
+            actif: true,
+            plafond_octets: u64::MAX,
+        }));
+        e.memoire = Some(m.clone());
+        let (code, _) = appel(
+            router(e.clone()),
+            "POST",
+            "/jouer",
+            Some(json!({"zone_id": 3})),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        let ld: Arc<dyn LecteurDisque> = l.clone();
+        let c = m.chargement(&ld, &toc, &disc_id(&toc), 0, 0).unwrap();
+        assert_eq!(c.attendre_la_fin(), Some(Fin::Termine));
+
+        let (code, v) = appel(router(e.clone()), "POST", "/ejecter", None).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        assert_eq!(v["zones_arretees"], json!([]));
+        assert_eq!(v["lecture_continue"], json!([3]));
+        assert_eq!(l.ejections(), 1);
+        assert!(hote.arrets.lock().await.is_empty(), "la zone joue encore");
+        assert!(e.zones.lock().await.contains(&3));
+        assert!(m.disque_complet().is_some(), "mémoire gardée");
+        m.liberer();
     }
 
     /// Une zone joue le disque : sans confirmation, REFUS qui nomme la zone,
