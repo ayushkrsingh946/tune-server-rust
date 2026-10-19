@@ -19,6 +19,9 @@ pub struct RelayClient {
     connected: Arc<AtomicBool>,
     ws_tx: Arc<tokio::sync::Mutex<Option<mpsc::Sender<String>>>>,
     http_client: reqwest::Client,
+    /// Client des FLUX relayés (`/stream/…`, audio d'une piste de cercle) :
+    /// sans délai total, voir [`client_de_flux`].
+    http_flux: reqwest::Client,
     /// La base des réglages, pour savoir si le greffon `circle` est installé
     /// (Tune Circle T4, #5327). `None` : aucune écoute de contact n'est
     /// servie — une absence ne vaut jamais une autorisation.
@@ -36,6 +39,7 @@ impl RelayClient {
             .timeout(Duration::from_secs(30))
             .build()
             .expect("http client");
+        let http_flux = client_de_flux(PATIENCE_DE_FLUX);
         Self {
             server_id,
             bridge_token,
@@ -44,6 +48,7 @@ impl RelayClient {
             connected: Arc::new(AtomicBool::new(false)),
             ws_tx: Arc::new(tokio::sync::Mutex::new(None)),
             http_client,
+            http_flux,
             reglages: None,
         }
     }
@@ -272,12 +277,21 @@ impl RelayClient {
                     .and_then(|r| r.as_str())
                     .map(|s| s.to_string());
 
+                // #6453 — l'agent du lecteur distant (AVPlayer, navigateur),
+                // que le pont relaie : c'est lui qui choisit le contrat d'une
+                // radio (`accepts_chunked_live_stream`). Un pont plus ancien
+                // ne l'envoie pas : la requête part sans agent, comme avant.
+                let user_agent = v
+                    .get("user_agent")
+                    .and_then(|r| r.as_str())
+                    .map(|s| s.to_string());
+
                 let url = format!("http://127.0.0.1:{}/stream/{}", self.local_port, stream_id);
                 let ws_tx = self.ws_tx.clone();
-                let http = self.http_client.clone();
+                let http = self.http_flux.clone();
 
                 tokio::spawn(async move {
-                    pomper_le_flux(&http, &url, range, &id, &ws_tx).await;
+                    pomper_le_flux(&http, &url, range, user_agent, &id, &ws_tx).await;
                 });
             }
             MESSAGE_FLUX_DE_CERCLE => {
@@ -388,10 +402,10 @@ impl RelayClient {
             self.local_port, track_id
         );
         let ws_tx = self.ws_tx.clone();
-        let http = self.http_client.clone();
+        let http = self.http_flux.clone();
         tokio::spawn(async move {
             let debut = std::time::Instant::now();
-            let bilan = pomper_le_flux(&http, &url, range, &id, &ws_tx).await;
+            let bilan = pomper_le_flux(&http, &url, range, None, &id, &ws_tx).await;
             info!(
                 track_id,
                 statut = bilan.statut,
@@ -409,7 +423,27 @@ pub(crate) struct BilanDuFlux {
     pub octets: u64,
 }
 
-/// Lit `url` en local (avec le `Range` reçu) et le pousse au relais :
+/// Silence toléré sur un flux relayé : ni connexion en plus de ce délai, ni
+/// lecture qui reste muette aussi longtemps.
+pub(crate) const PATIENCE_DE_FLUX: Duration = Duration::from_secs(30);
+
+/// Le client des flux relayés : délai de CONNEXION et délai de LECTURE, jamais
+/// de délai total.
+///
+/// #6453 — les flux partaient sur le client de l'API, `timeout(30 s)` : chez
+/// reqwest, ce délai court jusqu'à la FIN du corps. Une radio n'en a pas : la
+/// lecture par le pont était coupée au bout de trente secondes, à chaque fois
+/// (`stream chunk error`), et le lecteur devait se reconnecter. Une piste lue
+/// sur une liaison lente (la contre-pression du pont) l'était tout autant.
+pub(crate) fn client_de_flux(patience: Duration) -> reqwest::Client {
+    crate::http::client::builder()
+        .connect_timeout(patience)
+        .read_timeout(patience)
+        .build()
+        .expect("http client de flux")
+}
+
+/// Lit `url` en local (avec le `Range` et l'agent reçus) et le pousse au relais :
 /// `relay.stream_start`, puis les morceaux `BINARY:<id>:<base64>`, puis
 /// `relay.stream_end`. Chemin commun à `relay.stream_request` et à
 /// `relay.circle_stream_request`.
@@ -417,12 +451,16 @@ pub(crate) async fn pomper_le_flux(
     http: &reqwest::Client,
     url: &str,
     range: Option<String>,
+    user_agent: Option<String>,
     id: &str,
     ws_tx: &Arc<tokio::sync::Mutex<Option<mpsc::Sender<String>>>>,
 ) -> BilanDuFlux {
     let mut req = http.get(url);
     if let Some(r) = range {
         req = req.header("range", r);
+    }
+    if let Some(ua) = user_agent {
+        req = req.header("user-agent", ua);
     }
 
     match req.send().await {
@@ -1262,5 +1300,170 @@ mod reponse_dapi_tests {
                 Some("3".to_string())
             )]
         );
+    }
+}
+
+/// #6453 — un flux relayé vers l'iPhone : l'agent du lecteur arrive jusqu'à la
+/// route `/stream/…`, et un direct n'est pas coupé par un délai total.
+#[cfg(test)]
+mod flux_relaye_6453_tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use axum::response::{IntoResponse, Response};
+    use std::sync::Mutex as StdMutex;
+
+    const AVPLAYER: &str =
+        "AppleCoreMedia/1.0.0.24A446 (iPhone; U; CPU OS 27_0_1 like Mac OS X; fr_fr)";
+    /// Le faux direct : `MORCEAUX` morceaux de `TAILLE` octets, un tous les
+    /// `PAS` — 1,2 s en tout, plus du double du délai des clients d'essai.
+    const MORCEAUX: usize = 12;
+    const TAILLE: usize = 1000;
+    const PAS: Duration = Duration::from_millis(100);
+    const COURT: Duration = Duration::from_millis(500);
+
+    type Agents = Arc<StdMutex<Vec<Option<String>>>>;
+
+    async fn direct(State(agents): State<Agents>, headers: HeaderMap) -> Response {
+        agents.lock().unwrap().push(
+            headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from),
+        );
+        let morceaux = futures_util::stream::unfold(0usize, |n| async move {
+            if n == MORCEAUX {
+                return None;
+            }
+            tokio::time::sleep(PAS).await;
+            Some((Ok::<_, std::io::Error>(vec![0u8; TAILLE]), n + 1))
+        });
+        ([("content-type", "audio/wav")], Body::from_stream(morceaux)).into_response()
+    }
+
+    async fn serveur_local() -> (u16, Agents) {
+        let agents: Agents = Arc::new(StdMutex::new(Vec::new()));
+        let app = Router::new().fallback(direct).with_state(agents.clone());
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = ecoute.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(ecoute, app).await.unwrap();
+        });
+        (port, agents)
+    }
+
+    /// Le client d'essai : celui de l'API garde son délai TOTAL (raccourci),
+    /// celui des flux son délai de lecture (raccourci aussi). Un flux qui
+    /// passerait par le premier serait coupé à `COURT`.
+    async fn client(port: u16) -> (RelayClient, mpsc::Receiver<String>) {
+        let mut c = RelayClient::new("srv".into(), "jeton".into(), "ws://x".into(), port);
+        c.http_client = crate::http::client::builder()
+            .timeout(COURT)
+            .build()
+            .unwrap();
+        c.http_flux = client_de_flux(COURT);
+        let (tx, rx) = mpsc::channel::<String>(256);
+        *c.ws_tx.lock().await = Some(tx);
+        (c, rx)
+    }
+
+    /// Lit les trames jusqu'à `relay.stream_end` ; rend (statut, octets).
+    async fn lire_jusqu_a_la_fin(rx: &mut mpsc::Receiver<String>) -> (u64, usize) {
+        let mut statut = 0;
+        let mut octets = 0;
+        loop {
+            let t = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("aucune trame vers le pont")
+                .expect("canal ferme");
+            if let Some(reste) = t.strip_prefix("BINARY:") {
+                let (_, b64) = reste.split_once(':').unwrap();
+                use base64::Engine;
+                octets += base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .unwrap()
+                    .len();
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            match v["type"].as_str() {
+                Some("relay.stream_start") => statut = v["status"].as_u64().unwrap(),
+                Some("relay.stream_end") => return (statut, octets),
+                autre => panic!("trame inattendue : {autre:?}"),
+            }
+        }
+    }
+
+    fn demande(user_agent: Option<&str>) -> String {
+        serde_json::json!({
+            "type": "relay.stream_request",
+            "id": "s-6453",
+            "stream_id": "radio.flac",
+            "range": "bytes=0-1",
+            "user_agent": user_agent,
+        })
+        .to_string()
+    }
+
+    /// L'agent d'AVPlayer, relayé par le pont, arrive à la route locale : sans
+    /// lui, `accepts_chunked_live_stream(None)` rendait le contrat chunké, que
+    /// CoreMedia rejette en -12939.
+    #[tokio::test]
+    async fn l_agent_du_lecteur_distant_arrive_a_la_route_locale() {
+        let (port, agents) = serveur_local().await;
+        let (c, mut rx) = client(port).await;
+        c.handle_message(&demande(Some(AVPLAYER))).await;
+        let _ = lire_jusqu_a_la_fin(&mut rx).await;
+        assert_eq!(*agents.lock().unwrap(), vec![Some(AVPLAYER.to_string())]);
+    }
+
+    /// Un pont plus ancien n'envoie pas d'agent : la requête part sans, comme
+    /// avant (reqwest n'en pose aucun par défaut).
+    #[tokio::test]
+    async fn sans_agent_relaye_la_requete_locale_n_en_porte_aucun() {
+        let (port, agents) = serveur_local().await;
+        let (c, mut rx) = client(port).await;
+        c.handle_message(&demande(None)).await;
+        let _ = lire_jusqu_a_la_fin(&mut rx).await;
+        assert_eq!(*agents.lock().unwrap(), vec![None]);
+    }
+
+    /// Un direct qui dure plus que le délai n'est pas coupé tant qu'il débite :
+    /// tous les octets arrivent au pont.
+    #[tokio::test]
+    async fn un_direct_plus_long_que_le_delai_n_est_pas_coupe() {
+        let (port, _) = serveur_local().await;
+        let (c, mut rx) = client(port).await;
+        c.handle_message(&demande(Some(AVPLAYER))).await;
+        let (statut, octets) = lire_jusqu_a_la_fin(&mut rx).await;
+        assert_eq!(statut, 200);
+        assert_eq!(
+            octets,
+            MORCEAUX * TAILLE,
+            "le flux relayé a été coupé avant sa fin (délai total ?)"
+        );
+    }
+
+    /// Témoin : le client de l'API, lui, coupe ce même direct — c'est le
+    /// défaut que corrige `client_de_flux`.
+    #[tokio::test]
+    async fn temoin_le_delai_total_coupe_le_direct() {
+        let (port, _) = serveur_local().await;
+        let http = crate::http::client::builder()
+            .timeout(COURT)
+            .build()
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel::<String>(256);
+        let ws_tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+        let url = format!("http://127.0.0.1:{port}/stream/radio.flac");
+        let bilan = pomper_le_flux(&http, &url, None, None, "t", &ws_tx).await;
+        assert!(
+            (bilan.octets as usize) < MORCEAUX * TAILLE,
+            "le délai total aurait dû couper le direct ({} octets)",
+            bilan.octets
+        );
+        let _ = lire_jusqu_a_la_fin(&mut rx).await;
     }
 }
