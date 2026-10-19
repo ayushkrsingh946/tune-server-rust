@@ -41,10 +41,12 @@ pub enum CloudScope {
     /// Trente requêtes par minute et par client côté mozaiklabs : le refus est
     /// transitoire par construction, jamais un verdict sur le compte.
     UserProfile,
+    /// `POST /api/v1/listens` : l'envoi des écoutes au compte (#6510).
+    ListensSync,
 }
 
 impl CloudScope {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Telemetry,
         Self::InstanceHeartbeat,
         Self::BiosWrite,
@@ -59,6 +61,7 @@ impl CloudScope {
         Self::MetadataProposalsRead,
         Self::MetadataDecisionsWrite,
         Self::UserProfile,
+        Self::ListensSync,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -77,6 +80,7 @@ impl CloudScope {
             Self::MetadataProposalsRead => "metadata_proposals_read",
             Self::MetadataDecisionsWrite => "metadata_decisions_write",
             Self::UserProfile => "user_profile",
+            Self::ListensSync => "listens_sync",
         }
     }
 

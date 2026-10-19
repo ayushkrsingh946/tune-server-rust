@@ -1030,6 +1030,47 @@ pub fn should_arm_gapless(
         && position_ms >= effective_duration_ms - GAPLESS_WINDOW_MS
 }
 
+/// #6477 — au-delà de ce délai entre l'armement (`SetNext`) et la retombée
+/// de position, l'enchaînement n'est pas « dès le `SetNext` ».
+pub const COUPE_AU_SETNEXT_DELAI_MAX_MS: u64 = 10_000;
+/// #6477 — en deçà de ce reste de piste au moment de la retombée, c'est une
+/// fin de piste ordinaire, pas une coupure.
+pub const COUPE_AU_SETNEXT_RESTE_MIN_MS: u64 = 10_000;
+
+/// #6477 (FiiO K17, fil 2323) — le renderer a-t-il LÂCHÉ la piste en cours
+/// dès le `SetNextAVTransportURI` ? Trois mesures indépendantes doivent
+/// concorder :
+///
+/// - la position est retombée moins de [`COUPE_AU_SETNEXT_DELAI_MAX_MS`]
+///   après l'armement (une fin ordinaire arrive ~30 s après, au bout de la
+///   fenêtre) ;
+/// - il restait au moins [`COUPE_AU_SETNEXT_RESTE_MIN_MS`] de piste au
+///   dernier sondage (un armement tardif suivi d'une fin ordinaire ne laisse
+///   que quelques secondes) ;
+/// - le flux de la piste n'a été tiré qu'EN PARTIE (`0 < servis < total`) :
+///   le renderer a abandonné sa connexion avant la fin du fichier. Un
+///   renderer qui va au bout a tout tiré ; un flux sans mesure ne prouve rien.
+///
+/// `arm_to_advance_ms` vaut `None` sans armement. Journal du K17 : armement
+/// à 374 s sur 404,7 s, retombée 1,87 s plus tard, 79,9 Mo servis sur
+/// 84,3 Mo, 30 s de musique perdues, deux pistes de suite.
+pub fn set_next_a_coupe_la_piste(
+    arm_to_advance_ms: Option<u64>,
+    prev_position_ms: u64,
+    track_duration_ms: u64,
+    servis: Option<u64>,
+    total: Option<u64>,
+) -> bool {
+    let (Some(delai_ms), Some(servis), Some(total)) = (arm_to_advance_ms, servis, total) else {
+        return false;
+    };
+    track_duration_ms > 0
+        && delai_ms <= COUPE_AU_SETNEXT_DELAI_MAX_MS
+        && track_duration_ms.saturating_sub(prev_position_ms) >= COUPE_AU_SETNEXT_RESTE_MIN_MS
+        && servis > 0
+        && servis < total
+}
+
 /// #5970 — marge laissée, après la résolution de la suivante, pour attendre
 /// ses premiers octets (`wait_stream_data_ready`, 5 s au plus) et poser le
 /// `SetNextAVTransportURI` avant la fin de la piste en cours.

@@ -411,6 +411,10 @@ name = "plafonds_indexation_upnp_4154"
 path = "tests/plafonds_indexation_upnp_4154.rs"
 
 [[test]]
+name = "radios_upnp_hors_des_pistes_6500"
+path = "tests/radios_upnp_hors_des_pistes_6500.rs"
+
+[[test]]
 name = "plugin_contracts"
 path = "tests/plugin_contracts.rs"
 

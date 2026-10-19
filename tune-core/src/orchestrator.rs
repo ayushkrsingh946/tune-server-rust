@@ -1842,6 +1842,10 @@ mod eq_en_vol_4407_tests;
 // bibliothèque native de test.
 #[cfg(test)]
 mod greffon_natif_tiers_tests;
+// #6522, #6524 — le verdict PURE de la sortie locale suit les réglages
+// enregistrés, dans l'état que la vraie bascule produit.
+#[cfg(all(test, feature = "local-audio"))]
+mod verdict_pure_reglages_6522_tests;
 
 /// Fil 2062 / #5550 — durée d'une piste UPnP lue dans les en-têtes du flux.
 mod duree_du_flux_2062;
@@ -2156,6 +2160,10 @@ mod reprise_renderer_cale_2125;
 /// (Chromecast) refuse la reprise ; la lecture est rétablie à la position.
 #[cfg(test)]
 mod reprise_session_perdue_par_la_sortie_6062;
+/// #6476 — fil 2322 : après une reconnexion de Squeezelite, Lecture renvoie
+/// le flux (`strm s`) au lieu d'un `strm u` seul sur un lecteur sans flux.
+#[cfg(test)]
+mod reprise_slimproto_apres_reconnexion_6476;
 /// #6017 — fil 2194 : avancer dans une piste de la bibliothèque convertie à
 /// la volée recrée le flux à la position au lieu d'un `Seek` SOAP refusé.
 #[cfg(test)]

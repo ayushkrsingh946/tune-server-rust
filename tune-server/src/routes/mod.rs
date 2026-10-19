@@ -719,6 +719,7 @@ pub fn router_with_plugins(
         }),
     )
     .fallback_service(service_statique_spa(std::path::Path::new(&web_dir)))
+    .layer(axum::middleware::from_fn(zones::textes_signal::avec_langue))
     .layer(axum::middleware::from_fn(cache_control_middleware))
     .layer(axum::Extension(contexte_sendspin))
     .layer(CompressionLayer::new())
