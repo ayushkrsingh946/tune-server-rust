@@ -2147,6 +2147,8 @@ mod curseur_intact_4283;
 /// reprise rétablit à la position au lieu de reprendre « sur place ».
 #[cfg(test)]
 mod pause_rend_le_peripherique_4177;
+#[cfg(test)]
+mod reprise_nouveau_flux_6264_tests;
 
 /// Fil 2095 — le rétablissement d'une session morte ramène le renderer
 /// réseau à la position de la pause.

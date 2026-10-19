@@ -113,6 +113,7 @@ pub mod pipeline;
 pub mod reaffectation_canaux;
 pub mod replaygain;
 pub mod repli_dsd_4354;
+pub mod reprise_nouveau_flux;
 pub mod resample;
 /// Runtime provisioning of the onnxruntime shared lib (`load-dynamic`).
 #[cfg(feature = "audio-embedding")]

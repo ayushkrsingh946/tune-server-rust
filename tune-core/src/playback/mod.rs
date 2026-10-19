@@ -1617,6 +1617,16 @@ impl PlaybackManager {
         flux_remplace
     }
 
+    /// Banc seulement : fait remonter la pause de `de` dans le passé.
+    /// `paused_at` est un `Instant` que `tokio::time::pause()` n'atteint pas.
+    #[cfg(test)]
+    pub(crate) async fn vieillir_la_pause_pour_test(&self, zone_id: i64, de: std::time::Duration) {
+        let mut zones = self.zones.lock().await;
+        if let Some(state) = zones.get_mut(&zone_id) {
+            state.paused_at = state.paused_at.and_then(|t| t.checked_sub(de));
+        }
+    }
+
     pub async fn pause(&self, zone_id: i64) {
         let mut zones = self.zones.lock().await;
         if let Some(state) = zones.get_mut(&zone_id) {

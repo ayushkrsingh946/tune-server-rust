@@ -3070,6 +3070,25 @@ impl PlaybackOrchestrator {
                     position_ms, "resume_after_exclusive_device_released"
                 );
             }
+            // #6264 — un lecteur qui relit mal sa mémoire après une longue
+            // pause (Eversolo DMP-A8, bruit blanc) : la zone qui l'arme reprend
+            // par un NOUVEAU flux, à la position, comme après une session
+            // morte. Le `Play` sur place lui faisait rejouer sa mémoire.
+            let pause = state.paused_at.map(|t| t.elapsed());
+            let memoire_du_lecteur_douteuse =
+                crate::audio::reprise_nouveau_flux::relancer_par_nouveau_flux(
+                    crate::audio::reprise_nouveau_flux::seuil_de_la_zone(&self.db, zone_id),
+                    pause,
+                );
+            if memoire_du_lecteur_douteuse {
+                info!(
+                    zone_id,
+                    position_ms,
+                    pause_s = pause.map(|p| p.as_secs()),
+                    "reprise_par_nouveau_flux_apres_longue_pause"
+                );
+            }
+            let peripherique_rendu = peripherique_rendu || memoire_du_lecteur_douteuse;
             let decision = reprise_de_session(
                 est_radio,
                 rejouable,
