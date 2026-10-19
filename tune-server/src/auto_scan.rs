@@ -109,7 +109,14 @@ pub fn build_track_from_metadata_opts(
     let album_artist_entry = match artist_repo.get_or_create(
         album_artist_name,
         album_artist_mbid,
-        meta.album_artist_sort.as_deref(),
+        // #6474 — ALBUMARTISTSORT, à défaut l'ARTISTSORT de la piste quand
+        // elle est de l'artiste de l'album.
+        tune_core::db::artist_repo::nom_de_tri_de_l_artiste_d_album(
+            meta.album_artist_sort.as_deref(),
+            meta.artist_sort.as_deref(),
+            album_artist_name,
+            track_artist_name,
+        ),
     ) {
         Ok(a) => {
             if let Some(ref mbid) = a.musicbrainz_id {
@@ -143,7 +150,8 @@ pub fn build_track_from_metadata_opts(
         match artist_repo.get_or_create(
             track_artist_name,
             meta.musicbrainz_artist_id.as_deref(),
-            None,
+            // #6474 — ARTISTSORT nourrit le nom de tri de l'artiste de la piste.
+            meta.artist_sort.as_deref(),
         ) {
             Ok(a) => Some(a),
             Err(e) => {

@@ -16,6 +16,30 @@ pub use sources_des_artistes::{PresenceDansUneSource, SourcesDesArtistes};
 
 pub const UNKNOWN_ARTIST_NAME: &str = "Unknown Artist";
 
+/// tune-server-rust#6474 — le nom de tri à donner à l'ARTISTE D'ALBUM lu
+/// dans un fichier : ALBUMARTISTSORT s'il est écrit ; sinon l'ARTISTSORT de
+/// la piste, mais seulement quand la piste est de ce même artiste (même nom,
+/// casse ignorée). Le nom de tri d'un invité ne devient jamais celui de
+/// l'artiste de l'album, ni celui d'un « Various Artists ».
+///
+/// Aucune règle n'est inventée quand les deux balises manquent : pas
+/// d'inversion « Prénom Nom », pas d'article retiré. René (fil 2313) l'écarte
+/// lui-même — Ludwig van Beethoven, noms composés, orchestres et groupes —, et
+/// le tri retombe alors sur le nom affiché, comme avant.
+pub fn nom_de_tri_de_l_artiste_d_album<'a>(
+    album_artist_sort: Option<&'a str>,
+    artist_sort: Option<&'a str>,
+    album_artist_name: &str,
+    track_artist_name: &str,
+) -> Option<&'a str> {
+    let rempli = |s: Option<&'a str>| s.filter(|v| !v.trim().is_empty());
+    rempli(album_artist_sort).or_else(|| {
+        rempli(artist_sort).filter(|_| {
+            album_artist_name.trim().to_lowercase() == track_artist_name.trim().to_lowercase()
+        })
+    })
+}
+
 /// Engine-agnostic SQL builders for artist_repo.
 ///
 /// `COLLATE NOCASE` (SQLite-only) is replaced by `LOWER(col)` for
@@ -56,6 +80,18 @@ pub mod sql {
             d.placeholder(5),
             d.placeholder(6),
             d.placeholder(7)
+        )
+    }
+
+    /// #6474 — pose le nom de tri d'un artiste qui n'en a PAS. Un nom de tri
+    /// déjà renseigné (balise lue plus tôt, saisie dans « Modifier
+    /// l'artiste ») n'est jamais remplacé.
+    pub fn poser_sort_name_si_vide<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "UPDATE artists SET sort_name = {} WHERE id = {} \
+             AND (sort_name IS NULL OR TRIM(sort_name) = '')",
+            d.placeholder(1),
+            d.placeholder(2)
         )
     }
 
@@ -504,22 +540,23 @@ impl ArtistRepo {
         sort_name: Option<&str>,
     ) -> Result<Artist, TuneError> {
         let musicbrainz_id = usable_musicbrainz_id(musicbrainz_id);
+        let sort_name = sort_name.filter(|s| !s.trim().is_empty());
         if let Some(mbid) = musicbrainz_id {
             let sql = self.dialect_sql(sql::get_by_musicbrainz_id, sql::get_by_musicbrainz_id);
             let params: [&dyn ToSqlValue; 1] = [&mbid];
             if let Some(row) = self.db.query_one_strong(&sql, &params)? {
-                return Ok(row_to_artist(&row));
+                return self.completer_sort_name(row_to_artist(&row), sort_name);
             }
         }
         {
             let sql = self.dialect_sql(sql::get_by_name, sql::get_by_name);
             let params: [&dyn ToSqlValue; 1] = [&name];
             if let Some(row) = self.db.query_one_strong(&sql, &params)? {
-                return Ok(row_to_artist(&row));
+                return self.completer_sort_name(row_to_artist(&row), sort_name);
             }
         }
         if let Some(existant) = self.meme_artiste_sous_une_autre_graphie(name)? {
-            return Ok(existant);
+            return self.completer_sort_name(existant, sort_name);
         }
         let create_sql = self.dialect_sql(sql::create_minimal, sql::create_minimal);
         let params: [&dyn ToSqlValue; 3] = [&name, &sort_name, &musicbrainz_id];
@@ -534,6 +571,33 @@ impl ArtistRepo {
             image_path: None,
             image_source: None,
         })
+    }
+
+    /// #6474 — un artiste DÉJÀ en base, retrouvé par le scan, qui n'a pas de
+    /// nom de tri, prend celui que le fichier porte. Avant, seul l'artiste
+    /// CRÉÉ par cette lecture le recevait : une bibliothèque scannée avant
+    /// qu'on ajoute ARTISTSORT à ses fichiers ne l'aurait jamais vu. Un nom de
+    /// tri déjà présent n'est jamais remplacé (`poser_sort_name_si_vide`).
+    fn completer_sort_name(
+        &self,
+        mut artiste: Artist,
+        sort_name: Option<&str>,
+    ) -> Result<Artist, TuneError> {
+        let (Some(id), Some(tri)) = (artiste.id, sort_name) else {
+            return Ok(artiste);
+        };
+        if artiste
+            .sort_name
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return Ok(artiste);
+        }
+        let sql = self.dialect_sql(sql::poser_sort_name_si_vide, sql::poser_sort_name_si_vide);
+        let params: [&dyn ToSqlValue; 2] = [&tri, &id];
+        self.db.execute(&sql, &params)?;
+        artiste.sort_name = Some(tri.to_string());
+        Ok(artiste)
     }
 
     /// BIB-C2 : le même artiste existe-t-il déjà sous une autre graphie ?
@@ -1663,6 +1727,89 @@ mod tests {
             .get_or_create("The Beatles", None, Some("Beatles, The"))
             .unwrap();
         assert_eq!(a.sort_name.as_deref(), Some("Beatles, The"));
+    }
+
+    /// #6474 (René, fil 2313) — un artiste déjà en base, sans nom de tri,
+    /// prend celui que le fichier porte au scan suivant ; un nom de tri déjà
+    /// renseigné (balise ou saisie) n'est jamais remplacé.
+    #[test]
+    fn un_artiste_existant_sans_nom_de_tri_prend_celui_du_fichier_6474() {
+        let db = test_db();
+        let repo = ArtistRepo::new(db);
+        let avant = repo.get_or_create("Miles Davis", None, None).unwrap();
+        assert_eq!(avant.sort_name, None);
+        let apres = repo
+            .get_or_create("Miles Davis", None, Some("Davis, Miles"))
+            .unwrap();
+        assert_eq!(apres.id, avant.id);
+        assert_eq!(apres.sort_name.as_deref(), Some("Davis, Miles"));
+        assert_eq!(
+            repo.get(avant.id.unwrap())
+                .unwrap()
+                .unwrap()
+                .sort_name
+                .as_deref(),
+            Some("Davis, Miles"),
+            "écrit en base, pas seulement rendu"
+        );
+        // Déjà renseigné : la balise d'un autre fichier ne le remplace pas.
+        let encore = repo
+            .get_or_create("Miles Davis", None, Some("Miles Davis"))
+            .unwrap();
+        assert_eq!(encore.sort_name.as_deref(), Some("Davis, Miles"));
+        assert_eq!(
+            repo.get(avant.id.unwrap())
+                .unwrap()
+                .unwrap()
+                .sort_name
+                .as_deref(),
+            Some("Davis, Miles")
+        );
+        // Une balise vide ne vide rien et ne pose rien.
+        let vide = repo
+            .get_or_create("Joni Mitchell", None, Some("  "))
+            .unwrap();
+        assert_eq!(vide.sort_name, None);
+    }
+
+    #[test]
+    fn le_nom_de_tri_de_l_artiste_d_album_6474() {
+        use super::nom_de_tri_de_l_artiste_d_album as tri;
+        // ALBUMARTISTSORT d'abord.
+        assert_eq!(
+            tri(
+                Some("Davis, Miles"),
+                Some("X"),
+                "Miles Davis",
+                "Miles Davis"
+            ),
+            Some("Davis, Miles")
+        );
+        // À défaut, l'ARTISTSORT d'une piste du même artiste.
+        assert_eq!(
+            tri(None, Some("Davis, Miles"), "Miles Davis", "miles davis"),
+            Some("Davis, Miles")
+        );
+        assert_eq!(
+            tri(
+                Some(" "),
+                Some("Davis, Miles"),
+                "Miles Davis",
+                "Miles Davis"
+            ),
+            Some("Davis, Miles")
+        );
+        // Jamais celui d'un invité, ni d'un « Various Artists ».
+        assert_eq!(
+            tri(None, Some("Evans, Bill"), "Miles Davis", "Bill Evans"),
+            None
+        );
+        assert_eq!(
+            tri(None, Some("Evans, Bill"), "Various Artists", "Bill Evans"),
+            None
+        );
+        // Aucune règle inventée quand les balises manquent.
+        assert_eq!(tri(None, None, "Miles Davis", "Miles Davis"), None);
     }
 
     #[test]
