@@ -583,6 +583,57 @@ pub(super) fn zone_reaffectation_step_lang(
     ))
 }
 
+/// #6230 — la règle armée que l'étage local n'applique PAS, et pourquoi.
+///
+/// L'étage n'applique une matrice que si elle produit exactement le nombre de
+/// voies que la sortie a ouvertes ([`zone_reaffectation_step_lang`] tait
+/// alors l'étape, à juste titre). Mais une grille 6 → 2 armée sur un 5.1
+/// ouvert en 6 voies restait ignorée **sans aucun signe** : l'utilisateur
+/// voyait ses six canaux sortir et cherchait la panne ailleurs (Didier,
+/// fil 2202). Seul ce cas se dit : la règle part bien des canaux de la
+/// source, et c'est le nombre de voies ouvertes qui ne correspond pas. Une
+/// règle de zone pour du 4.0 sur une piste stéréo ne concerne pas la piste
+/// et ne s'annonce pas.
+pub(super) fn zone_reaffectation_ignoree_lang(
+    lang: &str,
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    zone_id: i64,
+    output_type: &str,
+    track_id: Option<i64>,
+    reel: Option<&TransformationsReelles>,
+) -> Option<String> {
+    use tune_core::audio::reaffectation_canaux as rc;
+    if output_type != "local" {
+        return None;
+    }
+    let reel = reel?;
+    let (album_id, _) = track_id
+        .map(|tid| rc::album_et_canaux_de_la_piste(backend, tid))
+        .unwrap_or((None, None));
+    let canaux_source = reel.entree().canaux();
+    let regle = rc::regle_effective_with(backend, zone_id, album_id, Some(canaux_source))?;
+    let ouvertes = reel.ouvert().canaux;
+    if ouvertes == regle.matrice.sorties() {
+        return None;
+    }
+    Some(fs(
+        lang,
+        "matrix_not_applied",
+        &[
+            &regle.reglage.inputs.to_string(),
+            &regle.reglage.outputs.to_string(),
+            ts(
+                lang,
+                match regle.origine {
+                    rc::Origine::Album => "rule_album",
+                    rc::Origine::Zone => "rule_zone",
+                },
+            ),
+            &ouvertes.to_string(),
+        ],
+    ))
+}
+
 /// La famille DSD que désigne une cadence brute (2,8 MHz → DSD64, etc.).
 ///
 /// Une seule table pour la ligne Source et pour l'étage de sortie : elles
@@ -832,6 +883,14 @@ pub fn build_signal_path_lang(
         wire,
     );
     traitements.reaffectation_step = zone_reaffectation_step_lang(
+        lang,
+        backend,
+        zone.id.unwrap_or(0),
+        output_type,
+        np.track_id,
+        transformations_reelles,
+    );
+    traitements.reaffectation_ignoree = zone_reaffectation_ignoree_lang(
         lang,
         backend,
         zone.id.unwrap_or(0),
@@ -1153,6 +1212,7 @@ fn assembler_les_etapes_lang(
         replaygain_step,
         mono_downmix_step,
         reaffectation_step,
+        reaffectation_ignoree,
         compensation_reseau_db,
         crossfeed_du_flux,
         ui_volume,
@@ -1637,6 +1697,18 @@ fn assembler_les_etapes_lang(
             "code": "channel_remap",
             "description": desc,
             "bit_perfect": false,
+        }));
+    }
+    // #6230 — une règle armée que l'étage n'applique pas se DIT, avec la
+    // raison : sans cette ligne, l'utilisateur voit tous ses canaux sortir
+    // et ne sait pas pourquoi sa grille est restée sans effet. Rien n'est
+    // touché : l'étape reste bit-perfect.
+    if let Some(desc) = &reaffectation_ignoree {
+        steps.push(json!({
+            "name": "Réaffectation des canaux",
+            "code": "channel_remap_not_applied",
+            "description": desc,
+            "bit_perfect": true,
         }));
     }
 
@@ -2395,6 +2467,10 @@ struct Traitements {
     /// Posée après `relever_les_traitements`, qui ne voit pas les
     /// transformations déclarées par la sortie.
     reaffectation_step: Option<String>,
+    /// #6230 — une règle armée pour les canaux de la source, mais que
+    /// l'étage n'applique pas : la sortie a ouvert un autre nombre de voies
+    /// que les sorties de la matrice. Décrite avec la raison.
+    reaffectation_ignoree: Option<String>,
     /// #5071 — la compensation de niveau cuite dans le flux RÉSEAU, en dB,
     /// telle que la session la publie (`StreamInfo::compensation_db`, #5146).
     /// `None` sans session, ou quand le flux n'en porte pas : sortie locale
@@ -2486,6 +2562,7 @@ fn relever_les_traitements_lang(
         replaygain_step,
         mono_downmix_step,
         reaffectation_step: None,
+        reaffectation_ignoree: None,
         compensation_reseau_db,
         crossfeed_du_flux,
         ui_volume,
@@ -2807,4 +2884,15 @@ pub(super) fn zone_reaffectation_step(
     reel: Option<&TransformationsReelles>,
 ) -> Option<String> {
     zone_reaffectation_step_lang("fr", backend, zone_id, output_type, track_id, reel)
+}
+
+#[cfg(test)]
+pub(super) fn zone_reaffectation_ignoree(
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    zone_id: i64,
+    output_type: &str,
+    track_id: Option<i64>,
+    reel: Option<&TransformationsReelles>,
+) -> Option<String> {
+    zone_reaffectation_ignoree_lang("fr", backend, zone_id, output_type, track_id, reel)
 }
