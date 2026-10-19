@@ -171,7 +171,7 @@ async fn sans_consentement_rien_ne_part() {
 async fn le_consentement_puis_l_instantane_partent_une_fois() {
     let (url, site) = faux_site().await;
     let b = base();
-    noter(&b, 10, 1, 5, Some("mon avis très personnel"));
+    noter(&b, 10, 1, 5, Some("COMMENTAIRE-SECRET"));
     noter(&b, 10, 2, 3, None);
     noter(&b, 11, 1, 4, None);
     relier_au_site(&b, &url);
@@ -199,7 +199,7 @@ async fn le_consentement_puis_l_instantane_partent_une_fois() {
     assert_eq!(notes[2]["album"], json!("Sunday at the Village Vanguard"));
     let texte = r[1].2.to_string();
     assert!(
-        !texte.contains("avis"),
+        !texte.contains("COMMENTAIRE-SECRET"),
         "le commentaire est parti : {texte}"
     );
     assert!(!texte.contains("album_id"), "l'identifiant local est parti");
