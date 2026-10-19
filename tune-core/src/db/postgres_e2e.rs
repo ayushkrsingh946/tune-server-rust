@@ -3197,6 +3197,17 @@ async fn pg_1684_recherche_de_la_bibliotheque() {
     crate::db::album_repo::tests::scenario_recherche_de_la_bibliotheque_1684(db);
 }
 
+/// #4319 — le texte libre mot à mot sur le VRAI moteur : dix marqueurs `$n`
+/// par mot, `unaccent`, et les identifiants de piste projetés en texte pour
+/// `track_metadata`, `track_credits` et `album_metadata`. Même scénario que
+/// `le_texte_libre_cherche_chaque_mot_sur_sqlite_4319`.
+#[tokio::test(flavor = "multi_thread")]
+async fn pg_4319_texte_libre_mot_a_mot() {
+    let db = pg_or_skip!();
+    reset_schema(&db);
+    crate::db::facet_filter::texte_libre_mots_4319_tests::scenario_texte_libre_mot_a_mot_4319(db);
+}
+
 /// Fil 2094 — les sous-titres de disque d'un coffret réuni, sur le VRAI
 /// moteur : `UPDATE … WHERE NOT EXISTS` sur la même table, cinq marqueurs
 /// `$n`. Même scénario que `sous_titres_2094_sur_sqlite`.
