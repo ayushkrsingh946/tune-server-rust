@@ -897,7 +897,10 @@ fn persist_plugin_archive_in(root: &Path, data: &[u8]) -> Result<String, String>
         }
         // enclosed_name refuses absolute paths and `..` traversal.
         let Some(rel) = file.enclosed_name() else {
-            return Err(format!("unsafe path in archive: {:?}", file.name()));
+            return Err(format!(
+                "unsafe path in archive: {:?}",
+                String::from_utf8_lossy(file.name_raw())
+            ));
         };
         let out_path = dest.join(rel);
         if let Some(parent) = out_path.parent() {
@@ -1484,6 +1487,56 @@ mod tests {
         ]);
         let err = persist_plugin_archive_in(tmp.path(), &data).unwrap_err();
         assert!(err.contains("unsafe plugin id"), "{err}");
+    }
+
+    #[test]
+    fn persist_archive_neither_restores_symlinks_nor_special_bits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let o = zip::write::SimpleFileOptions::default();
+        z.start_file("manifest.json", o).unwrap();
+        z.write_all(&manifest_json("party")).unwrap();
+        z.start_file("main.wasm", o.unix_permissions(0o6755))
+            .unwrap();
+        z.write_all(b"\0asm").unwrap();
+        z.add_symlink("lien", "../..", o).unwrap();
+        z.add_symlink("absolu", "/etc", o).unwrap();
+        let data = z.finish().unwrap().into_inner();
+
+        persist_plugin_archive_in(tmp.path(), &data).unwrap();
+
+        let dir = tmp.path().join("party");
+        for lien in ["lien", "absolu"] {
+            let meta = std::fs::symlink_metadata(dir.join(lien));
+            assert!(
+                meta.map(|m| !m.file_type().is_symlink()).unwrap_or(true),
+                "symlink {lien} restored"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("main.wasm"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o7000, 0, "special bits restored: {mode:o}");
+        }
+    }
+
+    #[test]
+    fn persist_archive_rejects_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("plugins");
+        std::fs::create_dir_all(&root).unwrap();
+        let data = make_zip(&[
+            ("manifest.json", &manifest_json("party")),
+            ("main.wasm", b"\0asm"),
+            ("../../evade.txt", b"x"),
+        ]);
+        let err = persist_plugin_archive_in(&root, &data).unwrap_err();
+        assert!(err.contains("unsafe path"), "{err}");
+        assert!(!tmp.path().join("evade.txt").exists());
     }
 
     #[test]
