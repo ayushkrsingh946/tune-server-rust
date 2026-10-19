@@ -1042,6 +1042,15 @@ struct PlayRequest {
     /// demande au service une fois la lecture partie.
     album_id_service: Option<String>,
     artist_id_service: Option<String>,
+    /// #6469 — `true` quand ce titre de service est la TÊTE d'une liste dont
+    /// le client enfile lui-même la suite (« Écouter le best of », « Tout
+    /// lire » d'une playlist ou de favoris de service). Le titre ne joue alors
+    /// PAS son album (#5372) : sans cela, le best of d'ABBA jouait la
+    /// compilation d'où venait son premier titre, artistes variés et pochette
+    /// de la compilation sur toute la file (FabienM, fil 2302 point 14).
+    /// Absent ou `false` : le titre lancé seul garde le comportement de #5372.
+    #[serde(default)]
+    queue_follows: bool,
 }
 
 /// Les cinq natures d'objet que l'auditeur peut demander, telles que FabienM
@@ -2311,6 +2320,7 @@ async fn play(
         && body.track_ids.is_none()
         && body.streaming_album_id.is_none()
         && body.streaming_playlist_id.is_none()
+        && !body.queue_follows
     {
         let deja = file_deja_chargee(
             queue_repo
