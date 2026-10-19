@@ -82,6 +82,10 @@ pub struct AppState {
     /// correction), lue par le SERVEUR et copiée dans `<données>/cache/autoeq`.
     /// Champ public : un banc d'essai y pose un catalogue à faux réseau.
     pub autoeq: Arc<tune_core::audio::autoeq_base::CatalogueAutoEq>,
+    /// #6532 — la base OPRA, seconde source de corrections de casques, lue
+    /// par le SERVEUR et copiée dans `<données>/cache/opra`. Public pour la
+    /// même raison que `autoeq`.
+    pub opra: Arc<tune_core::audio::opra_base::CatalogueOpra>,
     pub port: u16,
     /// Origine du compteur `uptime_seconds` : un `Instant` capturé à la
     /// construction de l'état, donc AU DÉMARRAGE DU PROCESSUS. Il repart
@@ -236,6 +240,12 @@ impl axum::extract::FromRef<AppState> for tune_smart_http::SmartHttpState {
 /// le dossier de données étant résolu comme pour la base. Aucune copie pour
 /// une base en mémoire (essais) : rien n'est écrit dans le répertoire courant.
 fn dossier_autoeq(db_path: &str) -> Option<std::path::PathBuf> {
+    dossier_de_cache(db_path, "autoeq")
+}
+
+/// `<données>/cache/<nom>` (#6388, #6532), ou `None` pour une base en
+/// mémoire.
+fn dossier_de_cache(db_path: &str, nom: &str) -> Option<std::path::PathBuf> {
     if db_path.is_empty() || db_path == ":memory:" {
         return None;
     }
@@ -245,7 +255,7 @@ fn dossier_autoeq(db_path: &str) -> Option<std::path::PathBuf> {
         db_path,
         &cwd,
     );
-    Some(donnees.join("cache").join("autoeq"))
+    Some(donnees.join("cache").join(nom))
 }
 
 impl AppState {
@@ -612,6 +622,9 @@ impl AppState {
             ),
             autoeq: Arc::new(tune_core::audio::autoeq_base::CatalogueAutoEq::production(
                 dossier_autoeq(db_path),
+            )),
+            opra: Arc::new(tune_core::audio::opra_base::CatalogueOpra::production(
+                dossier_de_cache(db_path, "opra"),
             )),
             port,
             started_at: Instant::now(),

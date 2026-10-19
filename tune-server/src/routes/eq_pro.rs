@@ -24,6 +24,9 @@ pub fn router() -> Router<AppState> {
         // #6388 — la base AutoEq en ligne, lue par le serveur.
         .route("/autoeq/search", get(autoeq_search))
         .route("/autoeq/import", post(autoeq_import))
+        // #6532 — la base OPRA, seconde source, et la recherche unifiée.
+        .route("/headphones/search", get(headphones_search))
+        .route("/opra/import", post(opra_import))
         .route("/bands", get(get_bands))
         .route(
             "/expert-settings",
@@ -612,7 +615,46 @@ fn enregistrer_profil_autoeq(
     // écrit avant que le fichier entier soit lu sans faute.
     let profil = tune_core::audio::autoeq::analyser(&body.text)
         .map_err(|e| AppError::bad_request(format!("profil AutoEq illisible — {e}")))?;
+    enregistrer_profil(
+        state,
+        profil,
+        body.name.unwrap_or_else(|| "AutoEq".into()),
+        body.zone_id,
+        None,
+    )
+}
 
+/// Ce qu'une courbe OPRA ajoute au préréglage et à la réponse : le crédit
+/// que la licence exige (CC BY-SA 4.0) et les plateaux approchés.
+struct ImportOpra<'a> {
+    courbe: &'a tune_core::audio::opra_base::CourbeOpra,
+    plateaux_approches: &'a [tune_core::audio::opra_base::PlateauApproche],
+}
+
+/// Le crédit d'une courbe OPRA : son auteur d'abord (le README d'OPRA le
+/// veut plus visible qu'OPRA), puis la base, son dépôt et sa licence.
+fn credit_opra(c: &tune_core::audio::opra_base::CourbeOpra) -> Value {
+    use tune_core::audio::opra_base::ATTRIBUTION_OPRA as A;
+    json!({
+        "author": c.auteur,
+        "details": c.details,
+        "link": c.lien,
+        "database": A.name,
+        "repository": A.repository,
+        "license": A.license,
+        "license_url": A.license_url,
+    })
+}
+
+/// Enregistre un profil analysé (fichier ParametricEQ, base AutoEq ou
+/// courbe OPRA) comme préréglage, et rend le bilan de l'import.
+fn enregistrer_profil(
+    state: &AppState,
+    profil: tune_core::audio::autoeq::ProfilAutoEq,
+    nom: String,
+    zone_id: Option<String>,
+    opra: Option<ImportOpra<'_>>,
+) -> Result<axum::response::Response, AppError> {
     // Dépassement : un refus chiffré, jamais une troncature silencieuse. Perdre
     // les dernières bandes d'une correction, c'est en changer le timbre sans
     // le dire.
@@ -640,15 +682,21 @@ fn enregistrer_profil_autoeq(
 
     let mut presets = load_presets(state);
     let id = uuid::Uuid::new_v4().to_string();
-    let preset = json!({
+    let source = if opra.is_some() { "opra" } else { "autoeq" };
+    let mut preset = json!({
         "id": id,
-        "name": body.name.unwrap_or_else(|| "AutoEq".into()),
+        "name": nom,
         "eq_type": "parametric",
-        "zone_id": body.zone_id,
+        "zone_id": zone_id,
         "bands": bands_json,
         "created_at": epoch_secs(),
-        "source": "autoeq",
+        "source": source,
     });
+    // Le crédit voyage AVEC le préréglage : il reste lisible après l'import,
+    // dans « Mes presets », pas seulement dans le message du moment.
+    if let Some(o) = &opra {
+        preset["credit"] = credit_opra(o.courbe);
+    }
     presets.push(preset.clone());
     save_presets(state, &presets)?;
 
@@ -673,12 +721,19 @@ fn enregistrer_profil_autoeq(
         "preamp_covered_by_headroom": couvert,
         "detail": format!(
             "Le pré-gain automatique de l'égaliseur réserve {reserved:.1} dB, \
-             soit au moins la marge du Preamp AutoEq ({:.1} dB) : celui-ci \
+             soit au moins la marge du {} ({:.1} dB) : celui-ci \
              n'est donc pas appliqué en plus. Le préréglage joue plus bas \
              qu'un lecteur qui suit le Preamp ; rattraper au volume.",
+            if opra.is_some() { "gain global de la courbe OPRA" } else { "Preamp AutoEq" },
             profil.preamp_db
         ),
     });
+    if let Some(o) = &opra {
+        corps["credit"] = credit_opra(o.courbe);
+        // Les plateaux que Tune joue à pente standard (S = 1) alors que la
+        // courbe demande un autre Q : importés, mais NOMMÉS.
+        corps["approximated_shelves"] = json!(o.plateaux_approches);
+    }
     if !couvert {
         corps["warning"] = json!(format!(
             "Ce fichier demande un Preamp de {:.1} dB alors que la somme de ses \
@@ -780,6 +835,122 @@ async fn autoeq_import(
             name: Some(nom),
             zone_id: body.zone_id,
         },
+    )
+}
+
+/// #6532 — la réponse d'une base OPRA injoignable ou d'une courbe inconnue.
+fn refus_base_opra(e: &tune_core::audio::opra_base::ErreurBaseOpra) -> axum::response::Response {
+    use tune_core::audio::opra_base::ErreurBaseOpra as E;
+    let (code, cle) = match e {
+        E::HorsLigne(_) => (StatusCode::SERVICE_UNAVAILABLE, "opra_unreachable"),
+        E::CourbeInconnue(_) => (StatusCode::NOT_FOUND, "opra_curve_unknown"),
+        E::BaseIllisible => (StatusCode::BAD_GATEWAY, "opra_database_unreadable"),
+    };
+    (
+        code,
+        Json(json!({ "error": cle, "message": e.to_string() })),
+    )
+        .into_response()
+}
+
+/// #6532 — chercher un casque dans AutoEq ET dans OPRA : `?q=hd 650&limit=50`.
+///
+/// Une seule liste, chaque résultat portant sa `source` (`autoeq`, `opra`),
+/// le fabricant et le modèle, l'auteur de la courbe et sa cible, et la `key`
+/// que l'import de sa source attend. `attribution` donne au client ce que
+/// la licence d'OPRA lui demande d'afficher. Une base injoignable est citée
+/// dans `unavailable_sources` ; les deux : 503 `headphone_databases_unreachable`.
+async fn headphones_search(
+    State(state): State<AppState>,
+    Query(r): Query<RechercheAutoEq>,
+) -> axum::response::Response {
+    let limite = r
+        .limit
+        .unwrap_or(LIMITE_RECHERCHE_AUTOEQ)
+        .clamp(1, LIMITE_MAX_RECHERCHE_AUTOEQ);
+    let attribution = json!({ "opra": tune_core::audio::opra_base::ATTRIBUTION_OPRA });
+    if r.q.trim().is_empty() {
+        return Json(json!({
+            "query": r.q, "results": [], "total": 0,
+            "unavailable_sources": [], "attribution": attribution,
+        }))
+        .into_response();
+    }
+    match tune_core::audio::bases_casques::rechercher(&state.autoeq, &state.opra, &r.q, limite)
+        .await
+    {
+        Ok(t) => Json(json!({
+            "query": r.q,
+            "results": t.results,
+            "total": t.total,
+            "unavailable_sources": t.unavailable_sources,
+            "attribution": attribution,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "headphone_databases_unreachable",
+                "message": e.to_string(),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ImportOpraBody {
+    /// La `key` d'un résultat OPRA de `GET /eq/headphones/search`.
+    id: String,
+    name: Option<String>,
+    zone_id: Option<String>,
+}
+
+/// #6532 — importer une courbe OPRA. Mêmes portes que l'import d'un fichier
+/// (Premium, greffon égaliseur), passées AVANT de lire la base. La courbe
+/// est prise dans la base déjà lue (aucun autre téléchargement), convertie
+/// ([`tune_core::audio::opra_base::convertir`]) ou refusée entière (422),
+/// puis enregistrée comme l'import d'un fichier, crédit compris.
+async fn opra_import(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ImportOpraBody>,
+) -> Result<axum::response::Response, AppError> {
+    if let Some(refus) = portes_de_l_import(&state, &headers).await {
+        return Ok(refus);
+    }
+    let courbe = match state.opra.courbe(&body.id).await {
+        Ok(c) => c,
+        Err(e) => return Ok(refus_base_opra(&e)),
+    };
+    let conversion = match tune_core::audio::opra_base::convertir(&courbe) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": e.cle(), "message": e.to_string() })),
+            )
+                .into_response());
+        }
+    };
+    // Le nom dit le casque, l'auteur et la cible : deux courbes du même
+    // casque ne se confondent pas dans « Mes presets ».
+    let nom = body
+        .name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| match &courbe.details {
+            Some(d) => format!("{} ({} · {d})", courbe.nom_affiche(), courbe.auteur),
+            None => format!("{} ({})", courbe.nom_affiche(), courbe.auteur),
+        });
+    enregistrer_profil(
+        &state,
+        conversion.profil,
+        nom,
+        body.zone_id,
+        Some(ImportOpra {
+            courbe: &courbe,
+            plateaux_approches: &conversion.plateaux_approches,
+        }),
     )
 }
 
@@ -991,3 +1162,7 @@ mod tests {
 #[cfg(test)]
 #[path = "autoeq_en_ligne_tests_6388.rs"]
 mod autoeq_en_ligne_tests_6388;
+
+#[cfg(test)]
+#[path = "opra_en_ligne_tests_6532.rs"]
+mod opra_en_ligne_tests_6532;
