@@ -111,7 +111,7 @@ struct Banc {
     zone_id: i64,
     /// L'appareil de la zone : [`APPAREIL`] sauf banc qui apprend une règle
     /// de compatibilité (#6477), qui doit garder la sienne pour lui.
-    appareil: &'static str,
+    appareil: String,
     /// Le flux de la piste qui joue (piste 1), comme `play()` l'aurait posé.
     flux_finie: String,
     _fichiers: Vec<tempfile::NamedTempFile>,
@@ -126,7 +126,7 @@ impl Banc {
     }
 
     /// Même banc, sur un autre appareil.
-    async fn monter_sur(appareil: &'static str) -> Self {
+    async fn monter_sur(appareil: &str) -> Self {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
         run_migrations(&db).unwrap();
@@ -231,7 +231,7 @@ impl Banc {
             playback,
             outputs,
             zone_id,
-            appareil,
+            appareil: appareil.to_string(),
             flux_finie,
             _fichiers: fichiers,
             poll_states,
@@ -242,7 +242,7 @@ impl Banc {
     /// Les titres partis au renderer par `SetNextAVTransportURI`.
     async fn armees(&self) -> Vec<String> {
         let reg = self.outputs.lock().await;
-        let arc = reg.get(self.appareil).unwrap();
+        let arc = reg.get(&self.appareil).unwrap();
         let sortie = arc.lock().await;
         let mock = sortie.as_any().downcast_ref::<MockOutput>().unwrap();
         mock.set_next_titles().await
@@ -251,7 +251,7 @@ impl Banc {
     /// L'URL armée chez le renderer.
     async fn url_armee(&self) -> Option<String> {
         let reg = self.outputs.lock().await;
-        let arc = reg.get(self.appareil).unwrap();
+        let arc = reg.get(&self.appareil).unwrap();
         let sortie = arc.lock().await;
         let mock = sortie.as_any().downcast_ref::<MockOutput>().unwrap();
         mock.next_uri().await
@@ -260,7 +260,7 @@ impl Banc {
     /// Ce que le renderer rapporte jouer (`TrackURI`).
     async fn le_renderer_rapporte(&self, uri: Option<String>) {
         let reg = self.outputs.lock().await;
-        let arc = reg.get(self.appareil).unwrap();
+        let arc = reg.get(&self.appareil).unwrap();
         let sortie = arc.lock().await;
         let mock = sortie.as_any().downcast_ref::<MockOutput>().unwrap();
         mock.set_current_uri(uri).await;
@@ -269,7 +269,7 @@ impl Banc {
     /// Le renderer passe en pause (geste de l'utilisateur relayé).
     async fn le_renderer_en_pause(&self) {
         let reg = self.outputs.lock().await;
-        let arc = reg.get(self.appareil).unwrap();
+        let arc = reg.get(&self.appareil).unwrap();
         let sortie = arc.lock().await;
         let mock = sortie.as_any().downcast_ref::<MockOutput>().unwrap();
         mock.set_state(crate::outputs::traits::TransportState::Paused)
@@ -280,7 +280,7 @@ impl Banc {
     /// produit AUCUN : dès qu'il y en a un, il y a eu un blanc.
     async fn play_complets(&self) -> Vec<String> {
         let reg = self.outputs.lock().await;
-        let arc = reg.get(self.appareil).unwrap();
+        let arc = reg.get(&self.appareil).unwrap();
         let sortie = arc.lock().await;
         let mock = sortie.as_any().downcast_ref::<MockOutput>().unwrap();
         mock.play_titles().await
@@ -292,7 +292,7 @@ impl Banc {
     async fn renderer_a(&mut self, position_ms: u64, horloge_secs: u64) {
         {
             let reg = self.outputs.lock().await;
-            let arc = reg.get(self.appareil).unwrap();
+            let arc = reg.get(&self.appareil).unwrap();
             let sortie = arc.lock().await;
             let mock = sortie.as_any().downcast_ref::<MockOutput>().unwrap();
             mock.set_state(crate::outputs::traits::TransportState::Playing)

@@ -51,7 +51,7 @@ impl Banc {
     /// à l'état du sondeur : c'est au sondeur de voir la retombée.
     async fn le_renderer_repart_a(&self, position_ms: u64) {
         let reg = self.outputs.lock().await;
-        let arc = reg.get(self.appareil).unwrap();
+        let arc = reg.get(&self.appareil).unwrap();
         let sortie = arc.lock().await;
         let mock = sortie.as_any().downcast_ref::<MockOutput>().unwrap();
         mock.set_state(crate::outputs::traits::TransportState::Playing)
