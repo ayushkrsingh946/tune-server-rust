@@ -355,19 +355,17 @@ impl PlaybackOrchestrator {
         // fois au format 6, pour cette piste seulement. Toute re-résolution
         // ultérieure de la piste (URL expirée en cours d'écoute) garde alors
         // le format 6 : la seconde moitié ne repart pas en HR.
-        let mut qualite_de_reresolution = provider_quality.map(str::to_string);
-        if service_name == "qobuz" {
-            let retenu = crate::streaming::qobuz_repli_qualite::retenir_le_flux(
-                &**svc,
-                crate::http::client::shared(),
-                source_id,
-                provider_quality,
-                stream_data,
-            )
-            .await;
-            stream_data = retenu.flux;
-            qualite_de_reresolution = retenu.jeton;
-        }
+        let retenu = crate::streaming::qobuz_repli_qualite::retenir_le_flux_du_service(
+            service_name,
+            &**svc,
+            crate::http::client::shared(),
+            source_id,
+            provider_quality,
+            stream_data,
+        )
+        .await;
+        stream_data = retenu.flux;
+        let qualite_de_reresolution = retenu.jeton;
         // #5283 — une cadence annoncée NULLE (Qobuz `sampling_rate: 0`) est
         // remplacée par l'en-tête du flux, ou le catalogue, avant que quoi
         // que ce soit ne la lise. Sans effet si la qualité annoncée est

@@ -481,6 +481,17 @@ fn inject_device_identity(
         "detected_model".into(),
         json!(detected.filter(|_| !effacee).and_then(|d| d.model.clone())),
     );
+    // #6546 — la plage MAC reconnue et sa marque, comme sur `GET /devices`.
+    // Même règle que la détection juste au-dessus : une identité récusée
+    // (#3660) ne se republie pas par la porte de l'OUI. Seuls les trois
+    // premiers octets sortent ; la MAC complète n'est pas publiée ici.
+    let (mac_prefix, mac_vendor) = tune_core::discovery::mac::plage_et_marque(
+        detected
+            .filter(|_| !effacee)
+            .and_then(|d| d.mac_address.as_deref()),
+    );
+    obj.insert("mac_prefix".into(), json!(mac_prefix));
+    obj.insert("mac_vendor".into(), json!(mac_vendor));
 }
 
 pub fn router() -> Router<AppState> {
@@ -614,6 +625,8 @@ mod identite_appareil_tests;
 mod oubli_du_dlna_decouvert_6299;
 #[cfg(test)]
 mod page_d_album_bandcamp_tests;
+#[cfg(test)]
+mod plages_mac_6546_tests;
 #[cfg(test)]
 mod sante_reseau_de_zone_tests;
 #[cfg(test)]
@@ -1561,6 +1574,7 @@ fn output_reach_of(
 }
 
 mod signal_path;
+pub(crate) mod textes_signal;
 pub use signal_path::*;
 
 mod ecriture;

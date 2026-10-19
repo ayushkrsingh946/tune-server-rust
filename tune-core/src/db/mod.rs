@@ -59,6 +59,8 @@ pub mod postgres;
 mod postgres_e2e;
 pub mod profile_repo;
 pub mod radio_repo;
+/// #6500 — les stations de radio indexées comme pistes par l'UPnP, retirées.
+pub mod radios_indexees_upnp_6500;
 pub mod rating_repo;
 /// Fil 2138 — rattrapage unique des dates d'ajout figées au premier scan.
 pub mod rattrapage_dates_ajout_2138;

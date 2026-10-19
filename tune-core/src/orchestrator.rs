@@ -1842,6 +1842,10 @@ mod eq_en_vol_4407_tests;
 // bibliothèque native de test.
 #[cfg(test)]
 mod greffon_natif_tiers_tests;
+// #6522, #6524 — le verdict PURE de la sortie locale suit les réglages
+// enregistrés, dans l'état que la vraie bascule produit.
+#[cfg(all(test, feature = "local-audio"))]
+mod verdict_pure_reglages_6522_tests;
 
 /// Fil 2062 / #5550 — durée d'une piste UPnP lue dans les en-têtes du flux.
 mod duree_du_flux_2062;
@@ -2030,6 +2034,12 @@ mod mesure_saut_cd_5079;
 /// FLAC (ou le catalogue) ; inconnue, elle est refusée par une erreur nommée.
 #[cfg(test)]
 mod qobuz_cadence_nulle_5283_tests;
+
+/// #6401 — le préchargement sans blanc et la sonde de niveaux après une
+/// avance sans blanc passent par le même repli Qobuz en 16/44,1 que la
+/// lecture.
+#[cfg(test)]
+mod qobuz_repli_prechargement_6401_tests;
 
 /// #4384 — la crête d'une zone locale se lit après son DSP.
 #[cfg(test)]
