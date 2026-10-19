@@ -46,6 +46,10 @@ pub struct SlimProtoOutput {
     /// Last volume command accepted by the player's command channel.
     volume: Arc<Mutex<f64>>,
     muted: Arc<AtomicBool>,
+    /// #6476 — un `strm s` a été envoyé sur CETTE connexion du lecteur et
+    /// aucun `strm q` ne l'a retiré depuis. Une reconnexion enregistre une
+    /// sortie neuve : le drapeau y est faux, le lecteur n'a rien à reprendre.
+    flux_pose: AtomicBool,
 }
 
 impl SlimProtoOutput {
@@ -84,7 +88,17 @@ impl SlimProtoOutput {
             current_media: Arc::new(Mutex::new(CurrentMedia::default())),
             volume: Arc::new(Mutex::new(1.0)),
             muted: Arc::new(AtomicBool::new(false)),
+            flux_pose: AtomicBool::new(false),
         }
+    }
+
+    /// #6476 — le lecteur n'a plus de flux à reprendre sur place : aucun
+    /// `strm s` sur cette connexion (Squeezelite s'est reconnecté), ou il est
+    /// arrêté (`strm q`, déconnexion, fin, format refusé). Un `strm u` n'y
+    /// rejouerait rien.
+    fn sans_flux_a_reprendre(&self) -> bool {
+        !self.flux_pose.load(Ordering::Relaxed)
+            || lock_playback(&self.playback).transport == TransportState::Stopped
     }
 
     /// Push a message to this player's writer task via its command channel.
@@ -186,6 +200,7 @@ impl OutputTarget for SlimProtoOutput {
             current.artist = media.artist.map(str::to_string);
         }
         lock_playback(&self.playback).begin_playback();
+        self.flux_pose.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -196,6 +211,12 @@ impl OutputTarget for SlimProtoOutput {
     }
 
     async fn resume(&self) -> Result<(), String> {
+        // #6476 — refuser plutôt qu'envoyer un `strm u` muet : l'orchestrateur
+        // lit alors `device_released_on_pause()` et rétablit la piste.
+        if self.sans_flux_a_reprendre() {
+            tracing::info!(device_id = %self.device_id, "slimproto_reprise_sans_flux");
+            return Err("slimproto: le lecteur n'a plus de flux à reprendre".into());
+        }
         self.send(strm_control(b'u')).await?;
         lock_playback(&self.playback).resume();
         Ok(())
@@ -205,7 +226,15 @@ impl OutputTarget for SlimProtoOutput {
         // Best-effort: the player may already be gone; ignore a closed channel.
         let _ = self.send(strm_control(b'q')).await;
         lock_playback(&self.playback).stop();
+        self.flux_pose.store(false, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// #6476 — après une reconnexion de Squeezelite (ou un arrêt), le lecteur
+    /// n'a plus le flux : l'orchestrateur doit le rétablir à la position
+    /// (`strm s`), pas le « reprendre » par un `strm u` qui ne joue rien.
+    fn device_released_on_pause(&self) -> bool {
+        self.sans_flux_a_reprendre()
     }
 
     async fn seek(&self, _position_ms: u64) -> Result<(), String> {

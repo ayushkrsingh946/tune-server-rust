@@ -695,6 +695,11 @@ fn pure_sans_traitement_arme_dit_qu_il_n_y_a_rien_a_contourner() {
 
 /// #4176 — témoin : avec un égaliseur armé, PURE contourne vraiment, et le
 /// contrat le dit toujours.
+///
+/// ⚠️ #6522 — un égaliseur DANS la chaîne avec PURE allumé est un état que
+/// l'orchestrateur ne produit pas (PURE vide la chaîne). Ce test ne garde que
+/// la lecture de la chaîne ; l'état réel est gardé par
+/// `orchestrator/verdict_pure_reglages_6522_tests.rs`.
 #[test]
 fn pure_avec_un_egaliseur_arme_le_contourne_toujours() {
     let status = runtime_contract(true, false, 1000, Some(test_eq()), true);
