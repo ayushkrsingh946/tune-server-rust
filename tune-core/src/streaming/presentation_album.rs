@@ -164,7 +164,7 @@ pub fn texte_de_presentation(html: &str) -> Option<String> {
         .split('\n')
         .map(|ligne| {
             ligne
-                .split(|c: char| c == ' ' || c == '\t')
+                .split([' ', '\t'])
                 .filter(|m| !m.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ")
