@@ -162,8 +162,11 @@ pub(crate) fn scenario_texte_libre_mot_a_mot_4319(db: Arc<dyn DbBackend>) {
 
 #[test]
 fn le_texte_libre_cherche_chaque_mot_sur_sqlite_4319() {
+    // La base de production : `track_metadata`, `track_credits` et
+    // `album_metadata` naissent des migrations, pas de `CORE_SCHEMA`.
     let db = SqliteDb::open_in_memory().unwrap();
     db.init_schema().unwrap();
+    crate::db::migrations::run_migrations(&db).unwrap();
     scenario_texte_libre_mot_a_mot_4319(Arc::new(db));
 }
 
