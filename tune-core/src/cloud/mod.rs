@@ -7,6 +7,7 @@ pub mod ecoutes_au_compte;
 pub mod library_reconcile;
 pub mod library_sync;
 pub mod metadata_proposals;
+pub mod notes_communautaires;
 pub mod playlist_hub;
 pub mod plugins;
 pub mod proprietaire;
