@@ -333,6 +333,14 @@ pub mod sql {
         )
     }
 
+    /// #6526 — les identifiants de ligne de la file d'une zone.
+    pub fn ids_de_la_zone<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "SELECT id FROM queue_items WHERE zone_id = {}",
+            d.placeholder(1)
+        )
+    }
+
     pub fn delete_by_id<D: SqlDialect>(d: &D) -> String {
         format!("DELETE FROM queue_items WHERE id = {}", d.placeholder(1))
     }
@@ -1305,6 +1313,60 @@ impl PlayQueueRepo {
             for (i, e) in entries.iter().enumerate() {
                 let pos = i as i64;
                 let p: [&dyn ToSqlValue; 2] = [&pos, &e.id];
+                tx.execute(&set_pos_sql, &p)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// La file entière, lue sur la connexion d'ÉCRITURE (#6526).
+    ///
+    /// `get_ordered` lit d'abord la connexion de lecture, qui peut retarder
+    /// d'une écriture sur l'autre : un ordre calculé dessus juste après un
+    /// ajout serait refusé par [`Self::reordonner`] pour une ligne manquante.
+    pub fn get_ordered_fort(&self, zone_id: i64) -> Result<Vec<QueueEntry>, String> {
+        let sql = self.dialect_sql(sql::get_ordered, sql::get_ordered);
+        let params: [&dyn ToSqlValue; 1] = [&zone_id];
+        let rows = self.db.query_many_strong(&sql, &params)?;
+        Ok(rows.iter().map(row_to_queue_entry).collect())
+    }
+
+    /// Réécrit l'ORDRE de la file selon `ids`, identifiants de ligne
+    /// (`queue_items.id`) dans le nouvel ordre — l'aléatoire de #6526.
+    ///
+    /// Les lignes ne sont ni supprimées ni recréées : seule leur `position`
+    /// change, renumérotée en `0..N-1`. Elles gardent donc leur identifiant et
+    /// leur marque « en cours », qui suit son titre. `ids` doit être une
+    /// permutation EXACTE des lignes de la zone, relues dans la transaction
+    /// d'écriture : une file qui a changé entre-temps (ajout ou retrait
+    /// concurrent) est refusée, sans rien écrire, plutôt que d'en perdre ou
+    /// d'en dupliquer une ligne.
+    pub fn reordonner(&self, zone_id: i64, ids: &[i64]) -> Result<(), String> {
+        let mut voulus = ids.to_vec();
+        voulus.sort_unstable();
+        let ids_sql = self.dialect_sql(sql::ids_de_la_zone, sql::ids_de_la_zone);
+        let set_pos_sql = self.dialect_sql(sql::set_position_by_id, sql::set_position_by_id);
+        self.db.write_tx(&mut |tx| {
+            // La vérification se fait DANS la transaction d'écriture : entre
+            // elle et la renumérotation, aucun autre écrivain ne passe.
+            let p1: [&dyn ToSqlValue; 1] = [&zone_id];
+            let mut actuels: Vec<i64> = tx
+                .query_many(&ids_sql, &p1)?
+                .iter()
+                .filter_map(|cols| cols.first().and_then(|v| v.as_i64()))
+                .collect();
+            actuels.sort_unstable();
+            if actuels != voulus {
+                return Err(format!(
+                    "file de la zone {zone_id} modifiée pendant le réordonnancement \
+                     ({} lignes en base, {} dans l'ordre demandé)",
+                    actuels.len(),
+                    voulus.len()
+                ));
+            }
+            for (i, id) in ids.iter().enumerate() {
+                let pos = i as i64;
+                let p: [&dyn ToSqlValue; 2] = [&pos, id];
                 tx.execute(&set_pos_sql, &p)?;
             }
             Ok(())

@@ -1172,8 +1172,18 @@ async fn restore_queue_metadata(state: &AppState, config: &TuneConfig) {
         };
         state.playback.set_repeat(zone_id, repeat).await;
 
-        // Restore shuffle
-        state.playback.set_shuffle(zone_id, snap.shuffle).await;
+        // Restore shuffle — #6526 : la file en base est déjà l'ordre joué si
+        // l'instantané vient d'un serveur qui mélange la file ; sinon (ancien
+        // tirage caché, perdu) la suite est mélangée maintenant.
+        tune_core::playback::melange::restaurer_au_demarrage(
+            &state.backend,
+            &state.playback,
+            zone_id,
+            snap.shuffle,
+            snap.melange_dans_la_file,
+            snap.ordre_d_origine.clone(),
+        )
+        .await;
 
         info!(
             zone_id,
