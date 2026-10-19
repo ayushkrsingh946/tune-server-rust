@@ -438,18 +438,21 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
         };
         let total_discovered = files.len();
         info!(files = total_discovered, "auto_scan_files_found");
-        // #6019 — le parcours est fini, la passe `stat` commence : sur un
-        // partage réseau, c'est la plus longue. L'écran garde le compte des
-        // fichiers repérés au lieu d'un badge sans chiffre.
-        event_bus.emit(
-            "library.scan.progress",
-            serde_json::json!({
-                "phase": "indexing",
-                "scanned": total_discovered as i64,
-                "added": 0i64,
-                "total": 0i64,
-            }),
-        );
+        // #6019, #6371 — le parcours est fini, la passe `stat` commence : sur
+        // un partage réseau, c'est la plus longue (des dizaines de minutes
+        // pour 550 000 pistes chez Tades). Elle s'annonce comme celle du scan
+        // manuel : vérifiés sur repérés, au départ, à la cadence du parcours
+        // et à la fin.
+        use crate::routes::system::scan::{avancement_du_prefiltre, dossier_de};
+        let annoncer_le_prefiltre = |verifies: usize, dossier: Option<String>| {
+            event_bus.emit(
+                "library.scan.progress",
+                avancement_du_prefiltre(verifies, total_discovered, dossier.as_deref()),
+            );
+        };
+        annoncer_le_prefiltre(0, files.first().and_then(|p| dossier_de(p)));
+        let prefiltre_verifies = std::sync::atomic::AtomicUsize::new(0);
+        let prefiltre_derniere_annonce = std::sync::Mutex::new(std::time::Instant::now());
 
         // NFC-normalized set of every path found on disk this scan. Used after
         // the scan to prune tracks whose files were deleted while the server was
@@ -510,6 +513,13 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
             if crate::routes::system::scan::scan_cancel_requested() {
                 return false;
             }
+            let verifies = prefiltre_verifies.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Ok(mut derniere) = prefiltre_derniere_annonce.try_lock()
+                && derniere.elapsed() >= tune_core::scanner::walker::CADENCE_PROGRESSION_PARCOURS
+            {
+                *derniere = std::time::Instant::now();
+                annoncer_le_prefiltre(verifies, dossier_de(path));
+            }
             match crate::routes::system::scan::etat_du_fichier(path, &existing_tracks) {
                 EtatDuFichier::Inchange => false,
                 EtatDuFichier::DateAPreciser {
@@ -556,6 +566,10 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
                 .unwrap_or_else(|e| e.into_inner()),
         );
         let pre_skipped = total_discovered - files_to_scan.len();
+        annoncer_le_prefiltre(
+            prefiltre_verifies.load(Ordering::Relaxed),
+            files_to_scan.last().and_then(|p| dossier_de(p)),
+        );
 
         info!(
             total = total_discovered,
@@ -573,6 +587,18 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
                 "unchanged": pre_skipped,
                 "auto": true,
             }),
+        );
+        // #6371 — les inchangés sont faits : la barre devient déterminée tout
+        // de suite, comme au scan manuel, au lieu d'attendre le premier lot
+        // (aucun si rien n'a changé).
+        let premier_dossier = files_to_scan.first().and_then(|p| dossier_de(p));
+        event_bus.emit(
+            "library.scan.progress",
+            crate::routes::system::scan::debut_de_la_lecture(
+                pre_skipped,
+                total_discovered,
+                premier_dossier.as_deref(),
+            ),
         );
 
         let cache_dir = crate::routes::library::artwork_cache_dir();
