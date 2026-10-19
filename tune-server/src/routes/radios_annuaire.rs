@@ -151,6 +151,7 @@ pub fn publier(state: &AppState, fiches: Vec<StationAnnuaire>) {
                 flux: f.stream_urls.clone(),
                 nom: f.name.clone(),
                 cle: f.radio_metadata_key.clone()?,
+                external_id: f.external_id.clone(),
             })
         })
         .collect();

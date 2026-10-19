@@ -47,6 +47,7 @@ fn une_station_se_retrouve_par_son_flux_puis_par_son_nom() {
         ],
         nom: "FIP".into(),
         cle: "fip".into(),
+        external_id: None,
     }]);
     // Le schéma, la casse et le `/` final ne séparent pas deux écritures.
     assert_eq!(
@@ -78,11 +79,13 @@ fn un_nom_porte_par_deux_cles_ne_rapproche_rien() {
             flux: vec!["https://a.example/1".into()],
             nom: "Jazz Radio".into(),
             cle: "jazzradio".into(),
+            external_id: None,
         },
         StationSuivie {
             flux: vec!["https://b.example/2".into()],
             nom: "Jazz-Radio".into(),
             cle: "jazzradio_fr".into(),
+            external_id: None,
         },
     ]);
     assert_eq!(
@@ -173,5 +176,43 @@ fn seule_une_zone_servie_par_le_relais_passe_a_sa_cadence() {
     assert!(
         !zone_a_relire(zone, Duration::ZERO),
         "zone rendue au sondeur"
+    );
+}
+
+#[test]
+fn une_station_liee_se_retrouve_par_son_id_avant_l_adresse_et_le_nom() {
+    let reg = Registre::depuis(&[StationSuivie {
+        flux: vec!["https://icecast.radiofrance.fr/fip-hifi.aac".into()],
+        nom: "FIP".into(),
+        cle: "fip".into(),
+        external_id: Some("S000973".into()),
+    }]);
+    // L'annuaire a changé l'adresse, et la station porte un autre nom : le
+    // lien suffit.
+    assert_eq!(
+        reg.cle_pour_lien(Some("S000973"), "Ma radio", "https://nouveau.example/fip")
+            .as_deref(),
+        Some("fip")
+    );
+    // Liée à une fiche que le registre ne suit pas : jamais par le NOM…
+    assert_eq!(
+        reg.cle_pour_lien(Some("S999999"), "FIP", "https://nouveau.example/fip"),
+        None
+    );
+    // …mais l'adresse exacte reste admise.
+    assert_eq!(
+        reg.cle_pour_lien(
+            Some("S999999"),
+            "Autre",
+            "https://icecast.radiofrance.fr/fip-hifi.aac"
+        )
+        .as_deref(),
+        Some("fip")
+    );
+    // Sans lien : adresse, puis nom, comme avant.
+    assert_eq!(
+        reg.cle_pour_lien(None, "FIP", "https://ailleurs.example/x")
+            .as_deref(),
+        Some("fip")
     );
 }

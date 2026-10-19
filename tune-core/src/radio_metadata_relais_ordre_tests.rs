@@ -61,6 +61,7 @@ fn station_fip_locale(livemeta: &str, cle: &str) -> String {
         flux: vec![url.clone()],
         nom: format!("Station d'essai {cle}"),
         cle: cle.into(),
+        external_id: None,
     }]);
     url
 }
@@ -82,7 +83,8 @@ async fn le_relais_passe_avant_radio_france_pour_une_station_suivie() {
         live: &livemeta,
     };
 
-    let (meta, par_le_relais) = titre_relais_puis_diffuseur(&relais, voies, "FIP", &url).await;
+    let (meta, par_le_relais) =
+        titre_relais_puis_diffuseur(&relais, voies, None, "FIP", &url).await;
     let meta = meta.expect("un titre");
     assert_eq!(
         meta.title, "Titre du relais",
@@ -106,7 +108,8 @@ async fn un_relais_inactif_rend_la_main_au_diffuseur() {
         live: &livemeta,
     };
 
-    let (meta, par_le_relais) = titre_relais_puis_diffuseur(&relais, voies, "FIP", &url).await;
+    let (meta, par_le_relais) =
+        titre_relais_puis_diffuseur(&relais, voies, None, "FIP", &url).await;
     let meta = meta.expect("le repli Radio France doit répondre");
     assert!(
         meta.title.starts_with("Morceau du canal"),
@@ -132,11 +135,53 @@ async fn une_station_non_suivie_ne_touche_pas_le_relais() {
         live: &livemeta,
     };
     let (meta, par_le_relais) =
-        titre_relais_puis_diffuseur(&relais, voies, "Station non suivie 6516", &url).await;
+        titre_relais_puis_diffuseur(&relais, voies, None, "Station non suivie 6516", &url).await;
     assert!(
         meta.expect("titre du diffuseur")
             .title
             .starts_with("Morceau du canal")
     );
     assert!(!par_le_relais);
+}
+
+#[tokio::test]
+async fn une_station_liee_garde_son_titre_apres_un_changement_d_adresse() {
+    // #6516 — l'annuaire a changé l'adresse du flux ; la station, liée à sa
+    // fiche par `external_id`, garde l'ancienne et un autre nom. Le relais la
+    // retrouve par le lien.
+    let livemeta = faux_livemeta().await;
+    let relais = faux_relais(
+        200,
+        json!({"active": true, "items": {"essai_6516_lien": {
+            "mode": "song", "title": "Titre par le lien", "artist": "A"
+        }}}),
+    )
+    .await;
+    ajouter_les_cles_pour_un_essai(&[StationSuivie {
+        flux: vec![format!(
+            "{livemeta}/essai-nouvelle-adresse/radiofrance/fip-hifi.aac"
+        )],
+        nom: "Fiche d'essai 6516 lien".into(),
+        cle: "essai_6516_lien".into(),
+        external_id: Some("S6516LIEN".into()),
+    }]);
+    let ancienne = format!("{livemeta}/essai-ancienne-adresse/radiofrance/fip-hifi.aac");
+    let voies = VoiesRadioFrance {
+        pull: &livemeta,
+        live: &livemeta,
+    };
+    let (meta, par_le_relais) = titre_relais_puis_diffuseur(
+        &relais,
+        voies,
+        Some("S6516LIEN"),
+        "Ma station renommée",
+        &ancienne,
+    )
+    .await;
+    assert_eq!(
+        meta.expect("un titre").title,
+        "Titre par le lien",
+        "le relais doit retrouver la station par son external_id"
+    );
+    assert!(par_le_relais);
 }

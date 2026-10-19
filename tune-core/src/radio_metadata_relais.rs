@@ -106,11 +106,17 @@ pub struct StationSuivie {
     pub flux: Vec<String>,
     pub nom: String,
     pub cle: String,
+    /// L'identifiant de la fiche dans l'annuaire (`S000973`), quand il est
+    /// connu : c'est par lui que se retrouve d'abord une station de « Mes
+    /// radios » liée à sa fiche (`radio_stations.external_id`, #6516).
+    pub external_id: Option<String>,
 }
 
-/// Les stations suivies, rangées par adresse de flux et par nom.
+/// Les stations suivies, rangées par identifiant de fiche, par adresse de
+/// flux et par nom.
 #[derive(Debug, Default, Clone)]
 pub struct Registre {
+    par_id: HashMap<String, String>,
     par_flux: HashMap<String, String>,
     par_nom: HashMap<String, String>,
 }
@@ -133,6 +139,16 @@ impl Registre {
             let cle = s.cle.trim();
             if cle.is_empty() {
                 continue;
+            }
+            if let Some(id) = s
+                .external_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|i| !i.is_empty())
+            {
+                self.par_id
+                    .entry(id.to_string())
+                    .or_insert_with(|| cle.to_string());
             }
             for f in &s.flux {
                 let n = flux_normalise(f);
@@ -164,6 +180,30 @@ impl Registre {
             .get(&flux_normalise(url_flux))
             .or_else(|| self.par_nom.get(&nom_replie(nom_station)))
             .cloned()
+    }
+
+    /// La clé radio-metadata d'une station de « Mes radios », dans l'ordre :
+    /// son lien `external_id` d'abord, son adresse de flux ensuite, son nom
+    /// enfin.
+    ///
+    /// Une station LIÉE à une fiche que le registre ne suit pas (fiche sans
+    /// clé, ou sortie de l'annuaire) ne se rapproche plus par son NOM : elle a
+    /// déjà sa fiche, et le nom pourrait désigner une autre station. Seule
+    /// l'adresse exacte reste admise.
+    pub fn cle_pour_lien(
+        &self,
+        external_id: Option<&str>,
+        nom_station: &str,
+        url_flux: &str,
+    ) -> Option<String> {
+        match external_id.map(str::trim).filter(|i| !i.is_empty()) {
+            Some(id) => self
+                .par_id
+                .get(id)
+                .or_else(|| self.par_flux.get(&flux_normalise(url_flux)))
+                .cloned(),
+            None => self.cle_pour(nom_station, url_flux),
+        }
     }
 
     pub fn nombre_de_flux(&self) -> usize {
@@ -198,6 +238,18 @@ pub(crate) fn ajouter_les_cles_pour_un_essai(stations: &[StationSuivie]) {
 /// La clé radio-metadata d'une station dans le registre du processus.
 pub fn cle_pour(nom_station: &str, url_flux: &str) -> Option<String> {
     REGISTRE.read().ok()?.cle_pour(nom_station, url_flux)
+}
+
+/// [`Registre::cle_pour_lien`] dans le registre du processus.
+pub fn cle_pour_lien(
+    external_id: Option<&str>,
+    nom_station: &str,
+    url_flux: &str,
+) -> Option<String> {
+    REGISTRE
+        .read()
+        .ok()?
+        .cle_pour_lien(external_id, nom_station, url_flux)
 }
 
 /// Ce que le relais dit d'une station, réduit à ce que Tune affiche.

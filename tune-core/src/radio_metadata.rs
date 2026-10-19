@@ -43,9 +43,22 @@ pub async fn fetch_radio_metadata_suivie(
     station_name: &str,
     stream_url: &str,
 ) -> (Option<IcyMetadata>, bool) {
+    fetch_radio_metadata_liee(None, station_name, stream_url).await
+}
+
+/// Le même parcours pour une station de « Mes radios » liée à sa fiche
+/// d'annuaire (`external_id`, #6516) : le relais la retrouve d'abord par ce
+/// lien, puis par l'adresse, puis par le nom — et la retrouve donc encore
+/// quand l'annuaire a changé l'adresse de son flux.
+pub async fn fetch_radio_metadata_liee(
+    external_id: Option<&str>,
+    station_name: &str,
+    stream_url: &str,
+) -> (Option<IcyMetadata>, bool) {
     titre_relais_puis_diffuseur(
         crate::radio_metadata_relais::RELAIS_URL,
         VoiesRadioFrance::REELLES,
+        external_id,
         station_name,
         stream_url,
     )
@@ -58,10 +71,12 @@ pub async fn fetch_radio_metadata_suivie(
 async fn titre_relais_puis_diffuseur(
     relais: &str,
     voies: VoiesRadioFrance<'_>,
+    external_id: Option<&str>,
     station_name: &str,
     stream_url: &str,
 ) -> (Option<IcyMetadata>, bool) {
-    if let Some(cle) = crate::radio_metadata_relais::cle_pour(station_name, stream_url)
+    if let Some(cle) =
+        crate::radio_metadata_relais::cle_pour_lien(external_id, station_name, stream_url)
         && let Some(meta) = crate::radio_metadata_relais::titre_par_le_relais(relais, &cle).await
     {
         debug!(station = %station_name, cle = %cle, "radio_metadata_par_le_relais");

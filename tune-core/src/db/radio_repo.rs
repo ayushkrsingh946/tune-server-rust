@@ -320,6 +320,13 @@ pub mod sql_annuaire {
         "SELECT id, external_id FROM radio_stations WHERE external_id IS NOT NULL"
     }
 
+    pub fn lien_de<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "SELECT external_id FROM radio_stations WHERE id = {}",
+            d.placeholder(1)
+        )
+    }
+
     pub fn lier<D: SqlDialect>(d: &D) -> String {
         format!(
             "UPDATE radio_stations SET external_id = {} WHERE id = {}",
@@ -341,6 +348,18 @@ impl RadioRepo {
                 (!ext.trim().is_empty()).then_some((id, ext))
             })
             .collect())
+    }
+
+    /// Le lien d'UNE station avec sa fiche, s'il est posé. Le sondeur le lit à
+    /// chaque rafraîchissement du titre : une seule ligne, par sa clé.
+    pub fn lien_annuaire(&self, id: i64) -> Result<Option<String>, String> {
+        let sql = self.dialect_sql(sql_annuaire::lien_de, sql_annuaire::lien_de);
+        let params: [&dyn ToSqlValue; 1] = [&id];
+        Ok(self
+            .db
+            .query_one(&sql, &params)?
+            .and_then(|c| c.first().and_then(|v| v.as_string()))
+            .filter(|s| !s.trim().is_empty()))
     }
 
     /// Enregistre (ou retire, avec `None`) le lien d'une station avec sa fiche.
