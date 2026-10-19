@@ -730,6 +730,19 @@ pub(super) fn runtime_signal_reason_detail(status: &OutputSignalPathStatus) -> O
 /// Les types INCONNUS gardent leur chaîne : un greffon hors dépôt enregistre
 /// le nom qu'il veut, et aucune règle de mise en forme ne saurait deviner sa
 /// capitalisation. Inventer un libellé serait pire que de rendre le sien.
+/// #6178 — la sortie va chercher le flux et le DÉCODE elle-même : Tune lui
+/// sert les octets de la source tels quels (`hqplayer`, `diretta`, greffons
+/// pull). Les sorties pull que Tune alimente en PCM ou réencode en sont
+/// exclues : `local` et `oaat` (WAV), l'agent Tune (sa sortie locale décode),
+/// Sendspin, AirPlay (ALAC).
+pub(super) fn la_sortie_decode_elle_meme(output_type: &str) -> bool {
+    tune_core::orchestrator::is_pull_dsp_output_type(Some(output_type))
+        && !matches!(
+            output_type,
+            "local" | "oaat" | "tune_agent" | "sendspin" | "airplay" | "airplay2"
+        )
+}
+
 pub(super) fn libelle_de_transport(output_type: &str) -> &str {
     match output_type {
         "hqplayer" => "HQPlayer",
@@ -1147,18 +1160,6 @@ fn assembler_les_etapes(
     };
     marquer_codec_inconnu(&mut steps[0]);
 
-    // Decoder step. Skipped for DSD: the Source already reads e.g.
-    // "DSD64 2.8 MHz" and the DSD→PCM/FLAC conversion is shown by the Transcoder
-    // step, so a bare "DSD64" decoder line was just a confusing duplicate.
-    if !is_dsd {
-        let mut decodeur = json!({
-            "name": "Decoder",
-            "description": format_name,
-            "bit_perfect": is_lossless,
-        });
-        marquer_codec_inconnu(&mut decodeur);
-        steps.push(decodeur);
-    }
     // #6221 — un DSDIFF DST servi en DSD natif : le DST est DÉCOMPRESSÉ (sans
     // perte) et remis en DSF à la volée. C'est la seule opération sur le
     // flux ; aucune étape de conversion PCM n'existe, et le fil (DSF, DSD
@@ -1213,6 +1214,31 @@ fn assembler_les_etapes(
         // FLAC. Sans cette ligne, le panneau annonçait un passthrough qui
         // n'avait pas lieu, et le seul témoin était une ligne de journal.
         || flac_ffmpeg_vers_le_reseau;
+    // Decoder step. Skipped for DSD: the Source already reads e.g.
+    // "DSD64 2.8 MHz" and the DSD→PCM/FLAC conversion is shown by the Transcoder
+    // step, so a bare "DSD64" decoder line was just a confusing duplicate.
+    //
+    // #6178 (kiran, fil 2233) — sauté aussi quand c'est la SORTIE qui décode :
+    // une zone HQPlayer (ou Diretta, ou un greffon pull) va chercher nos
+    // octets tels quels. Une étape « FLAC » entre la source et HQPlayer
+    // faisait lire « Tune décode avant HQPlayer, comme Roon ». Dès que Tune
+    // touche le signal (transcodage, DSP), il décode bel et bien, et l'étape
+    // revient.
+    let decode_par_la_sortie = la_sortie_decode_elle_meme(output_type)
+        && !transcode_active
+        && !dsp_applique
+        && replaygain_step.is_none();
+    if !is_dsd && !decode_par_la_sortie {
+        let mut decodeur = json!({
+            "name": "Decoder",
+            "description": format_name,
+            "bit_perfect": is_lossless,
+        });
+        marquer_codec_inconnu(&mut decodeur);
+        // Juste après la source, comme avant : seule l'étape DST ci-dessus
+        // a pu s'intercaler.
+        steps.insert(1, decodeur);
+    }
     if transcode_active {
         // OAAT lossless PCM → WAV preserves all audio data, but DSD → WAV is a
         // lossy domain conversion (see the "oaat" transport arm above). A DLNA
