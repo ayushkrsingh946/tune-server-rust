@@ -1367,7 +1367,9 @@ impl PlaybackOrchestrator {
                 file_size: resolved.file_size,
                 file_path: local_file_path.as_deref(),
                 sample_rate: resolved.sample_rate,
-                bit_depth: resolved.bit_depth,
+                // #6334 — la profondeur du FIL, pas celle de la source : un
+                // AAC décodé en WAV part bien en 16 bits.
+                bit_depth: profondeur_du_fil(&resolved),
                 channels: resolved.channels,
                 // Internet radio is an infinite live stream — mark it so the
                 // DLNA DIDL advertises live/senderPaced semantics instead of a

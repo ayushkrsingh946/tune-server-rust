@@ -1427,7 +1427,9 @@ pub struct ResolvedStream {
     pub file_size: Option<u64>,
     /// Audio sample rate in Hz for the output stream (e.g. 176400 for DSD64->PCM).
     pub sample_rate: Option<u32>,
-    /// Output bit depth (e.g. 24 for DSD->PCM).
+    /// Output bit depth (e.g. 24 for DSD->PCM). #6334 — `None` for a lossy
+    /// service codec, even decoded to WAV: this is what the SOURCE announces.
+    /// What reaches an output's `PlayMedia` is `profondeur_du_fil`.
     pub bit_depth: Option<u32>,
     /// Number of audio channels.
     pub channels: Option<u32>,
@@ -1888,7 +1890,7 @@ mod bandcamp_resignature;
 mod qualite_pre_armee;
 pub(crate) use qualite_pre_armee::{
     QualitePreArmee, debit_annonce_par_le_service, format_du_mime, format_livre_par_le_service,
-    format_nomme_par_la_source, profondeur_annoncee_par_le_service,
+    format_nomme_par_la_source, profondeur_annoncee_par_le_service, profondeur_du_fil,
 };
 
 /// Ce qu'on ANNONCE au renderer pour une piste de serveur média : le MIME ne

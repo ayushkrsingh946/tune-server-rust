@@ -84,6 +84,48 @@ pub(crate) fn profondeur_annoncee_par_le_service(
     (!qualite.avec_perte() && profondeur > 0).then_some(u32::from(profondeur))
 }
 
+/// #6334 — la profondeur qui part SUR LE FIL, pour `PlayMedia` : le DIDL
+/// (`<res bitsPerSample>`) et l'annonce SlimProto décrivent le flux servi, pas
+/// la source. `ResolvedStream.bit_depth` ne porte rien pour un codec avec
+/// perte (l'annonce de la SOURCE) ; décodé pour la sortie en WAV ou FLAC, ce
+/// flux a pourtant une profondeur : celle que les bras réseau (canal AAC,
+/// OAAT, DASH) tirent d'une profondeur nulle, `cap_output_bit_depth(0)`, soit
+/// 16 bits. La sortie locale reçoit, elle, un WAV 32 bits dont elle lit
+/// l'en-tête : comme pour une source sans perte, l'annonce n'y décide de rien.
+/// Relayé tel quel (`audio/mp4`), le flux n'a toujours aucune profondeur.
+pub(crate) fn profondeur_du_fil(resolved: &ResolvedStream) -> Option<u32> {
+    use crate::audio::formats::AudioFormat;
+    if resolved.bit_depth.is_some() {
+        return resolved.bit_depth;
+    }
+    let source_avec_perte = resolved.format_source.as_deref().is_some_and(|codec| {
+        matches!(
+            AudioFormat::from_extension(codec),
+            Some(AudioFormat::Aac | AudioFormat::Mp3 | AudioFormat::Ogg | AudioFormat::Opus)
+        )
+    });
+    let mime = resolved
+        .mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let decode_pour_la_sortie = matches!(
+        mime.as_str(),
+        "audio/wav"
+            | "audio/x-wav"
+            | "audio/wave"
+            | "audio/flac"
+            | "audio/x-flac"
+            | "audio/aiff"
+            | "audio/x-aiff"
+    ) || mime.starts_with("audio/l16")
+        || mime.starts_with("audio/l24");
+    (source_avec_perte && decode_pour_la_sortie)
+        .then(|| u32::from(super::regles::cap_output_bit_depth(0)))
+}
+
 /// #6334 — le débit à annoncer, en kbit/s : celui que le service nomme pour
 /// un codec avec perte (l'AAC 320 de Tidal `HIGH`). Rien pour un sans-perte :
 /// le chemin du signal ne l'afficherait pas, et un chiffre calculé n'est pas
