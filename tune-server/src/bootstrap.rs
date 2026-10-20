@@ -568,6 +568,10 @@ pub async fn run_with(opts: RunOptions) {
         "glibc_seuil_mmap"
     );
 
+    // #6452 — les deux dernières étapes avant que le routeur ne serve ont
+    // leur nom : un démarrage resté sur la page d'attente ne laissait voir
+    // que « découverte réseau », qui n'était plus l'étape en cours.
+    crate::boot_status::set_phase("Spotify Connect");
     routes::spotify_connect::auto_start(&state).await;
 
     // Clone before `state` is moved into the router — used to auto-resume local
@@ -581,6 +585,7 @@ pub async fn run_with(opts: RunOptions) {
     // Cloné AVANT que le routeur ne consomme `state` : l'arrêt propre en a
     // besoin pour replier le WAL.
     let shutdown_state = state.clone();
+    crate::boot_status::set_phase("routes");
     let app = routes::router_with_plugins(state, plugin_routers);
 
     // Le routeur est prêt : le répondeur de démarrage rend la socket. `stop()`
