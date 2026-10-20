@@ -21,6 +21,9 @@ pub struct RelayState {
     pub billets: std::sync::Arc<crate::circle::Billets>,
     /// Octets, sessions et erreurs du pont (#6512). Voir `crate::trafic`.
     pub trafic: Arc<crate::trafic::Trafic>,
+    /// Sessions d'ecoute a distance ouvertes par laissez-passer (#6603).
+    /// Voir `crate::sessions`.
+    pub sessions: Arc<crate::sessions::Sessions>,
     pub max_servers: usize,
     pub max_clients_per_server: usize,
     pub max_streams_per_server: usize,
@@ -34,6 +37,7 @@ impl RelayState {
             licences: crate::licence::Licences::depuis_environnement(),
             billets: crate::circle::Billets::depuis_environnement(),
             trafic: crate::trafic::Trafic::nouveau(),
+            sessions: crate::sessions::Sessions::depuis_environnement(),
             max_servers: 100,
             max_clients_per_server: 10,
             max_streams_per_server: 5,
@@ -55,26 +59,37 @@ impl RelayState {
     /// - A *new* `server_id` may not claim a token already bound to a different
     ///   server, and is subject to the `max_servers` cap.
     ///
-    /// Residual (needs JP's bridge design): a stranger can still *squat* an
-    /// offline `server_id` (denial of service, not data hijack — clients
-    /// authenticate with the real token, which the squatter lacks). Closing
-    /// that requires authenticating the registrant itself (per-server signed
-    /// challenge or a pre-shared bridge secret).
+    /// A server that registers with its own key (#6603) proves it by signing
+    /// the relay's challenge (`ws_server`); `cle_serveur` is that proven key.
+    /// A live `server_id` registered WITH a key is replaced only by a
+    /// registrant proving the same key — the bridge token alone no longer
+    /// suffices. When the site knows a key for a `server_id`, `ws_server`
+    /// refuses any registrant that does not prove it.
     pub fn register_server(
         &self,
         server_id: String,
         server_name: String,
         bridge_token: String,
+        cle_serveur: Option<String>,
         ws_tx: mpsc::Sender<String>,
     ) -> Result<(), &'static str> {
         // Reads clone out of the map (no guard held across the later inserts,
         // which on the same DashMap would deadlock).
-        let already_live = self.servers.contains_key(&server_id);
+        let cle_en_place = self.servers.get(&server_id).map(|c| c.cle_serveur.clone());
         let token_owner = self.server_for_token(&bridge_token);
 
-        if already_live {
-            if token_owner.as_deref() != Some(server_id.as_str()) {
-                return Err("server_id already registered");
+        if let Some(cle_en_place) = cle_en_place {
+            match cle_en_place {
+                Some(k) => {
+                    if cle_serveur.as_deref() != Some(k.as_str()) {
+                        return Err("server_id already registered");
+                    }
+                }
+                None => {
+                    if token_owner.as_deref() != Some(server_id.as_str()) {
+                        return Err("server_id already registered");
+                    }
+                }
             }
         } else {
             if let Some(owner) = &token_owner
@@ -93,6 +108,7 @@ impl RelayState {
             server_id.clone(),
             ServerConnection {
                 trafic,
+                cle_serveur,
                 server_id,
                 server_name,
                 ws_tx,
@@ -116,12 +132,41 @@ impl RelayState {
     pub fn server_for_token(&self, token: &str) -> Option<String> {
         self.tokens.get(token).map(|v| v.clone())
     }
+
+    /// Qui presente ce jeton pour ce serveur ?
+    ///
+    /// Un jeton de session d'abord (#6603) ; a defaut, l'ancien jeton du
+    /// pont, tant que le chemin herite est ouvert. Tout le reste est refuse,
+    /// avec un code que l'app sait lire.
+    pub fn autoriser(
+        &self,
+        jeton: Option<&str>,
+        server_id: &str,
+    ) -> Result<crate::sessions::Acces, crate::sessions::Rejet> {
+        let Some(jeton) = jeton.filter(|j| !j.is_empty()) else {
+            return Err(crate::sessions::Rejet::non_autorise());
+        };
+        if let Some(s) = self.sessions.chercher(jeton, server_id)? {
+            return Ok(crate::sessions::Acces::Session(s));
+        }
+        if self.server_for_token(jeton).as_deref() == Some(server_id) {
+            if !self.sessions.jeton_herite_ouvert() {
+                return Err(crate::sessions::Rejet::nouveau(401, "lien_obsolete"));
+            }
+            self.sessions.noter_herite(server_id);
+            return Ok(crate::sessions::Acces::Herite);
+        }
+        Err(crate::sessions::Rejet::non_autorise())
+    }
 }
 
 pub struct ServerConnection {
     pub server_id: String,
     pub server_name: String,
     pub ws_tx: mpsc::Sender<String>,
+    /// Cle publique Ed25519 que le serveur a prouvee en s'enregistrant
+    /// (#6603), s'il en a une.
+    pub cle_serveur: Option<String>,
     /// Les compteurs de trafic de ce serveur (#6512), pris une fois ici pour
     /// que le chemin chaud n'ait pas a les chercher.
     pub trafic: Arc<crate::trafic::CompteursServeur>,
@@ -208,6 +253,7 @@ mod tests {
                 None,
             )),
             trafic: crate::trafic::Trafic::nouveau(),
+            sessions: crate::sessions::Sessions::depuis_environnement(),
             max_servers,
             max_clients_per_server: 10,
             max_streams_per_server: 5,
@@ -219,6 +265,7 @@ mod tests {
             server_id.to_string(),
             "name".to_string(),
             token.to_string(),
+            None,
             dummy_tx(),
         )
     }

@@ -578,6 +578,17 @@ impl CleServeur {
     }
 }
 
+/// Un jeton aléatoire de 256 bits, base64url : jeton de session, défi.
+///
+/// `None` si le générateur du système fait défaut — l'appelant refuse alors
+/// d'ouvrir quoi que ce soit plutôt que de tirer un jeton faible.
+pub fn jeton_aleatoire() -> Option<String> {
+    use ring::rand::SecureRandom;
+    let mut octets = [0u8; 32];
+    ring::rand::SystemRandom::new().fill(&mut octets).ok()?;
+    Some(URL_SAFE_NO_PAD.encode(octets))
+}
+
 /// Décodage base64url STRICT : sans remplissage, sans bits de fin, sans
 /// caractère hors alphabet.
 pub fn b64url(texte: &str) -> Option<Vec<u8>> {

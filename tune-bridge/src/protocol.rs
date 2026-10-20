@@ -13,6 +13,11 @@ pub struct RelayRegister {
     pub server_name: String,
     pub version: String,
     pub bridge_token: String,
+    /// Cle publique Ed25519 du serveur, base64url (#6603). Le relais lui
+    /// fait alors signer un defi (`relay.challenge`) avant de l'enregistrer.
+    /// Absente chez un serveur anterieur.
+    #[serde(default)]
+    pub server_pk: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +62,12 @@ pub struct RelayRegistered {
     pub msg_type: &'static str,
     pub ok: bool,
     pub server_id: String,
+    /// L'ancien lien d'acces est-il encore accepte par ce relais (#6603) ?
+    /// Le serveur l'affiche dans ses Reglages, et cesse de le proposer quand
+    /// il ne l'est plus.
+    pub jeton_herite: bool,
+    /// Ce relais ouvre des sessions par laissez-passer.
+    pub laissez_passer: bool,
 }
 
 #[derive(Debug, Serialize)]

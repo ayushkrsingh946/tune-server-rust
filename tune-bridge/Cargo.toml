@@ -25,6 +25,15 @@ bytes = { workspace = true }
 dashmap = "6"
 reqwest = { workspace = true }
 dotenvy = { workspace = true }
+async-trait = { workspace = true }
+# Laissez-passer d'ecoute a distance (#6603) : la meme regle de verification
+# que le serveur, sans dependre de tune-core.
+tune-laissez-passer = { path = "../tune-laissez-passer" }
 
 [dev-dependencies]
 tempfile = "3"
+# Le faux site des tests signe avec les cles de test des vecteurs.
+tune-laissez-passer = { path = "../tune-laissez-passer", features = ["fabrique"] }
+# Un vrai client WebSocket pour verifier la fermeture d'une session coupee.
+# Deja dans Cargo.lock (tune-core, `cloud-relay`) : aucune caisse nouvelle.
+tokio-tungstenite = "0.26"
