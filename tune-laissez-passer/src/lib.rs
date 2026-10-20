@@ -66,6 +66,8 @@ pub const RACINE_EMBARQUEE: &str = "";
 pub const DOMAINE_DEFI_SESSION: &str = "tune-remote/session/v1";
 /// Préfixe du message que le serveur signe pour s'enregistrer sur le relais.
 pub const DOMAINE_DEFI_SERVEUR: &str = "tune-remote/serveur/v1";
+/// Préfixe du message que le serveur signe pour inscrire sa clé sur le compte.
+pub const DOMAINE_INSCRIPTION_SERVEUR: &str = "tune-remote/inscription/v1";
 
 /// Pourquoi un laissez-passer, un défi ou un jeu de clés est refusé.
 ///
@@ -528,6 +530,34 @@ pub fn verifier_defi_serveur(
         octets,
     };
     if cle.verifie(&message_defi_serveur(server_id, defi), signature) {
+        Ok(())
+    } else {
+        Err(Refus::Defi)
+    }
+}
+
+/// Le message que le serveur signe pour inscrire sa clé publique sur le
+/// compte : `tune-remote/inscription/v1 \n server_id \n clé publique`. Le
+/// site prouve ainsi que le serveur détient la clé qu'il inscrit.
+pub fn message_inscription_serveur(server_id: &str, cle_publique: &str) -> Vec<u8> {
+    format!("{DOMAINE_INSCRIPTION_SERVEUR}\n{server_id}\n{cle_publique}").into_bytes()
+}
+
+/// Vérifie la preuve d'une inscription de clé de serveur.
+pub fn verifier_inscription_serveur(
+    cle_serveur: &str,
+    server_id: &str,
+    preuve: &str,
+) -> Result<(), Refus> {
+    let octets = b64url(cle_serveur).ok_or(Refus::CleAppareil)?;
+    if octets.len() != 32 {
+        return Err(Refus::CleAppareil);
+    }
+    let cle = CleAppareil {
+        alg: AlgCle::Ed25519,
+        octets,
+    };
+    if cle.verifie(&message_inscription_serveur(server_id, cle_serveur), preuve) {
         Ok(())
     } else {
         Err(Refus::Defi)

@@ -26,6 +26,10 @@ pub struct RelayClient {
     /// (Tune Circle T4, #5327). `None` : aucune écoute de contact n'est
     /// servie — une absence ne vaut jamais une autorisation.
     reglages: Option<Arc<dyn DbBackend>>,
+    /// Clé Ed25519 du serveur (#6603) : annoncée dans `relay.register`, elle
+    /// signe le défi du relais. `None` : enregistrement par le seul jeton du
+    /// pont, comme un serveur antérieur.
+    cle: Option<Arc<tune_laissez_passer::CleServeur>>,
 }
 
 impl RelayClient {
@@ -50,7 +54,14 @@ impl RelayClient {
             http_client,
             http_flux,
             reglages: None,
+            cle: None,
         }
+    }
+
+    /// Donne au client la clé du serveur (#6603).
+    pub fn avec_cle(mut self, cle: tune_laissez_passer::CleServeur) -> Self {
+        self.cle = Some(Arc::new(cle));
+        self
     }
 
     /// Donne au client la base des réglages : sans elle, il refuse toute
@@ -111,37 +122,7 @@ impl RelayClient {
 
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-        // Send relay.register
-        let register = serde_json::json!({
-            "type": "relay.register",
-            "server_id": self.server_id,
-            "server_name": hostname(),
-            "version": crate::version(),
-            "bridge_token": self.bridge_token,
-        });
-        ws_tx
-            .send(tungstenite::Message::Text(register.to_string().into()))
-            .await
-            .map_err(|e| format!("ws send register: {e}"))?;
-
-        // Wait for relay.registered
-        let ack = ws_rx
-            .next()
-            .await
-            .ok_or("connection closed before ack")?
-            .map_err(|e| format!("ws read ack: {e}"))?;
-
-        if let tungstenite::Message::Text(text) = ack {
-            let v: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| format!("parse ack: {e}"))?;
-            if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
-                let err = v
-                    .get("error")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("rejected");
-                return Err(format!("relay rejected: {err}"));
-            }
-        }
+        self.poignee_de_main(&mut ws_tx, &mut ws_rx).await?;
 
         info!(server_id = %self.server_id, "registered with relay");
         self.connected.store(true, Ordering::Relaxed);
@@ -182,6 +163,88 @@ impl RelayClient {
 
         writer_handle.abort();
         Ok(())
+    }
+
+    /// `relay.register`, puis l'accusé du relais.
+    ///
+    /// Le serveur annonce sa clé publique (`server_pk`, #6603). Le relais lui
+    /// tend alors un défi (`relay.challenge`) : le serveur le signe avec sa
+    /// clé et répond `relay.challenge_response`. Vient ensuite
+    /// `relay.registered`, qui dit aussi si l'ancien lien d'accès est encore
+    /// accepté (`jeton_herite`) : le serveur le note pour ses Réglages.
+    pub(crate) async fn poignee_de_main<Tx, Rx, E>(
+        &self,
+        ws_tx: &mut Tx,
+        ws_rx: &mut Rx,
+    ) -> Result<(), String>
+    where
+        Tx: futures_util::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+        Tx::Error: std::fmt::Display,
+        Rx: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, E>> + Unpin,
+        E: std::fmt::Display,
+    {
+        use tokio_tungstenite::tungstenite;
+
+        let register = serde_json::json!({
+            "type": "relay.register",
+            "server_id": self.server_id,
+            "server_name": hostname(),
+            "version": crate::version(),
+            "bridge_token": self.bridge_token,
+            "server_pk": self.cle.as_ref().map(|c| c.cle_publique()),
+        });
+        ws_tx
+            .send(tungstenite::Message::Text(register.to_string().into()))
+            .await
+            .map_err(|e| format!("ws send register: {e}"))?;
+
+        // Un défi au plus, puis l'accusé. Au-delà, le relais ne suit pas le
+        // protocole : on abandonne plutôt que de signer en boucle.
+        for _ in 0..2 {
+            let message = ws_rx
+                .next()
+                .await
+                .ok_or("connection closed before ack")?
+                .map_err(|e| format!("ws read ack: {e}"))?;
+            let tungstenite::Message::Text(text) = message else {
+                return Ok(());
+            };
+            let v: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| format!("parse ack: {e}"))?;
+            if v.get("type").and_then(|t| t.as_str()) == Some("relay.challenge") {
+                let Some(cle) = &self.cle else {
+                    return Err("relay challenge without server key".into());
+                };
+                let defi = v.get("defi").and_then(|d| d.as_str()).unwrap_or_default();
+                let reponse = serde_json::json!({
+                    "type": "relay.challenge_response",
+                    "signature": cle.signer_defi(&self.server_id, defi),
+                });
+                ws_tx
+                    .send(tungstenite::Message::Text(reponse.to_string().into()))
+                    .await
+                    .map_err(|e| format!("ws send challenge response: {e}"))?;
+                continue;
+            }
+            if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+                let err = v
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("rejected");
+                return Err(format!("relay rejected: {err}"));
+            }
+            if let (Some(accepte), Some(backend)) = (
+                v.get("jeton_herite").and_then(|j| j.as_bool()),
+                self.reglages.as_ref(),
+            ) {
+                let _ = SettingsRepo::with_backend(backend.clone()).set(
+                    crate::cloud::cle_serveur::LIEN_HERITE_ACCEPTE,
+                    if accepte { "true" } else { "false" },
+                );
+            }
+            return Ok(());
+        }
+        Err("relay: no ack after challenge".into())
     }
 
     async fn handle_message(&self, text: &str) {
@@ -929,9 +992,16 @@ pub fn spawn_relay_client(
 
     let server_id = crate::cloud::telemetry::TelemetryReporter::get_or_create_server_id(settings);
 
-    let client = Arc::new(
-        RelayClient::new(server_id, bridge_token, relay_url, local_port).avec_reglages(backend),
-    );
+    // Clé du serveur (#6603), créée au premier démarrage avec le pont activé
+    // et rangée dans le coffre. Sans elle, le client s'enregistre comme un
+    // serveur antérieur : le dire, sans rien bloquer.
+    let mut client = RelayClient::new(server_id, bridge_token, relay_url, local_port)
+        .avec_reglages(backend.clone());
+    match crate::cloud::cle_serveur::cle_du_serveur(&backend) {
+        Ok(cle) => client = client.avec_cle(cle),
+        Err(e) => warn!(erreur = %e, "ecoute_distante_cle_serveur_indisponible"),
+    }
+    let client = Arc::new(client);
     client.clone().spawn();
     Some(client)
 }
@@ -1643,5 +1713,120 @@ mod patience_du_flux_tests {
         assert_eq!(octets_du_flux(&mut rx).await, morceau(0));
         let ecoule = debut.elapsed();
         assert!(ecoule >= COURT, "lâché trop tôt : {ecoule:?}");
+    }
+}
+
+/// #6603 — `relay.register` porte la clé du serveur, le défi du relais est
+/// signé par elle, et l'accusé dit si l'ancien lien d'accès vaut encore.
+#[cfg(test)]
+mod poignee_de_main_6603_tests {
+    use super::*;
+    use crate::db::migrations;
+    use crate::db::sqlite::SqliteDb;
+    use tokio_tungstenite::tungstenite::Message;
+
+    fn base() -> Arc<dyn DbBackend> {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        migrations::run_migrations(&db).unwrap();
+        Arc::new(db)
+    }
+
+    fn client(
+        backend: &Arc<dyn DbBackend>,
+        cle: Option<tune_laissez_passer::CleServeur>,
+    ) -> RelayClient {
+        let c = RelayClient::new(
+            "srv-1".into(),
+            "jeton".into(),
+            "ws://relais.invalide".into(),
+            0,
+        )
+        .avec_reglages(backend.clone());
+        match cle {
+            Some(k) => c.avec_cle(k),
+            None => c,
+        }
+    }
+
+    fn texte(v: serde_json::Value) -> Result<Message, std::convert::Infallible> {
+        Ok(Message::Text(v.to_string().into()))
+    }
+
+    fn envoyes(tx: &[Message]) -> Vec<serde_json::Value> {
+        tx.iter()
+            .map(|m| match m {
+                Message::Text(t) => serde_json::from_str(t).unwrap(),
+                autre => panic!("trame inattendue : {autre:?}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn le_defi_du_relais_est_signe_par_la_cle_annoncee() {
+        let backend = base();
+        let graine = [7u8; 32];
+        let cle = tune_laissez_passer::CleServeur::depuis_graine(&graine).unwrap();
+        let pk = cle.cle_publique();
+        let c = client(&backend, Some(cle));
+        let mut tx: Vec<Message> = Vec::new();
+        let mut rx = futures_util::stream::iter(vec![
+            texte(serde_json::json!({"type": "relay.challenge", "defi": "d-123"})),
+            texte(serde_json::json!({"type": "relay.registered", "ok": true,
+                                     "server_id": "srv-1", "jeton_herite": false})),
+        ]);
+        c.poignee_de_main(&mut tx, &mut rx).await.unwrap();
+
+        let trames = envoyes(&tx);
+        assert_eq!(trames[0]["type"], "relay.register");
+        assert_eq!(trames[0]["server_pk"], pk.as_str());
+        assert_eq!(trames[0]["bridge_token"], "jeton");
+        assert_eq!(trames[1]["type"], "relay.challenge_response");
+        let signature = trames[1]["signature"].as_str().unwrap();
+        assert_eq!(
+            tune_laissez_passer::verifier_defi_serveur(&pk, "srv-1", "d-123", signature),
+            Ok(())
+        );
+        // L'accusé a dit que l'ancien lien n'est plus accepté.
+        let reglages = SettingsRepo::with_backend(backend.clone());
+        assert!(crate::cloud::cle_serveur::lien_herite_coupe(&reglages));
+    }
+
+    #[tokio::test]
+    async fn sans_cle_le_serveur_s_enregistre_comme_avant_et_refuse_un_defi() {
+        let backend = base();
+        let c = client(&backend, None);
+        let mut tx: Vec<Message> = Vec::new();
+        let mut rx = futures_util::stream::iter(vec![texte(
+            serde_json::json!({"type": "relay.registered", "ok": true, "server_id": "srv-1"}),
+        )]);
+        c.poignee_de_main(&mut tx, &mut rx).await.unwrap();
+        assert!(envoyes(&tx)[0]["server_pk"].is_null());
+        // Un relais antérieur ne dit rien de l'ancien lien : rien n'est coupé.
+        let reglages = SettingsRepo::with_backend(backend.clone());
+        assert!(!crate::cloud::cle_serveur::lien_herite_coupe(&reglages));
+
+        let mut tx: Vec<Message> = Vec::new();
+        let mut rx = futures_util::stream::iter(vec![texte(
+            serde_json::json!({"type": "relay.challenge", "defi": "d"}),
+        )]);
+        assert!(c.poignee_de_main(&mut tx, &mut rx).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn un_refus_du_relais_remonte_son_motif() {
+        let backend = base();
+        let c = client(
+            &backend,
+            Some(tune_laissez_passer::CleServeur::depuis_graine(&[8u8; 32]).unwrap()),
+        );
+        let mut tx: Vec<Message> = Vec::new();
+        let mut rx = futures_util::stream::iter(vec![
+            texte(serde_json::json!({"type": "relay.challenge", "defi": "d"})),
+            texte(serde_json::json!({"type": "relay.registered", "ok": false,
+                                     "error": "cle du serveur requise"})),
+        ]);
+        let e = c.poignee_de_main(&mut tx, &mut rx).await.unwrap_err();
+        assert!(e.contains("cle du serveur requise"), "{e}");
     }
 }

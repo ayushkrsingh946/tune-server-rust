@@ -1,4 +1,5 @@
 pub mod bio_sync;
+pub mod cle_serveur;
 pub mod community;
 pub mod community_sync;
 pub mod consent;

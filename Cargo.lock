@@ -5422,6 +5422,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tracing",
  "tracing-subscriber",
+ "tune-laissez-passer",
  "tune-output-api",
  "tune-plugin-audio-support",
  "tune-plugin-channel-remap",

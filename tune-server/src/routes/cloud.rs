@@ -372,6 +372,11 @@ async fn sso_callback(
             tune_core::cloud::library_sync::lier_depuis_les_reglages(&backend, &http_client)
                 .await
                 .ok();
+            // Clé du serveur (#6603) : inscrite sur le compte une fois le
+            // serveur relié, si le pont l'a créée.
+            tune_core::cloud::cle_serveur::inscrire_depuis_les_reglages(&backend, &http_client)
+                .await
+                .ok();
         });
     }
 
@@ -1003,6 +1008,12 @@ async fn bridge_status(State(state): State<AppState>) -> Json<Value> {
         "server_id": server_id,
         "relay_url": bridge_url,
         "has_token": bridge_token.is_some(),
+        // Écoute à distance par compte (#6603) : l'écran « Accès à distance »
+        // explique le parcours ; l'ancien lien est obsolète, et coupé dès que
+        // le relais l'a dit.
+        "acces_par_compte": MESSAGE_ACCES_PAR_COMPTE,
+        "lien_obsolete": true,
+        "lien_herite_coupe": tune_core::cloud::cle_serveur::lien_herite_coupe(&settings),
         "access_url": if enabled {
             Some(format!("https://bridge.mozaiklabs.fr/{server_id}/"))
         } else {
@@ -1010,6 +1021,10 @@ async fn bridge_status(State(state): State<AppState>) -> Json<Value> {
         },
     }))
 }
+
+/// Ce que les Réglages disent à la place du lien d'accès (#6603).
+pub const MESSAGE_ACCES_PAR_COMPTE: &str =
+    "Ouvrez Tune Remote et connectez-vous à votre compte mozaiklabs";
 
 /// Lien d'accès à distance, jeton compris, pour le PROPRIÉTAIRE seulement.
 ///
@@ -1052,6 +1067,19 @@ async fn bridge_access_link(
         )
             .into_response();
     };
+    // #6603 — l'écoute à distance passe par le compte mozaiklabs. Pendant la
+    // coexistence, l'ancien lien reste servi, marqué obsolète ; une fois que
+    // le relais a dit qu'il ne l'accepte plus, il n'existe plus : 410.
+    if tune_core::cloud::cle_serveur::lien_herite_coupe(&settings) {
+        return (
+            StatusCode::GONE,
+            Json(json!({
+                "error": "lien_obsolete",
+                "message": MESSAGE_ACCES_PAR_COMPTE,
+            })),
+        )
+            .into_response();
+    }
     let server_id = TelemetryReporter::get_or_create_server_id(&settings);
     let access_url = format!("https://bridge.mozaiklabs.fr/{server_id}/");
     let link = format!("{access_url}#token={token}");
@@ -1061,6 +1089,8 @@ async fn bridge_access_link(
             "server_id": server_id,
             "access_url": access_url,
             "link": link,
+            "obsolete": true,
+            "message": MESSAGE_ACCES_PAR_COMPTE,
         })),
     )
         .into_response()
@@ -1092,14 +1122,18 @@ async fn bridge_enable(State(state): State<AppState>) -> impl IntoResponse {
     let server_id = TelemetryReporter::get_or_create_server_id(&settings);
     info!(server_id = %server_id, "bridge enabled");
 
-    Json(json!({
+    let mut reponse = json!({
         "enabled": true,
         "server_id": server_id,
-        "bridge_token": token,
         "access_url": format!("https://bridge.mozaiklabs.fr/{server_id}/"),
         "note": "restart server to activate the relay connection"
-    }))
-    .into_response()
+    });
+    // #6603 — le jeton du pont ne sert plus qu'à l'ancien lien. Une fois ce
+    // lien coupé par le relais, il n'a plus à sortir d'ici.
+    if !tune_core::cloud::cle_serveur::lien_herite_coupe(&settings) {
+        reponse["bridge_token"] = json!(token);
+    }
+    Json(reponse).into_response()
 }
 
 async fn bridge_disable(State(state): State<AppState>) -> Json<Value> {
