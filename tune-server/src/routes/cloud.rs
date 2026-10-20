@@ -34,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/bridge/access-link", get(bridge_access_link))
         .route("/bridge/enable", post(bridge_enable))
         .route("/bridge/disable", post(bridge_disable))
+        .route("/bridge/rotate-token", post(bridge_rotate_token))
         .route("/license/status", get(license_status))
         .route("/license/activate", post(license_activate))
         .route("/license/deactivate", post(license_deactivate))
@@ -1024,16 +1025,7 @@ async fn bridge_access_link(
     State(state): State<AppState>,
 ) -> axum::response::Response {
     let settings = SettingsRepo::with_backend(state.backend.clone());
-    let enabled = settings
-        .get("bridge_enabled")
-        .ok()
-        .flatten()
-        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
-        .unwrap_or(false)
-        || std::env::var("TUNE_BRIDGE_ENABLED")
-            .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
-            .unwrap_or(false);
-    if !enabled {
+    if !pont_active(&settings) {
         return (
             StatusCode::CONFLICT,
             Json(json!({"error": "bridge_disabled"})),
@@ -1052,7 +1044,26 @@ async fn bridge_access_link(
         )
             .into_response();
     };
-    let server_id = TelemetryReporter::get_or_create_server_id(&settings);
+    reponse_lien_d_acces(&settings, &token)
+}
+
+/// Le pont est-il activé (réglage `bridge_enabled`, ou `TUNE_BRIDGE_ENABLED`) ?
+fn pont_active(settings: &SettingsRepo) -> bool {
+    settings
+        .get("bridge_enabled")
+        .ok()
+        .flatten()
+        .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false)
+        || std::env::var("TUNE_BRIDGE_ENABLED")
+            .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
+            .unwrap_or(false)
+}
+
+/// La réponse porteuse du lien d'accès (`…/{server_id}/#token=…`), commune à
+/// `bridge_access_link` et à `bridge_rotate_token`. Jamais mise en cache.
+fn reponse_lien_d_acces(settings: &SettingsRepo, token: &str) -> axum::response::Response {
+    let server_id = TelemetryReporter::get_or_create_server_id(settings);
     let access_url = format!("https://bridge.mozaiklabs.fr/{server_id}/");
     let link = format!("{access_url}#token={token}");
     (
@@ -1066,7 +1077,54 @@ async fn bridge_access_link(
         .into_response()
 }
 
-async fn bridge_enable(State(state): State<AppState>) -> impl IntoResponse {
+/// Renouvelle le lien d'accès à distance : nouveau jeton de pont, et le
+/// relais oublie l'ancien.
+///
+/// Administrateur seulement dès que l'authentification est active, 409 tant
+/// que le pont est éteint (comme `bridge_access_link`). Le nouveau jeton est
+/// enregistré, puis remis au client du relais s'il tourne : la session
+/// ouverte avec l'ancien se referme et se réinscrit avec le nouveau
+/// (`RelayClient::renouveler_jeton`). Le relais oublie les jetons d'un serveur
+/// dont la connexion se ferme : l'ancien lien, ses QR codes et les apps
+/// appairées avec lui cessent d'ouvrir quoi que ce soit.
+///
+/// Réponse : le nouveau lien, de la forme de `bridge_access_link`.
+async fn bridge_rotate_token(
+    _admin: crate::auth::RequireAdmin,
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    let settings = SettingsRepo::with_backend(state.backend.clone());
+    if !pont_active(&settings) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "bridge_disabled"})),
+        )
+            .into_response();
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = settings.set("bridge_token", &token) {
+        warn!(error = %e, "bridge token renewal not saved");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "bridge_token_not_saved"})),
+        )
+            .into_response();
+    }
+    #[cfg(feature = "cloud-relay")]
+    if let Some(client) = state.relay_client.get() {
+        client.renouveler_jeton(token.clone());
+    }
+    // Jamais le jeton dans le journal.
+    info!("bridge token renewed");
+    reponse_lien_d_acces(&settings, &token)
+}
+
+/// Active le pont. Administrateur seulement dès que l'authentification est
+/// active : la réponse porte le jeton de pont.
+async fn bridge_enable(
+    _admin: crate::auth::RequireAdmin,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
     // Premium gate: Cloud Relay requires Premium
     if let Err(resp) = crate::premium_guard::require_premium(
         &state.license,
@@ -1102,7 +1160,12 @@ async fn bridge_enable(State(state): State<AppState>) -> impl IntoResponse {
     .into_response()
 }
 
-async fn bridge_disable(State(state): State<AppState>) -> Json<Value> {
+/// Éteint le pont. Administrateur seulement dès que l'authentification est
+/// active.
+async fn bridge_disable(
+    _admin: crate::auth::RequireAdmin,
+    State(state): State<AppState>,
+) -> Json<Value> {
     let settings = SettingsRepo::with_backend(state.backend.clone());
     let _ = settings.set("bridge_enabled", "false");
     info!("bridge disabled");

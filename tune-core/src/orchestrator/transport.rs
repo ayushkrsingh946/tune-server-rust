@@ -2425,6 +2425,22 @@ impl PlaybackOrchestrator {
             Some(ref sid) => self.streamer.is_seekable_session(sid).await,
             None => false,
         };
+        // #6370 — une sortie d'agent vient de recevoir un flux DÉCODÉ qui
+        // commence à la position : elle doit le savoir pour rapporter la
+        // position dans la piste, et non depuis le début du flux neuf. C'est
+        // le contrat de `LocalOutput::seek` (« noter la position d'un flux
+        // relancé ») ; `SortieAgentTune::seek` le tient chez le maître.
+        if output_type == Some(TYPE_SORTIE_AGENT_TUNE)
+            && !session_is_range_seekable
+            && position_ms > 0
+        {
+            if let Some(output) = { self.outputs.lock().await.get(did) }
+                && let Err(e) = output.lock().await.seek(position_ms).await
+            {
+                warn!(zone_id, position_ms, error = %e, "agent_depart_du_flux_non_note");
+            }
+            return;
+        }
         if !replay_needs_output_seek(
             is_network_output_type(output_type),
             session_is_range_seekable,
@@ -3148,43 +3164,11 @@ impl PlaybackOrchestrator {
                     }
                     (RepriseDeSession::RetablirALaPosition, Some(did)) => {
                         info!(zone_id, position_ms, "resume_stream_session_restore");
-                        let req = requete_de_retablissement(zone_id, did.clone(), np, position_ms);
-                        // #4666 — encadrer la relecture par deux `seek`, comme
-                        // `replay_zone_at_position` et la recréation de flux du
-                        // seek. Sans eux, `play()` remet la position de zone à
-                        // zéro et efface `last_seek_at` : le sondeur, dont
-                        // l'état a été jeté pendant la pause, repart d'une
-                        // horloge à ZÉRO face à une sortie qui rend 2:19 — la
-                        // garde `stale_start_position` saute alors chaque tour
-                        // jusqu'à la fin de la piste, qui n'enchaîne jamais
-                        // (fil 1882), et l'écran reste à 0:00. Le `seek` d'après
-                        // pose l'instant que le repli « Fold a NEW seek » du
-                        // sondeur convertit en ancrage d'horloge.
-                        self.playback.seek(zone_id, position_ms as i64).await;
-                        // Même piste, même écoute : pas de seconde ligne
-                        // d'historique, exactement comme le re-play radio.
-                        match self.play_without_history(req).await {
-                            Ok(_) => {
-                                self.playback.seek(zone_id, position_ms as i64).await;
-                                // Fil 2095 (FabienM, Devialet en DLNA) : la
-                                // session rétablie est mandataire ou fichier,
-                                // servie depuis l'OCTET 0 — `seek_ms` n'y est
-                                // pas lu. Sans ce Seek, le renderer repartait à
-                                // 0:00 au lieu de 0:35. Même règle et même
-                                // chemin que la relecture (#2893) : seulement
-                                // sur une sortie réseau et une session
-                                // seekable, en tâche détachée, et un refus
-                                // (701) n'est que journalisé.
-                                let output_type = self.output_type_of(&did).await;
-                                self.seek_output_after_replay(
-                                    zone_id,
-                                    Some(&did),
-                                    output_type.as_deref(),
-                                    position_ms,
-                                )
-                                .await;
-                                return Ok(());
-                            }
+                        match self
+                            .retablir_a_la_position(zone_id, &did, np, position_ms)
+                            .await
+                        {
+                            Ok(()) => return Ok(()),
                             // Pas de repli silencieux : la sortie n'a plus rien à
                             // jouer, la reprendre ne ferait que rejouer le défaut.
                             Err(e) => {
@@ -3251,6 +3235,13 @@ impl PlaybackOrchestrator {
             .save_play_state(zone_id, "playing")
             .ok();
 
+        // #6612 — une reprise SUR PLACE d'un renderer réseau est retenue : si
+        // le renderer rouvre alors le flux par une plage hors fichier, le
+        // sondeur la fait reprendre par un nouveau flux, à CETTE position.
+        if matches!(output_type.as_deref(), Some("dlna" | "openhome")) {
+            self.noter_reprise_sur_place(zone_id, position_ms);
+        }
+
         // Legacy DLNA/OpenHome renderers (e.g. Cyrus Stream X) restart the stream
         // on Play-after-Pause instead of resuming. Seek back to the paused
         // position once the renderer has had a moment to (re)start, so playback
@@ -3275,6 +3266,49 @@ impl PlaybackOrchestrator {
             )
             .await;
         }
+        Ok(())
+    }
+
+    /// Rétablir la piste de `np` à `position_ms` par un NOUVEAU flux : le bras
+    /// « rétablir à la position » de `resume` (session morte, #2512 ;
+    /// périphérique rendu ; longue pause du DMP-A8, #6264), et la reprise
+    /// après une plage hors fichier (#6612).
+    pub(super) async fn retablir_a_la_position(
+        &self,
+        zone_id: i64,
+        did: &str,
+        np: &NowPlaying,
+        position_ms: u64,
+    ) -> Result<(), String> {
+        let req = requete_de_retablissement(zone_id, did.to_string(), np, position_ms);
+        // #4666 — encadrer la relecture par deux `seek`, comme
+        // `replay_zone_at_position` et la recréation de flux du
+        // seek. Sans eux, `play()` remet la position de zone à
+        // zéro et efface `last_seek_at` : le sondeur, dont
+        // l'état a été jeté pendant la pause, repart d'une
+        // horloge à ZÉRO face à une sortie qui rend 2:19 — la
+        // garde `stale_start_position` saute alors chaque tour
+        // jusqu'à la fin de la piste, qui n'enchaîne jamais
+        // (fil 1882), et l'écran reste à 0:00. Le `seek` d'après
+        // pose l'instant que le repli « Fold a NEW seek » du
+        // sondeur convertit en ancrage d'horloge.
+        self.playback.seek(zone_id, position_ms as i64).await;
+        // Même piste, même écoute : pas de seconde ligne
+        // d'historique, exactement comme le re-play radio.
+        self.play_without_history(req).await?;
+        self.playback.seek(zone_id, position_ms as i64).await;
+        // Fil 2095 (FabienM, Devialet en DLNA) : la
+        // session rétablie est mandataire ou fichier,
+        // servie depuis l'OCTET 0 — `seek_ms` n'y est
+        // pas lu. Sans ce Seek, le renderer repartait à
+        // 0:00 au lieu de 0:35. Même règle et même
+        // chemin que la relecture (#2893) : seulement
+        // sur une sortie réseau et une session
+        // seekable, en tâche détachée, et un refus
+        // (701) n'est que journalisé.
+        let output_type = self.output_type_of(did).await;
+        self.seek_output_after_replay(zone_id, Some(did), output_type.as_deref(), position_ms)
+            .await;
         Ok(())
     }
 
@@ -3739,6 +3773,12 @@ impl PlaybackOrchestrator {
             let is_local_output =
                 zone_output_type.as_deref() == Some("local") || zone_output_type.is_none();
             let is_oaat_output = zone_output_type.as_deref() == Some("oaat");
+            // #6370 — la sortie d'un agent Tune est une sortie LOCALE de
+            // l'agent : elle lit son flux d'un bout à l'autre et son `seek` ne
+            // fait que noter la position (`LocalOutput::seek`). Le maître
+            // relance donc le flux à la position, comme pour sa propre sortie
+            // locale ; les agents installés n'ont rien à changer.
+            let is_agent_tune_output = zone_output_type.as_deref() == Some(TYPE_SORTIE_AGENT_TUNE);
             let has_track = state.now_playing.is_some();
             // #6017 (Cyrille, fil 2194, Yamaha R-N2000A) — une piste de la
             // BIBLIOTHÈQUE convertie à la volée (AAC → WAV) est servie par un
@@ -3768,7 +3808,7 @@ impl PlaybackOrchestrator {
                     self.playback.seek(zone_id, original_position_ms).await;
                     return Err(OutputCommandError::failed(OutputCommand::Seek, e));
                 }
-            } else if (is_local_output || is_oaat_output) && has_track {
+            } else if (is_local_output || is_oaat_output || is_agent_tune_output) && has_track {
                 info!(zone_id, position_ms, "seek_local_output_recreating_stream");
                 match self
                     .replay_zone_at_position(zone_id, position_ms, "seek")

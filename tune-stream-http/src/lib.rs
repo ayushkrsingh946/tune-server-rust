@@ -1898,6 +1898,15 @@ async fn serve_file(
         .unwrap_or(DemandeDeRange::Totalite);
 
     if let DemandeDeRange::Insatisfiable = demande {
+        // #6612 — même trou que le mandataire : un renderer qui demande une
+        // plage au-delà de la fin reçoit un 416 et reste à l'arrêt. La session
+        // le note, pour que la zone reprenne par un nouveau flux. Lavf : rien
+        // ne change.
+        if !agent_lavf(req_headers)
+            && let Some(debut) = plage_au_dela_de_la_fin(range_header.as_deref(), Some(file_size))
+        {
+            signaler_plage_hors_fichier(&session, req_headers, debut, file_size, "fichier");
+        }
         warn!(
             stream_id = %session.id,
             range = range_header.as_deref().unwrap_or("-"),
@@ -2621,6 +2630,47 @@ where
     }
 }
 
+/// L'agent est-il un libavformat (`Lavf/…`) ? Voir `proxy_stream`.
+fn agent_lavf(req_headers: &HeaderMap) -> bool {
+    req_headers
+        .get("User-Agent")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ua| ua.to_ascii_lowercase().contains("lavf"))
+}
+
+/// #6612 — la plage `bytes=N-…` commence-t-elle au-delà de la fin d'un flux
+/// de longueur connue ? Rend `N`. Un suffixe `bytes=-n`, une longueur
+/// inconnue, ou un `N` qui tombe dans le fichier : `None`.
+fn plage_au_dela_de_la_fin(range: Option<&str>, longueur: Option<u64>) -> Option<u64> {
+    let debut = parse_range_start(range?)?;
+    let total = longueur?;
+    (debut >= total).then_some(debut)
+}
+
+/// #6612 — journalise la plage hors fichier (sans URL : l'amont est signé)
+/// et la note sur la session, que le sondeur relit.
+fn signaler_plage_hors_fichier(
+    session: &StreamSession,
+    req_headers: &HeaderMap,
+    debut: u64,
+    total: u64,
+    voie: &'static str,
+) {
+    let agent = req_headers
+        .get("User-Agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    warn!(
+        stream_id = %session.id,
+        debut,
+        total,
+        voie,
+        agent,
+        "plage_hors_fichier — 416 sans requête amont ; reprise par un nouveau flux demandée"
+    );
+    session.signaler_plage_hors_fichier();
+}
+
 /// Parse the start byte of an HTTP `Range` header value like `bytes=N-` or
 /// `bytes=N-M`. Returns `None` for an open `bytes=-N` (suffix) range or a
 /// malformed value.
@@ -3048,11 +3098,24 @@ async fn proxy_stream(
     // audio, rejects the stream, and loops re-reading the header (peak_pos=0,
     // stopped after 74s). So keep the 1 MiB threshold ONLY for Lavf; for every
     // other agent honour any non-zero `bytes=N-` by forwarding it (→ 206 from N).
-    let is_lavf = req_headers
-        .get("User-Agent")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ua| ua.to_ascii_lowercase().contains("lavf"));
+    let is_lavf = agent_lavf(req_headers);
     let resume_threshold = if is_lavf { RESUME_RANGE_THRESHOLD } else { 1 };
+    // #6612 — Yamaha R-N2000A (fil 2346) : après une pause, il rouvre avec
+    // `bytes=4294949906-` (2^32 − 17 390) pour un fichier de 75,7 Mo. La plage
+    // partait au CDN, qui disait 416, renvoyé tel quel : le renderer restait à
+    // l'arrêt, sans un son. Une plage qui commence au-delà de la longueur
+    // CONNUE ne désigne aucun octet : elle ne part plus au CDN. Le 416 est
+    // rendu ici, et la session le note : le sondeur fait reprendre la zone
+    // par un NOUVEAU flux, à la position mémorisée. Longueur inconnue, plage
+    // dans le fichier, radio ou Lavf : rien ne change.
+    if !is_radio
+        && !is_lavf
+        && let Some(total) = session.longueur_amont()
+        && let Some(debut) = plage_au_dela_de_la_fin(range_value.as_deref(), Some(total))
+    {
+        signaler_plage_hors_fichier(&session, req_headers, debut, total, "mandataire");
+        return reponse_416(total);
+    }
     // Un suffixe `bytes=-n` se transmet au CDN comme `bytes=(total-n)-` quand
     // une requête précédente de la session a appris la longueur ; sinon
     // l'amont part de 0 et la tranche est atteinte par saut local.

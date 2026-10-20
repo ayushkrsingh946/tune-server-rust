@@ -382,6 +382,13 @@ pub struct StreamSession {
     /// #5050 — nombre de `GET` relayés par cette session : borne le débit de
     /// la ligne de diagnostic `proxy_get_amont` (voir `diagnostic_mandataire_a_journaliser`).
     pub requetes_mandataire: std::sync::atomic::AtomicU32,
+    /// #6612 — quand un renderer a demandé une plage qui commence AU-DELÀ de
+    /// la longueur connue du flux (Yamaha R-N2000A, `bytes=4294949906-` pour
+    /// 75,7 Mo, à la reprise après une pause). En millisecondes depuis
+    /// `created_at`, plus un ; `0` = jamais. Posé par `tune-stream-http`, lu
+    /// par le sondeur, qui fait alors reprendre la zone par un NOUVEAU flux à
+    /// la position mémorisée (voir `PlaybackOrchestrator::reprendre_apres_plage_hors_fichier`).
+    plage_hors_fichier_a_ms: std::sync::atomic::AtomicU64,
     /// Comptabilité du ramasse-miettes — voir `cleanup_stale_sessions_with`.
     ///
     /// `bytes_sent` est monotone et alimenté par TOUS les chemins de sortie
@@ -613,6 +620,35 @@ impl StreamSession {
         }
     }
 
+    /// #6612 — un renderer vient de demander une plage hors du fichier.
+    pub fn signaler_plage_hors_fichier(&self) {
+        let ms = self.created_at.elapsed().as_millis() as u64;
+        self.plage_hors_fichier_a_ms
+            .store(ms.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// #6612 — depuis combien de temps la dernière plage hors fichier a été
+    /// demandée, si elle l'a été (et pas encore oubliée).
+    pub fn age_plage_hors_fichier(&self) -> Option<std::time::Duration> {
+        match self
+            .plage_hors_fichier_a_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            n => Some(
+                self.created_at
+                    .elapsed()
+                    .saturating_sub(std::time::Duration::from_millis(n - 1)),
+            ),
+        }
+    }
+
+    /// #6612 — la plage hors fichier a été traitée (ou n'appelle rien).
+    pub fn oublier_plage_hors_fichier(&self) {
+        self.plage_hors_fichier_a_ms
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn new(id: String, info: StreamInfo, bit_perfect: bool, buffer_size: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size);
         let keep_alive = tx.clone();
@@ -649,6 +685,7 @@ impl StreamSession {
             ranges_hors_trame: std::sync::atomic::AtomicU32::new(0),
             longueur_amont: std::sync::atomic::AtomicU64::new(0),
             requetes_mandataire: std::sync::atomic::AtomicU32::new(0),
+            plage_hors_fichier_a_ms: std::sync::atomic::AtomicU64::new(0),
             gc_seen_bytes: std::sync::atomic::AtomicU64::new(0),
             gc_active_at_ms: std::sync::atomic::AtomicU64::new(0),
             active_consumers: std::sync::atomic::AtomicU32::new(0),
@@ -1485,6 +1522,20 @@ impl AudioStreamer {
     /// (`outputs/local.rs`, `local_audio_http_fetch_failed`).
     pub async fn session_alive(&self, stream_id: &str) -> bool {
         self.sessions.lock().await.contains_key(stream_id)
+    }
+
+    /// #6612 — depuis combien de temps cette session a reçu une plage hors
+    /// fichier (voir [`StreamSession::age_plage_hors_fichier`]).
+    pub async fn age_plage_hors_fichier(&self, stream_id: &str) -> Option<std::time::Duration> {
+        let sessions = self.sessions.lock().await;
+        sessions.get(stream_id)?.age_plage_hors_fichier()
+    }
+
+    /// #6612 — oublie la plage hors fichier de cette session.
+    pub async fn oublier_plage_hors_fichier(&self, stream_id: &str) {
+        if let Some(s) = self.sessions.lock().await.get(stream_id) {
+            s.oublier_plage_hors_fichier();
+        }
     }
     pub async fn wait_data_ready(&self, stream_id: &str, timeout_ms: u64) -> bool {
         let session = {
