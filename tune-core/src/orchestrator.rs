@@ -1190,6 +1190,10 @@ pub struct PlaybackOrchestrator {
     /// à la position (voir `transfert_en_pause_5050`). Verrou std : accès
     /// courts.
     transferts_en_pause: std::sync::Mutex<std::collections::HashSet<i64>>,
+    /// #6612 — la dernière reprise SUR PLACE d'un renderer réseau, par zone :
+    /// (position, instant). Voir `plage_hors_fichier_6612`. Verrou std :
+    /// accès courts.
+    reprises_sur_place: std::sync::Mutex<std::collections::HashMap<i64, (u64, std::time::Instant)>>,
     /// Anti-rebond du redémarrage de flux déclenché par un changement
     /// d'égaliseur sur un chemin NON local (#1710, lot 2).
     ///
@@ -1704,6 +1708,7 @@ impl PlaybackOrchestrator {
             dlna_canaux_max: Mutex::new(HashMap::new()),
             levels_prewarm: std::sync::Mutex::new(std::collections::HashSet::new()),
             transferts_en_pause: std::sync::Mutex::new(std::collections::HashSet::new()),
+            reprises_sur_place: std::sync::Mutex::new(std::collections::HashMap::new()),
             eq_replay_gen: std::sync::Mutex::new(std::collections::HashMap::new()),
             eq_replay_last: std::sync::Mutex::new(std::collections::HashMap::new()),
             traitement_des_flux: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -2155,6 +2160,9 @@ mod curseur_intact_4283;
 mod pause_rend_le_peripherique_4177;
 #[cfg(test)]
 mod reprise_nouveau_flux_6264_tests;
+
+/// #6612 — une plage hors du fichier à la reprise : nouveau flux, à la position.
+pub(crate) mod plage_hors_fichier_6612;
 
 /// Fil 2095 — le rétablissement d'une session morte ramène le renderer
 /// réseau à la position de la pause.
