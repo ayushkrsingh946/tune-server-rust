@@ -217,6 +217,12 @@ path = "tests/sendspin_point_d_acces_s2a.rs"
 name = "pont_lien_d_acces"
 path = "tests/pont_lien_d_acces.rs"
 
+# Le pont se pilote en administrateur ; renouvellement du lien d'accès.
+# `autotests = false` plus haut : sans cette cible, jamais compilé.
+[[test]]
+name = "pont_administration"
+path = "tests/pont_administration.rs"
+
 # #3326 — le mode de transition (un `client/hello` en clair). `autotests =
 # false` plus haut : sans cette cible, le fichier ne serait JAMAIS compilé, et
 # la contre-épreuve qui garde le chemin chiffré ne serait exécutée par personne.
