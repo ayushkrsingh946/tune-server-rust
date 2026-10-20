@@ -1,0 +1,201 @@
+//! #6334 — ce que Tidal livre vraiment, lu dans ses réponses factices.
+//!
+//! Un serveur sur la boucle locale joue `playbackinfopostpaywall` : pour
+//! chaque `audioquality` demandée, il rend la réponse inscrite au scénario
+//! (qualité rendue, manifeste BTS ou DASH) ou un 429. Aucun appel à Tidal,
+//! aucun jeton réel : le service est armé d'un jeton d'essai.
+
+use super::*;
+use base64::Engine as _;
+use std::collections::HashMap;
+
+/// Ce que le faux Tidal rend pour une qualité demandée.
+#[derive(Clone)]
+enum Reponse {
+    /// `audioQuality` rendue, et le manifeste (déjà décodé) avec son type.
+    Lecture {
+        audio_quality: &'static str,
+        manifest_mime: &'static str,
+        manifeste: String,
+        bit_depth: Option<u64>,
+        sample_rate: Option<u64>,
+    },
+    /// Le refus de débit : `fetch_playback_info` le rend en erreur.
+    Quota,
+}
+
+/// Un manifeste BTS tel que Tidal le rend (JSON, avant base64).
+fn bts(mime: &str, codecs: &str, url: &str) -> String {
+    json!({
+        "mimeType": mime,
+        "codecs": codecs,
+        "encryptionType": "NONE",
+        "urls": [url],
+    })
+    .to_string()
+}
+
+fn lecture_bts(audio_quality: &'static str, mime: &str, codecs: &str, url: &str) -> Reponse {
+    let (bit_depth, sample_rate) = match audio_quality {
+        "LOSSLESS" => (Some(16), Some(44_100)),
+        "HI_RES_LOSSLESS" => (Some(24), Some(96_000)),
+        _ => (None, None),
+    };
+    Reponse::Lecture {
+        audio_quality,
+        manifest_mime: "application/vnd.tidal.bts",
+        manifeste: bts(mime, codecs, url),
+        bit_depth,
+        sample_rate,
+    }
+}
+
+const URL_AAC: &str = "https://cdn.essai.invalid/aac-320.m4a";
+const URL_FLAC: &str = "https://cdn.essai.invalid/flac-16-44.flac";
+
+/// Lance le faux Tidal sur le scénario donné (qualité demandée → réponse) et
+/// rend un service pointé dessus, ainsi que le journal des qualités demandées.
+async fn faux_tidal(
+    scenario: HashMap<&'static str, Reponse>,
+) -> (TidalService, Arc<std::sync::Mutex<Vec<String>>>) {
+    use axum::extract::{Query, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+
+    type Etat = (
+        Arc<HashMap<&'static str, Reponse>>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    );
+
+    async fn lecture(
+        State((scenario, journal)): State<Etat>,
+        Query(q): Query<HashMap<String, String>>,
+    ) -> axum::response::Response {
+        let demandee = q.get("audioquality").cloned().unwrap_or_default();
+        journal.lock().unwrap().push(demandee.clone());
+        match scenario.get(demandee.as_str()) {
+            Some(Reponse::Lecture {
+                audio_quality,
+                manifest_mime,
+                manifeste,
+                bit_depth,
+                sample_rate,
+            }) => {
+                let mut corps = json!({
+                    "trackId": 29113109,
+                    "assetPresentation": "FULL",
+                    "audioMode": "STEREO",
+                    "audioQuality": audio_quality,
+                    "manifestMimeType": manifest_mime,
+                    "manifest": base64::engine::general_purpose::STANDARD.encode(manifeste),
+                });
+                if let Some(b) = bit_depth {
+                    corps["bitDepth"] = json!(b);
+                }
+                if let Some(s) = sample_rate {
+                    corps["sampleRate"] = json!(s);
+                }
+                axum::Json(corps).into_response()
+            }
+            Some(Reponse::Quota) | None => (
+                StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(json!({"status": 429, "userMessage": "Rate limit exceeded"})),
+            )
+                .into_response(),
+        }
+    }
+
+    let journal: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let app = axum::Router::new()
+        .route("/tracks/{id}/playbackinfopostpaywall", get(lecture))
+        .with_state((Arc::new(scenario), journal.clone()));
+    let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("port libre");
+    let adresse = ecoute.local_addr().expect("adresse locale");
+    tokio::spawn(async move {
+        let _ = axum::serve(ecoute, app).await;
+    });
+
+    let mut svc = TidalService::new();
+    svc.base_forcee = Some(format!("http://{adresse}"));
+    svc.tokens = Mutex::new(TokenState {
+        access_token: Some("jeton-essai".into()),
+        refresh_token: None,
+        token_expires: None,
+    });
+    (svc, journal)
+}
+
+/// Défaut 1 : la cascade gardait le PREMIER repli dégradé. `HI_RES_LOSSLESS`
+/// rend `HIGH` (mis de côté), `HI_RES` rend `LOSSLESS` (écarté : la place
+/// était prise), `LOSSLESS` échoue sur un 429, `HIGH` rend `HIGH` : Tune
+/// servait l'AAC alors qu'il avait reçu du FLAC. Corrigé, le FLAC est gardé
+/// et la cascade s'arrête là : aucune marche plus basse ne peut mieux faire.
+#[tokio::test]
+async fn la_cascade_garde_le_meilleur_repli_et_non_le_premier() {
+    let scenario = HashMap::from([
+        (
+            "HI_RES_LOSSLESS",
+            lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC),
+        ),
+        (
+            "HI_RES",
+            lecture_bts("LOSSLESS", "audio/flac", "flac", URL_FLAC),
+        ),
+        ("LOSSLESS", Reponse::Quota),
+        ("HIGH", lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC)),
+    ]);
+    let (svc, journal) = faux_tidal(scenario).await;
+
+    let flux = svc
+        .get_track_url("29113109", Some("HI_RES_LOSSLESS"))
+        .await
+        .expect("un flux");
+
+    assert_eq!(
+        flux.url, URL_FLAC,
+        "le FLAC rendu à la marche HI_RES doit l'emporter sur l'AAC de la première marche"
+    );
+    assert_eq!(flux.quality.codec, "FLAC");
+    assert_eq!(
+        journal.lock().unwrap().as_slice(),
+        ["HI_RES_LOSSLESS", "HI_RES"],
+        "un LOSSLESS en main : rien à demander plus bas"
+    );
+}
+
+/// Sans aucun FLAC dans la cascade, l'AAC reste servi : le correctif ne
+/// fabrique pas de meilleure qualité, il garde la meilleure reçue.
+#[tokio::test]
+async fn sans_flac_dans_la_cascade_l_aac_reste_servi() {
+    let aac = || lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC);
+    let scenario = HashMap::from([
+        ("HI_RES_LOSSLESS", aac()),
+        ("HI_RES", aac()),
+        ("LOSSLESS", aac()),
+        ("HIGH", aac()),
+    ]);
+    let (svc, journal) = faux_tidal(scenario).await;
+    let flux = svc
+        .get_track_url("29113110", Some("HI_RES_LOSSLESS"))
+        .await
+        .expect("un flux");
+    assert_eq!(flux.url, URL_AAC);
+    assert_eq!(flux.quality.codec, "AAC");
+    assert_eq!(
+        journal.lock().unwrap().as_slice(),
+        ["HI_RES_LOSSLESS", "HI_RES", "LOSSLESS"],
+        "le HIGH déjà reçu dispense de la marche HIGH"
+    );
+}
+
+/// À rang égal, rien ne change : la première réponse reste.
+#[test]
+fn a_rang_egal_le_premier_repli_reste() {
+    let mut repli = None;
+    garder_le_meilleur_repli(&mut repli, json!({"audioQuality": "HIGH", "n": 1}));
+    garder_le_meilleur_repli(&mut repli, json!({"audioQuality": "HIGH", "n": 2}));
+    assert_eq!(repli.unwrap()["n"], 1);
+}

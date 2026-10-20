@@ -964,7 +964,8 @@ impl TidalService {
         quality: &str,
     ) -> Result<serde_json::Value, String> {
         let token = self.get_access_token().await?;
-        let url = format!("{API_BASE}/tracks/{track_id}/playbackinfopostpaywall");
+        let base = self.base_forcee.as_deref().unwrap_or(API_BASE);
+        let url = format!("{base}/tracks/{track_id}/playbackinfopostpaywall");
         let params = [
             ("audioquality", quality),
             ("playbackmode", "STREAM"),
@@ -1824,6 +1825,15 @@ impl StreamingService for TidalService {
         let mut data = None;
         let mut downgraded_fallback: Option<serde_json::Value> = None;
         for &q in fallback_chain {
+            // #6334 — un repli déjà en main vaut au moins cette marche : la
+            // demander rendrait au mieux la même chose, et une réponse
+            // « exacte » à une marche plus basse (`HIGH` → `HIGH`) l'emportait
+            // sur le FLAC reçu plus tôt.
+            if downgraded_fallback.as_ref().is_some_and(|fb| {
+                quality_rank(fb["audioQuality"].as_str().unwrap_or("")) >= quality_rank(q)
+            }) {
+                break;
+            }
             match self.fetch_playback_info(track_id, q).await {
                 Ok(d) => {
                     let has_manifest = d["manifest"].as_str().is_some();
@@ -1895,9 +1905,7 @@ impl StreamingService for TidalService {
                             returned = returned_quality,
                             "tidal_quality_downgraded_but_lossless"
                         );
-                        if downgraded_fallback.is_none() {
-                            downgraded_fallback = Some(d);
-                        }
+                        garder_le_meilleur_repli(&mut downgraded_fallback, d);
                     } else {
                         // Got HIGH/LOW (lossy) — save only if nothing better found
                         warn!(
@@ -1907,9 +1915,7 @@ impl StreamingService for TidalService {
                             subscription = ?self.subscription,
                             "tidal_quality_downgraded_to_lossy"
                         );
-                        if downgraded_fallback.is_none() {
-                            downgraded_fallback = Some(d);
-                        }
+                        garder_le_meilleur_repli(&mut downgraded_fallback, d);
                     }
                 }
                 Err(e) => {
@@ -2616,6 +2622,18 @@ impl StreamingService for TidalService {
 }
 
 /// Rank audio quality levels for comparison. Higher = better.
+/// #6334 — garde, parmi les réponses dégradées de la cascade, celle de la
+/// MEILLEURE qualité rendue, et non la première. `HI_RES_LOSSLESS` peut
+/// revenir en `HIGH`, puis `HI_RES` en `LOSSLESS` : si la marche suivante
+/// échoue (429, délai, réponse sans manifeste), c'est le FLAC qu'il faut
+/// servir, pas l'AAC reçu en premier. À rang égal, la première reste.
+fn garder_le_meilleur_repli(repli: &mut Option<serde_json::Value>, candidat: serde_json::Value) {
+    let rang = |d: &serde_json::Value| quality_rank(d["audioQuality"].as_str().unwrap_or(""));
+    if repli.as_ref().is_none_or(|r| rang(&candidat) > rang(r)) {
+        *repli = Some(candidat);
+    }
+}
+
 fn quality_rank(quality: &str) -> u8 {
     match quality {
         "HI_RES_LOSSLESS" => 4,
@@ -4564,3 +4582,7 @@ mod pagination_recherche_i4803 {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tidal_qualite_livree_6334_tests.rs"]
+mod qualite_livree_6334_tests;
