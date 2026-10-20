@@ -2603,13 +2603,19 @@ impl TrackRepo {
         self.db.write_tx(&mut |tx| {
             let _ = tx.execute(&figer, &[]);
             *count_ref = tx.execute(sql::delete_all(), &[])? as u64;
-            let _ = tx.execute("DELETE FROM albums", &[]);
-            let _ = tx.execute("DELETE FROM artists", &[]);
-            let _ = tx.execute("DELETE FROM track_credits", &[]);
+            // #5974 — chaque DELETE propage son erreur. Avalés (`let _ =`),
+            // un `DELETE FROM albums` en échec (index `albums_fts` de la rc2,
+            // #5919) laissait les albums en base, titre et dossier compris,
+            // et la route répondait `ok: true` : le scan suivant rattachait
+            // les fichiers de ces dossiers aux anciens titres. Une erreur
+            // annule maintenant toute la transaction, pistes comprises.
+            tx.execute("DELETE FROM albums", &[])?;
+            tx.execute("DELETE FROM artists", &[])?;
+            tx.execute("DELETE FROM track_credits", &[])?;
             // Clear local (track-backed) queue entries too — CASCADE is missing
             // on migrated DBs, so wiping the library must not leave a queue
             // pointing at deleted tracks (JP Borderies).
-            let _ = tx.execute("DELETE FROM queue_items WHERE track_id IS NOT NULL", &[]);
+            tx.execute("DELETE FROM queue_items WHERE track_id IS NOT NULL", &[])?;
             Ok(())
         })?;
         Ok(count)
