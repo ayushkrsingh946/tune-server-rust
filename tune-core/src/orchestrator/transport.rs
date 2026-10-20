@@ -1736,13 +1736,9 @@ impl PlaybackOrchestrator {
             // position reellement atteinte, avance automatique comprise. En
             // aleatoire il reste vide — on re-tirera (#2441).
             let rang = rang_a_retenir(etat.shuffle, etat.queue_position);
-            let context = (
-                etat.session_context_type,
-                etat.session_context_id,
-                etat.session_context_source,
-                etat.session_context_title,
-                etat.session_context_cover,
-            );
+            // #6466 — le conteneur de l'ÉLÉMENT de file joué d'abord, celui de
+            // la session à défaut.
+            let context = self.contexte_de_l_ecoute(&etat, req.track_id, req.source_id.as_deref());
             self.record_listen(
                 &resolved.title,
                 resolved.artist.as_deref(),

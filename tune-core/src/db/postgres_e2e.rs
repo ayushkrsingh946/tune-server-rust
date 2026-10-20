@@ -1060,6 +1060,85 @@ async fn pg_6079_la_file_garde_l_artiste_de_service() {
     let _ = db.execute("DELETE FROM queue_items", &[]);
 }
 
+/// #6466 — le conteneur de chaque élément de file sur PostgreSQL : la
+/// jumelle 091 se rejoue (idempotence), `poser_apres` ne touche que les
+/// lignes ajoutées, la lecture à la position vérifie la piste, et la copie
+/// du transfert apparie les lignes.
+#[tokio::test(flavor = "multi_thread")]
+async fn pg_6466_le_conteneur_des_elements_de_file() {
+    use crate::db::contexte_de_file::{self, ContexteDeFile};
+    use crate::db::play_queue_repo::{PlayQueueRepo, QueueInput};
+    use crate::db::zone_repo::ZoneRepo;
+
+    let db = pg_or_skip!();
+    reset_schema(&db);
+    let _ = db.execute("DELETE FROM queue_items", &[]);
+    let url = std::env::var("TUNE_TEST_PG_URL").expect("posée : pg_or_skip l'a vérifié");
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/postgres/091_queue_items_contexte.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("la migration 091 doit se rejouer");
+    let zones = ZoneRepo::with_backend(db.clone());
+    let salon = zones
+        .create("Salon", Some("dlna"), Some("uuid:6466-a"))
+        .unwrap();
+    let enfants = zones
+        .create("Enfants", Some("dlna"), Some("uuid:6466-b"))
+        .unwrap();
+    let repo = PlayQueueRepo::with_backend(db.clone());
+    let ligne = |id: &str| QueueInput::Streaming {
+        source: "qobuz".into(),
+        source_id: id.into(),
+        title: format!("Titre {id}"),
+        artist: "Artiste".into(),
+        album: None,
+        cover_url: None,
+        duration_ms: 1_000,
+        track_number: None,
+        disc_number: None,
+        album_ref: None,
+        artist_ref: None,
+    };
+    repo.append(salon, &[ligne("a1"), ligne("a2")]).unwrap();
+    let avant = contexte_de_file::dernier_identifiant(&db, salon);
+    assert!(avant > 0, "le plus grand identifiant doit être lu (bigint)");
+    repo.append(salon, &[ligne("p1")]).unwrap();
+    let playlist = ContexteDeFile {
+        nature: "playlist".into(),
+        id: Some("p42".into()),
+        service: Some("qobuz".into()),
+        titre: Some("Ma playlist".into()),
+        pochette: None,
+    };
+    assert_eq!(
+        contexte_de_file::poser_apres(&db, salon, avant, &playlist).unwrap(),
+        1
+    );
+    assert_eq!(
+        contexte_de_file::contexte_de_la_piste_jouee(&db, salon, 2, None, Some("p1")),
+        Some(playlist.clone())
+    );
+    assert_eq!(
+        contexte_de_file::contexte_de_la_piste_jouee(&db, salon, 0, None, Some("a1")),
+        None,
+        "une ligne sans conteneur suit la session"
+    );
+    repo.append(enfants, &[ligne("a1"), ligne("a2"), ligne("p1")])
+        .unwrap();
+    assert_eq!(
+        contexte_de_file::copier_les_contextes(&db, salon, enfants),
+        1
+    );
+    assert_eq!(
+        contexte_de_file::contexte_de_la_piste_jouee(&db, enfants, 2, None, Some("p1")),
+        Some(playlist)
+    );
+    let _ = db.execute("DELETE FROM queue_items", &[]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_settings_round_trip() {
     use crate::db::settings_repo::SettingsRepo;

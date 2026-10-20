@@ -71,6 +71,49 @@ pub struct QueueSnapshotItem {
     /// antérieurs, d'où le défaut.
     #[serde(default)]
     pub artist_ref: Option<String>,
+    /// Le conteneur de la ligne (#6466, migration 127) : sans lui, une file
+    /// restaurée rangerait ses titres sous le seul contexte de session.
+    /// Absent des instantanés antérieurs, d'où le défaut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contexte: Option<ContexteSauvegarde>,
+}
+
+/// Le conteneur d'une ligne de file dans l'instantané (#6466).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContexteSauvegarde {
+    pub nature: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub service: Option<String>,
+    #[serde(default)]
+    pub titre: Option<String>,
+    #[serde(default)]
+    pub pochette: Option<String>,
+}
+
+impl From<crate::db::contexte_de_file::ContexteDeFile> for ContexteSauvegarde {
+    fn from(c: crate::db::contexte_de_file::ContexteDeFile) -> Self {
+        Self {
+            nature: c.nature,
+            id: c.id,
+            service: c.service,
+            titre: c.titre,
+            pochette: c.pochette,
+        }
+    }
+}
+
+impl From<ContexteSauvegarde> for crate::db::contexte_de_file::ContexteDeFile {
+    fn from(c: ContexteSauvegarde) -> Self {
+        Self {
+            nature: c.nature,
+            id: c.id,
+            service: c.service,
+            titre: c.titre,
+            pochette: c.pochette,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -189,9 +232,23 @@ pub fn save_queue_avec_ordre_d_origine(
 
     // The authoritative ordered unified list (local + streaming interleaved by
     // position). Preferred on restore. Lue plus haut, avec son erreur.
+    // #6466 — le conteneur de chaque ligne, dans l'ordre de la file. Pris
+    // seulement s'il couvre la file entière : un décalage prêterait à une
+    // ligne le conteneur de sa voisine.
+    let contextes = crate::db::contexte_de_file::contextes_de_la_file(db, zone_id);
+    let contextes: Vec<Option<ContexteSauvegarde>> = if contextes.len() == entries.len() {
+        contextes
+            .into_iter()
+            .map(|(_, _, c)| c.map(Into::into))
+            .collect()
+    } else {
+        vec![None; entries.len()]
+    };
     let items: Vec<QueueSnapshotItem> = entries
         .iter()
-        .map(|e| QueueSnapshotItem {
+        .zip(contextes)
+        .map(|(e, contexte)| QueueSnapshotItem {
+            contexte,
             track_id: e.track_id,
             source: e.source.clone(),
             source_id: e.source_id.clone(),
@@ -487,6 +544,28 @@ pub fn restore_all_queues(db: &Arc<dyn DbBackend>, db_path: &str) -> BilanRestau
         if snapshot.current_position > 0 {
             repo.set_current_pos(zone_id, snapshot.current_position)
                 .ok();
+        }
+        // #6466 — chaque ligne retrouve son conteneur.
+        if snapshot.items.iter().any(|it| it.contexte.is_some()) {
+            crate::db::contexte_de_file::poser_par_appariement(
+                db,
+                zone_id,
+                snapshot
+                    .items
+                    .iter()
+                    .map(|it| {
+                        (
+                            it.track_id,
+                            if it.track_id.is_some() {
+                                None
+                            } else {
+                                it.source_id.clone()
+                            },
+                            it.contexte.clone().map(Into::into),
+                        )
+                    })
+                    .collect(),
+            );
         }
 
         restored += 1;

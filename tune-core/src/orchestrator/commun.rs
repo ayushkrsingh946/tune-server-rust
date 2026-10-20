@@ -1,5 +1,14 @@
 use super::*;
 
+/// `(nature, id, service, titre, pochette)` du conteneur d'une écoute.
+pub(super) type ContexteResolu = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 impl PlaybackOrchestrator {
     /// Duplicate-network-play detector. Returns `true` when `(source,
     /// source_id)` was recorded as this zone's last network play within
@@ -540,6 +549,35 @@ impl PlaybackOrchestrator {
 
     // Un argument par colonne écrite ; une structure changerait tous les appelants pour un gain de forme (clippy 1.98).
     #[allow(clippy::too_many_arguments)]
+    /// #6466 — le conteneur d'UNE écoute : celui que porte l'élément de file
+    /// joué (`queue_items.context_*`, posé par « Lire ensuite », « Ajouter à
+    /// la file » et le transfert de zone), et à défaut celui de la SESSION de
+    /// la zone (le dernier « Lire »), comme avant. Rend `(nature, id,
+    /// service, titre, pochette)`.
+    pub(super) fn contexte_de_l_ecoute(
+        &self,
+        etat: &crate::playback::ZoneState,
+        track_id: Option<i64>,
+        source_id: Option<&str>,
+    ) -> ContexteResolu {
+        if let Some(c) = crate::db::contexte_de_file::contexte_de_la_piste_jouee(
+            &self.db,
+            etat.zone_id,
+            etat.queue_position,
+            track_id,
+            source_id,
+        ) {
+            return (Some(c.nature), c.id, c.service, c.titre, c.pochette);
+        }
+        (
+            etat.session_context_type.clone(),
+            etat.session_context_id.clone(),
+            etat.session_context_source.clone(),
+            etat.session_context_title.clone(),
+            etat.session_context_cover.clone(),
+        )
+    }
+
     pub(super) fn record_listen(
         &self,
         title: &str,
@@ -710,6 +748,8 @@ impl PlaybackOrchestrator {
         // (`play_without_history`) ne doit pas doublonner la ligne.
         if attente.record_history && attente.source != "radio" {
             let etat = self.playback.get_state(zone_id).await;
+            let contexte =
+                self.contexte_de_l_ecoute(&etat, attente.track_id, attente.source_id.as_deref());
             let album_id = attente.track_id.and_then(|tid| {
                 TrackRepo::with_backend(self.db.clone())
                     .get(tid)
@@ -729,12 +769,12 @@ impl PlaybackOrchestrator {
                 attente.cover_path.as_deref(),
                 etat.session_profile_id,
                 ContexteEcoute {
-                    nature: etat.session_context_type.as_deref(),
-                    id: etat.session_context_id.as_deref(),
+                    nature: contexte.0.as_deref(),
+                    id: contexte.1.as_deref(),
                     rang: rang_a_retenir(etat.shuffle, etat.queue_position),
-                    service: etat.session_context_source.as_deref(),
-                    titre: etat.session_context_title.as_deref(),
-                    pochette: etat.session_context_cover.as_deref(),
+                    service: contexte.2.as_deref(),
+                    titre: contexte.3.as_deref(),
+                    pochette: contexte.4.as_deref(),
                 },
                 None,
             );

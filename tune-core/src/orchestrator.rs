@@ -2186,6 +2186,10 @@ mod seek_de_reprise_caduc_5476;
 mod seek_de_reprise_conditionnel_5050;
 // #5050 (fil 2236) — transfert depuis une zone en pause : la cible est posée
 // en pause sans rien recevoir.
+/// #6466 — l'historique par conteneurs : le conteneur de chaque élément de
+/// file, et le transfert de zone sans doublon.
+#[cfg(test)]
+mod historique_conteneurs_tests_6466;
 /// #6130 — quitter une radio sur une sortie DLNA : `Stop`, attente du départ
 /// du consommateur radio, puis `SetAVTransportURI`.
 #[cfg(test)]

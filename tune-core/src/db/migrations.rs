@@ -2510,7 +2510,42 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "radio_stations_external_id",
         up: "",
     },
+    // #6466 (FabienM, fil 2302 points 10, 11, 15) — le CONTENEUR d'un élément
+    // de file : l'album, la playlist ou l'artiste dont il a été enfilé, ou
+    // `track` pour un titre ajouté seul. L'historique l'écrit à l'écoute ; à
+    // défaut (ligne d'avant, NULL), c'est le contexte de SESSION de la zone,
+    // comme avant.
+    //
+    // Numérotée 127 / PG 091 : la 126 / PG 090 (#6516) est la dernière sur
+    // `batch/bugs-rc7-20261015` le 20/10. ⚠️ La PR de #6285 (faux hi-res)
+    // tient AUSSI 127 / 091 : la seconde fusionnée se renumérote (règle de la
+    // 119).
+    //
+    // Colonnes posées dans le bloc de version et dans la passe finale, PAS
+    // dans `up` : même règle qu'à la 119. Jumelle PG : 091.
+    Migration {
+        version: 127,
+        name: "queue_items_contexte",
+        up: "",
+    },
 ];
+
+/// Les colonnes de la migration 127 (#6466) : le conteneur d'un élément de
+/// file, dans le vocabulaire de `listen_history.context_*`.
+pub(crate) const COLONNES_CONTEXTE_DE_FILE: [&str; 5] = [
+    "context_type",
+    "context_id",
+    "context_source",
+    "context_title",
+    "context_cover",
+];
+
+/// Pose les colonnes de la migration 127 (#6466). Idempotent.
+fn contexte_des_elements_de_file(db: &SqliteDb) {
+    for colonne in COLONNES_CONTEXTE_DE_FILE {
+        add_column_if_missing(db, "queue_items", colonne, "TEXT");
+    }
+}
 
 /// SQL de la migration 125 (#6179) — voir son entree dans `MIGRATIONS`.
 ///
@@ -3821,6 +3856,11 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
             // défaut : NULL = INCONNU pour toute ligne existante.
             add_column_if_missing(db, "queue_items", "artist_ref", "TEXT");
         }
+        if migration.version == 127 {
+            // Le conteneur de chaque élément de file (#6466). Sans défaut :
+            // NULL = l'élément suit le contexte de session de la zone.
+            contexte_des_elements_de_file(db);
+        }
         if migration.version == 124 {
             // La note de la piste lue dans ses balises (#6123). Sans défaut :
             // NULL = le fichier n'en porte pas, ou pas encore relu.
@@ -4427,6 +4467,9 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     // et l'UPDATE des pistes la NOMMENT, et une base arrivée sans elle ne
     // pourrait plus rien scanner. PG : migration 088.
     add_column_if_missing(db, "tracks", "rating", "INTEGER");
+    // Le conteneur des éléments de file (migration 127, #6466) — posé ICI
+    // aussi : l'écriture de la file et l'historique le NOMMENT. PG : 091.
+    contexte_des_elements_de_file(db);
     // Le lien des radios avec l'annuaire (migration 126, #6516) — posé ICI
     // aussi : le rapprochement le NOMME. PG : migration 090.
     lien_des_radios_avec_l_annuaire(db);
@@ -5299,6 +5342,13 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         90,
         "radio_stations_external_id",
         include_str!("../../migrations/postgres/090_radio_stations_external_id.sql"),
+    ),
+    // Jumelle de la SQLite 127 (#6466) : le conteneur de chaque élément de
+    // file (`queue_items.context_*`), NULL pour l'existant.
+    (
+        91,
+        "queue_items_contexte",
+        include_str!("../../migrations/postgres/091_queue_items_contexte.sql"),
     ),
 ];
 
@@ -8511,7 +8561,9 @@ mod tests {
         // Pose les colonnes de la ligne introuvable, que `get_entries` NOMME.
         // 90 : `radio_stations_external_id` (#6516), jumelle de la SQLite 126.
         // Pose le lien des radios avec l'annuaire, que le rapprochement NOMME.
-        assert_eq!(pg_latest_version(), 90, "latest PG migration must be 90");
+        // 91 : `queue_items_contexte` (#6466), jumelle de la SQLite 127. Pose
+        // le conteneur de chaque élément de file, que l'historique NOMME.
+        assert_eq!(pg_latest_version(), 91, "latest PG migration must be 91");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),
