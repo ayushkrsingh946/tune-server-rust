@@ -20,7 +20,9 @@
 //!   `GET /memoire`. La progression part ensuite en évènements
 //!   `cd.memoire.progression` puis `cd.memoire.termine` ; `POST /jouer` lancé
 //!   après se sert dans la mémoire. Refus : `404 memoire_indisponible`,
-//!   `409 memoire_desactivee` (réglage coupé), `409 extraction_en_cours`, et
+//!   `409 memoire_desactivee` (réglage coupé), `409 extraction_en_cours`,
+//!   `409 memoire_occupee` (un AUTRE disque tient la mémoire et une zone le
+//!   joue, ou son chargement est en cours : le charger le couperait), et
 //!   ceux de `/disque` (`aucun_lecteur`, `aucun_disque`, `lecture_toc`).
 //!
 //! `GET /etat` porte aussi `chargement` : la progression du disque chargé en
@@ -252,6 +254,33 @@ async fn charger_en_memoire(State(etat): State<EtatRoutes>) -> Response {
         Err((code, motif, message)) => return refus(code, motif, message),
     };
     let disc = disc_id(&toc);
+    // Relecture rc7 — un AUTRE disque tient la mémoire (A gardé après son
+    // éjection, #6410, ou encore en chargement). Le libérer couperait la
+    // zone qui le joue : on refuse, rien n'est coupé d'office. Gardé mais
+    // joué par personne, il ne sert plus : le chargement de B le remplace.
+    let m2 = m.clone();
+    let d2 = disc.clone();
+    let autre = tokio::task::spawn_blocking(move || m2.autre_disque_en_memoire(&d2))
+        .await
+        .ok()
+        .flatten();
+    if let Some((autre, en_chargement)) = autre {
+        let zones = zones_qui_jouent_le_disque(&etat).await;
+        if en_chargement || !zones.is_empty() {
+            tracing::info!(disc_id = %disc, en_memoire = %autre, zones = ?zones, "cd_memoire_occupee_refus");
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "memoire_occupee",
+                    "message": "Un autre disque est encore en mémoire et joue : \
+                                attendez la fin de sa lecture ou arrêtez-la avant de charger celui-ci.",
+                    "disc_id_en_memoire": autre,
+                    "zones": zones,
+                })),
+            )
+                .into_response();
+        }
+    }
     let m2 = m.clone();
     let lance = tokio::task::spawn_blocking(move || {
         m2.charger_le_disque(&lecteur, &toc, &disc, generation)
@@ -871,6 +900,64 @@ mod tests {
             Arc::ptr_eq(&m.courant().unwrap(), &c),
             "la lecture a relancé un autre chargement"
         );
+        m.liberer();
+    }
+
+    /// #6596, relecture rc7 — A est entier en mémoire, éjecté (gardé, #6410)
+    /// et joué par la zone 7 ; B est inséré. « Charger en mémoire » B est
+    /// REFUSÉ (`409 memoire_occupee`) : A reste en mémoire et lisible, sa
+    /// zone n'est pas touchée. Plus personne ne joue A : B se charge.
+    #[tokio::test]
+    async fn charger_un_autre_disque_ne_coupe_pas_celui_qui_joue_depuis_la_memoire() {
+        use crate::fournisseur::{FournisseurCd, source_id};
+        use crate::memoire::Fin;
+        use crate::simule::contenu_des_secteurs;
+        use std::io::Read;
+        use tune_core::source_pcm::FournisseurPcm;
+        let toc = petite_toc();
+        let l = Arc::new(LecteurSimule::new(toc.clone()));
+        let (e, hote, m, _rx) = banc_memoire(l.clone(), true).await;
+        // A : entier en mémoire, joué par la zone 7, puis éjecté et gardé.
+        let ld: Arc<dyn LecteurDisque> = l.clone();
+        let a = m.chargement(&ld, &toc, "disque-A", 0, 0).unwrap();
+        assert_eq!(a.attendre_la_fin(), Some(Fin::Termine));
+        hote.sources.lock().await.insert(7, SOURCE.into());
+        e.zones.lock().await.insert(7);
+        l.ejecter();
+        assert!(m.garder_apres_ejection(), "A gardé après son éjection");
+        // B inséré (un autre disc_id que A).
+        l.inserer();
+        assert_ne!(disc_id(&toc), "disque-A");
+
+        let (code, v) = appel(router(e.clone()), "POST", "/memoire/charger", None).await;
+        assert_eq!(code, StatusCode::CONFLICT, "{v}");
+        assert_eq!(v["error"], "memoire_occupee");
+        assert_eq!(v["disc_id_en_memoire"], "disque-A");
+        assert_eq!(v["zones"], json!([7]));
+
+        assert!(
+            m.disque_garde().is_some_and(|g| Arc::ptr_eq(&g, &a)),
+            "A a été libéré : la zone qui le jouait est coupée"
+        );
+        let f = FournisseurCd {
+            lecteur: l.clone(),
+            memoire: Some(m.clone()),
+        };
+        let mut flux = f.ouvrir(&source_id("disque-A", 2), 0).unwrap();
+        let mut lu = Vec::new();
+        flux.lecteur.read_to_end(&mut lu).unwrap();
+        assert_eq!(lu, contenu_des_secteurs(300, 800), "A n'est plus lisible");
+        assert!(
+            hote.arrets.lock().await.is_empty(),
+            "une zone a été arrêtée"
+        );
+        assert!(hote.files.lock().await.is_empty(), "une file a été posée");
+
+        // La zone 7 passe à autre chose : plus rien ne joue A, B se charge.
+        hote.sources.lock().await.insert(7, "radio".into());
+        let (code, v) = appel(router(e.clone()), "POST", "/memoire/charger", None).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        assert_eq!(v["chargement"]["disc_id"], disc_id(&toc));
         m.liberer();
     }
 

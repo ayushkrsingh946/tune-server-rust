@@ -783,6 +783,22 @@ impl MemoireCd {
         Some(c)
     }
 
+    /// #6596 (relecture rc7) — le disque d'un AUTRE `disc_id` qui tient
+    /// encore la mémoire (chargement en cours, ou entier : gardé après son
+    /// éjection, #6410), et s'il est encore en cours de chargement. Charger
+    /// un autre disque le libérerait.
+    pub fn autre_disque_en_memoire(&self, disc_id: &str) -> Option<(String, bool)> {
+        let c = self.courant()?;
+        if c.disc_id == disc_id {
+            return None;
+        }
+        match c.verrou().fin {
+            None => Some((c.disc_id.clone(), true)),
+            Some(Fin::Termine) => Some((c.disc_id.clone(), false)),
+            _ => None,
+        }
+    }
+
     /// #6596 — « Charger en mémoire » sans rien jouer : le disque entier, du
     /// début, ou le chargement déjà en cours (ou fini) de ce disque. Aucune
     /// zone n'est touchée. `None` si le réglage est désactivé.
