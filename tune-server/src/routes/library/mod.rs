@@ -26,6 +26,8 @@ mod edition_balises;
 mod enrich;
 // Lot 1 de l'enrichissement d'après MetaRust, de Xavier Joly (#4805).
 mod enrichissement_metarust;
+// #6288 — MetaRust, « Albums manquants » (discographie MusicBrainz).
+mod albums_manquants_mb;
 mod passes_metarust;
 // #5469 — les passes que `crate::reprise_des_passes` sait relancer.
 pub(crate) use artwork::{demarrer_images_artistes, demarrer_pochettes_albums};
@@ -296,6 +298,10 @@ pub(super) fn refus_source_non_locale() -> axum::response::Response {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/artists", get(artists::list_artists))
+        .route(
+            "/artists/{id}/missing-albums",
+            get(albums_manquants_mb::albums_manquants),
+        )
         .route(
             "/artists/{id}",
             get(artists::get_artist).put(artists::update_artist),
