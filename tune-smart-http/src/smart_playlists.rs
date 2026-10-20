@@ -63,6 +63,8 @@ where
         .route("/{id}/tracks", get(resolve_tracks))
         .route("/{id}/albums", get(smart_collection_albums))
         .route("/preview", post(preview_smart_collection))
+        // #6287 — la requête TEXTUELLE (`crate::requete_texte`).
+        .route("/requete", post(requete_textuelle))
 }
 
 async fn list_smart_playlists(
@@ -1074,6 +1076,80 @@ async fn preview_smart_collection(
     Ok(Json(
         json!({"tracks": items, "total": items.len(), "regles_refusees": refusees}),
     ))
+}
+
+#[derive(Deserialize)]
+struct RequeteTextuelle {
+    q: String,
+    sort_by: Option<String>,
+    sort_order: Option<String>,
+    max_tracks: Option<i64>,
+}
+
+/// `POST /library/smart-playlists/requete` — #6287 : exécute une requête
+/// écrite dans le langage de `crate::requete_texte`, et rend aussi sa forme
+/// d'éditeur quand elle en a une.
+///
+/// - 200 : `tracks`, `total`, `regles_refusees` (comme l'aperçu), `rules` et
+///   `match_mode` (ou `null` : requête imbriquée ou niée, sans forme
+///   visuelle) ;
+/// - 400 : `{"error": "requete_invalide", "message", "position"}`, la position
+///   en caractères depuis le début de la requête.
+///
+/// Les favoris de SERVICE et les pistes de catalogue qu'ajoute l'aperçu
+/// (règles `source`, `catalogue:`) ne sont pas ajoutés ici : la requête porte
+/// sur la bibliothèque (étape 1, voir la PR).
+async fn requete_textuelle(
+    State(state): State<SmartHttpState>,
+    profile: ActiveProfile,
+    Json(body): Json<RequeteTextuelle>,
+) -> axum::response::Response {
+    let arbre = match crate::requete_texte::analyser(&body.q) {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "requete_invalide",
+                    "message": e.message,
+                    "position": e.position,
+                })),
+            )
+                .into_response();
+        }
+    };
+    let sort_by = body.sort_by.as_deref().unwrap_or("title");
+    let sort_order = body.sort_order.as_deref().unwrap_or("asc");
+    let (items, refusees) = {
+        let resolver = DbRefResolver::new(&state.backend);
+        let ctx = RefCtx::root(&resolver, Some(profile.id()));
+        let compilee = crate::requete_texte::compiler(&arbre, &ctx);
+        // L'ordre et la borne : ceux du moteur, sans règle.
+        let (_w, order, limit_clause, _r) =
+            build_smart_query_rapport("[]", "all", sort_by, sort_order, body.max_tracks, &ctx);
+        match execute_smart_track_query(
+            &state,
+            profile.id(),
+            &format!("WHERE {}", compilee.condition),
+            &order,
+            &limit_clause,
+        ) {
+            Ok(items) => (items, compilee.refusees),
+            Err(e) => return e.into_response(),
+        }
+    };
+    let (rules, match_mode) = match crate::requete_texte::regles_editeur(&arbre) {
+        Some((r, m)) => (Value::Array(r), json!(m)),
+        None => (Value::Null, Value::Null),
+    };
+    Json(json!({
+        "tracks": items,
+        "total": items.len(),
+        "regles_refusees": refusees,
+        "rules": rules,
+        "match_mode": match_mode,
+    }))
+    .into_response()
 }
 
 pub(crate) fn strip_accents(s: &str) -> String {

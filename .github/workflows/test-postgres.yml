@@ -784,6 +784,15 @@ jobs:
           TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
         run: cargo test --no-fail-fast -p tune-server --no-default-features --features postgres,oaat --test pg_ne_contient_pas_6250 -- --nocapture --test-threads=1
 
+      # #6287 — la requête textuelle des règles intelligentes : la négation
+      # (`NOT COALESCE((a), 1 = 0)`), les parenthèses du ET et du OU, et la
+      # règle crédit, par la vraie route. Sans cette étape, l'épreuve
+      # prendrait son « saut annoncé ».
+      - name: Requête textuelle des règles intelligentes sur PostgreSQL (#6287)
+        env:
+          TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
+        run: cargo test --no-fail-fast -p tune-server --no-default-features --features postgres,oaat --test pg_requete_textuelle_6287 -- --nocapture --test-threads=1
+
       # #6122 — « dans les N derniers jours » : des littéraux calculés à chaque
       # requête (secondes pour `file_mtime`, ISO pour `listened_at`) au lieu de
       # `DATETIME('now', …)`, propre à SQLite. Sans cette étape, l'épreuve

@@ -1703,3 +1703,10 @@ path = "tests/playlist_manager_alias_deprecies.rs"
 name = "pg_balises_6124"
 path = "tests/pg_balises_6124.rs"
 required-features = ["postgres"]
+
+# #6287 — la requête textuelle des règles intelligentes sur PostgreSQL : la
+# négation (`NOT COALESCE`), les combinaisons et le crédit, par la vraie route.
+[[test]]
+name = "pg_requete_textuelle_6287"
+path = "tests/pg_requete_textuelle_6287.rs"
+required-features = ["postgres"]
