@@ -26,6 +26,8 @@ mod edition_balises;
 mod enrich;
 // Lot 1 de l'enrichissement d'après MetaRust, de Xavier Joly (#4805).
 mod enrichissement_metarust;
+// #6288 — MetaRust, « Albums manquants » (discographie MusicBrainz).
+mod albums_manquants_mb;
 // #6001 — liens ProgArchives / Metal Archives / AllMusic, arbre des genres libre.
 mod liens_et_genres_mb;
 mod passes_metarust;
@@ -298,6 +300,10 @@ pub(super) fn refus_source_non_locale() -> axum::response::Response {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/artists", get(artists::list_artists))
+        .route(
+            "/artists/{id}/missing-albums",
+            get(albums_manquants_mb::albums_manquants),
+        )
         .route(
             "/artists/{id}",
             get(artists::get_artist).put(artists::update_artist),
