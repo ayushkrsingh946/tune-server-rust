@@ -2598,6 +2598,48 @@ fn les_reglages_de_sortie_locale_viennent_de_la_base() {
     );
 }
 
+/// #6452 — sous le repli de démarrage, la sortie recréée à la volée part sur
+/// l'hôte par défaut et en PARTAGÉ, et la base garde « asio ».
+///
+/// C'est le test qui rougit sans le repli : `recreate_local_and_play`
+/// rouvrirait ASIO, en exclusif, au premier appui sur Lecture, c'est-à-dire
+/// le pilote que le démarrage venait d'écarter.
+#[test]
+fn le_repli_de_demarrage_ecarte_asio_de_la_sortie_recreee() {
+    let orch = test_orchestrator();
+    let reglages = crate::db::settings_repo::SettingsRepo::with_backend(orch.db.clone());
+    // Ce qu'écrit le choix d'ASIO dans les réglages : l'hôte, l'écho de
+    // l'exclusif et son témoin (#4184).
+    reglages.set("local_audio_backend", "asio").unwrap();
+    reglages.set("local_exclusive_mode", "true").unwrap();
+    reglages
+        .set(crate::config::REGLAGE_EXCLUSIF_ARME_PAR_ASIO, "true")
+        .unwrap();
+
+    assert_eq!(
+        orch.reglages_sortie_locale_selon_le_repli(|_| None, Some("asio")),
+        (false, "auto".to_string()),
+        "sous le repli, la sortie recréée doit ouvrir l'hôte par défaut, en partagé"
+    );
+    // Le choix enregistré n'a pas bougé.
+    assert_eq!(
+        reglages.get("local_audio_backend").unwrap().as_deref(),
+        Some("asio")
+    );
+    // Sans repli, ASIO comme avant (exclusif par nature sous Windows).
+    let (_, hote) = orch.reglages_sortie_locale_selon_le_repli(|_| None, None);
+    assert_eq!(hote, "asio");
+
+    // Un exclusif demandé par l'utilisateur lui-même reste honoré.
+    reglages
+        .delete(crate::config::REGLAGE_EXCLUSIF_ARME_PAR_ASIO)
+        .unwrap();
+    assert_eq!(
+        orch.reglages_sortie_locale_selon_le_repli(|_| None, Some("asio")),
+        (true, "auto".to_string())
+    );
+}
+
 /// #4384 — « écrit mais pas branché » : le corps de `send_to_output` DOIT
 /// appeler le branchement, sinon le forwarder lira toujours 1000 et la
 /// correction ne sortira jamais du laboratoire.

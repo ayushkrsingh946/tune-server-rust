@@ -836,6 +836,24 @@ pub(super) fn runtime_signal_reason_detail_lang(
     (!details.is_empty()).then(|| details.join(" ; "))
 }
 
+/// #6452 — le détail de l'étape « Transport ». Sous le repli de démarrage,
+/// une zone locale dit pourquoi elle ne joue pas en ASIO : le démarrage
+/// précédent n'a pas abouti, celui-ci s'est fait sur l'hôte par défaut.
+/// `repli` est l'hôte écarté (`tune_core::demarrage_inacheve::repli_actif`).
+pub(super) fn detail_du_transport(
+    output_type: &str,
+    detail: Option<String>,
+    repli: Option<&str>,
+) -> Option<String> {
+    let repli = (output_type == "local" && repli.is_some())
+        .then_some(tune_core::demarrage_inacheve::DETAIL);
+    match (repli, detail) {
+        (Some(repli), Some(detail)) => Some(format!("{repli} ; {detail}")),
+        (Some(repli), None) => Some(repli.to_string()),
+        (None, detail) => detail,
+    }
+}
+
 /// Le nom PRÉSENTABLE d'un transport que le `match` de `build_signal_path` ne
 /// nomme pas par un bras.
 ///
@@ -1831,7 +1849,11 @@ fn assembler_les_etapes_lang(
         "name": "Transport",
         "description": transport_desc,
         "bit_perfect": transport_bit_perfect,
-        "detail": runtime_signal_path.and_then(|r| runtime_signal_reason_detail_lang(lang, r)),
+        "detail": detail_du_transport(
+            output_type,
+            runtime_signal_path.and_then(|r| runtime_signal_reason_detail_lang(lang, r)),
+            tune_core::demarrage_inacheve::repli_actif(),
+        ),
     }));
 
     let renderer_name = renderer_label
@@ -2945,4 +2967,32 @@ pub(super) fn zone_reaffectation_ignoree(
     reel: Option<&TransformationsReelles>,
 ) -> Option<String> {
     zone_reaffectation_ignoree_lang("fr", backend, zone_id, output_type, track_id, reel)
+}
+
+/// #6452 — l'étape « Transport » d'une zone locale dit le repli de démarrage.
+#[cfg(test)]
+mod repli_de_demarrage_6452_tests {
+    use super::detail_du_transport;
+
+    #[test]
+    fn la_zone_locale_dit_qu_asio_n_est_pas_utilise() {
+        assert_eq!(
+            detail_du_transport("local", None, Some("asio")).as_deref(),
+            Some("ASIO non utilisé : le démarrage précédent n'a pas abouti")
+        );
+        assert_eq!(
+            detail_du_transport("local", Some("volume logiciel".into()), Some("asio")).as_deref(),
+            Some("ASIO non utilisé : le démarrage précédent n'a pas abouti ; volume logiciel")
+        );
+    }
+
+    #[test]
+    fn sans_repli_ou_hors_sortie_locale_rien_ne_change() {
+        assert_eq!(detail_du_transport("local", None, None), None);
+        assert_eq!(
+            detail_du_transport("local", Some("x".into()), None).as_deref(),
+            Some("x")
+        );
+        assert_eq!(detail_du_transport("dlna", None, Some("asio")), None);
+    }
 }
