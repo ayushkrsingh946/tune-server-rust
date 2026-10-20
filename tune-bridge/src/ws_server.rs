@@ -12,10 +12,10 @@ use crate::trafic::{Categorie, Erreur};
 
 /// Prefixe des trames portant un morceau audio.
 ///
-/// Le serveur les envoie en trame **texte**, `BINARY:<id>:<base64>`, et non en
-/// trame binaire : c'est le format reellement emis par
-/// `tune-core/src/cloud/relay.rs`. Le nom est trompeur, il est ici pour ce
-/// qu'il est — le contrat de fil deja deploye chez les utilisateurs.
+/// Un serveur rc4 a rc6 envoie ses morceaux en trame **texte**,
+/// `BINARY:<id>:<base64>` ; un serveur recent aussi, face a un pont qui n'a
+/// pas annonce les trames binaires (#6564). Le nom est trompeur, il est ici
+/// pour ce qu'il est — le contrat de fil deja deploye chez les utilisateurs.
 const PREFIXE_MORCEAU: &str = "BINARY:";
 
 /// Morceaux en attente avant que le relais ne freine le serveur.
@@ -102,6 +102,7 @@ pub async fn handle_server_ws(socket: WebSocket, state: Arc<RelayState>) {
         msg_type: "relay.registered",
         ok: true,
         server_id: register.server_id.clone(),
+        capabilities: protocol::CAPACITES,
     };
     let _ = ws_tx
         .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
@@ -126,6 +127,8 @@ pub async fn handle_server_ws(socket: WebSocket, state: Arc<RelayState>) {
 
     // Reader loop: server WS → relay
     let heartbeat_timeout = tokio::time::Duration::from_secs(90);
+    // Rangs attendus des morceaux binaires de cette connexion (#6564).
+    let mut rangs = crate::morceau_binaire::Rangs::default();
     let mut heartbeat_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
     heartbeat_interval.tick().await; // skip first immediate tick
 
@@ -137,7 +140,7 @@ pub async fn handle_server_ws(socket: WebSocket, state: Arc<RelayState>) {
                         handle_server_message(&state, &server_id, &text).await;
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        handle_server_binary(&state, &server_id, &data).await;
+                        handle_server_binary(&state, &server_id, &data, &mut rangs).await;
                     }
                     Some(Ok(Message::Ping(_))) => {}
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
@@ -217,13 +220,69 @@ pub(crate) async fn handle_server_message(state: &RelayState, server_id: &str, t
     }
 }
 
-/// Trames binaires du serveur.
+/// Trames binaires du serveur : les morceaux d'un flux (#6564), au format de
+/// `crate::morceau_binaire`. Un serveur recent ne les envoie que si ce pont a
+/// annonce la capacite ; un serveur anterieur envoie toujours le texte
+/// `BINARY:` (voir `PREFIXE_MORCEAU`), et les deux chemins menent au meme
+/// puits.
 ///
-/// Aucune n'est emise a ce jour : les morceaux audio voyagent en trames texte
-/// prefixees `BINARY:` (voir `PREFIXE_MORCEAU`). L'arm existe pour ne pas
-/// fermer la connexion sur une trame inattendue.
-async fn handle_server_binary(state: &RelayState, server_id: &str, data: &[u8]) {
-    compter_entree(state, server_id, Categorie::Api, data.len());
+/// Un morceau perdu ou hors d'ordre coupe le flux : un corps HTTP tronque se
+/// voit, un son recolle de travers s'entend.
+///
+/// La trame est comptee entiere (`data.len()`, en-tete compris) des qu'elle
+/// est entree sur le VPS, qu'elle serve ou non (#6512) : dans la categorie de
+/// son puits, `Audio` sans puits, `Api` si elle est illisible.
+pub(crate) async fn handle_server_binary(
+    state: &RelayState,
+    server_id: &str,
+    data: &[u8],
+    rangs: &mut crate::morceau_binaire::Rangs,
+) {
+    let (flux, compteurs) = match state.servers.get(server_id) {
+        Some(conn) => (conn.flux.clone(), conn.trafic.clone()),
+        None => return,
+    };
+
+    let Some(morceau) = crate::morceau_binaire::lire(data) else {
+        state.trafic.entree(&compteurs, Categorie::Api, data.len());
+        warn!(server_id = %server_id, taille = data.len(), "morceau binaire illisible");
+        return;
+    };
+
+    // Le `Sender` est clone hors du verrou, comme pour le texte.
+    let puits = {
+        let puits = flux.lock().await;
+        if morceau.seq == 0 {
+            // Un flux commence : on oublie les rangs des flux deja fermes.
+            rangs.ne_garder_que(|id| puits.contains_key(id));
+        }
+        puits
+            .get(morceau.id)
+            .map(|p| (p.envoi.clone(), p.categorie))
+    };
+    let categorie = puits.as_ref().map_or(Categorie::Audio, |(_, c)| *c);
+    state.trafic.entree(&compteurs, categorie, data.len());
+    let Some((envoi, _)) = puits else {
+        // Requete abandonnee : le flux n'a plus de puits.
+        rangs.oublier(morceau.id);
+        return;
+    };
+
+    if !rangs.accepter(morceau.id, morceau.seq) {
+        warn!(
+            server_id = %server_id,
+            id = morceau.id,
+            seq = morceau.seq,
+            "morceau perdu ou hors d'ordre : flux coupe"
+        );
+        flux.lock().await.remove(morceau.id);
+        return;
+    }
+
+    if envoi.send(morceau.octets.to_vec()).await.is_err() {
+        // Le navigateur a ferme l'onglet : le puits ne sert plus a rien.
+        flux.lock().await.remove(morceau.id);
+    }
 }
 
 /// Octets entres sur le VPS, depuis ce serveur (#6512).

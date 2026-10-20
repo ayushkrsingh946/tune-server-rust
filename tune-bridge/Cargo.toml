@@ -28,3 +28,7 @@ dotenvy = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# #6564 : un faux serveur Tune sur une vraie WebSocket, et l'ancien format
+# base64, dans les tests de bout en bout du pont.
+tokio-tungstenite = "0.26"
+base64 = "0.22"

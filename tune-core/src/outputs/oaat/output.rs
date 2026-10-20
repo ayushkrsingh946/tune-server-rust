@@ -1427,12 +1427,14 @@ impl OutputTarget for OaatOutput {
                                 pause_offset = std::time::Duration::ZERO;
                                 stream_start_ns = super::helpers::now_ns() + 500_000_000;
                                 start = std::time::Instant::now();
+                                // #6497 — l'URI AVANT la position : voir
+                                // l'enchaînement direct ci-dessous.
+                                *current_uri.lock().await = Some(String::new());
                                 position_ms.store(0, Ordering::SeqCst);
                                 duration_ms_arc.store(next.duration_ms, Ordering::SeqCst);
 
                                 *current_title.lock().await = Some(next.title.clone());
                                 *current_artist.lock().await = Some(next.artist.clone());
-                                *current_uri.lock().await = Some(String::new());
 
                                 let fmt_str = format_rate_display(cur_sample_rate, 1, cur_format);
                                 endpoint
@@ -1835,17 +1837,27 @@ impl OutputTarget for OaatOutput {
                                     first_packet_pending = true;
                                     stream_start_ns = super::helpers::now_ns() + 500_000_000;
                                     start = std::time::Instant::now();
-                                    position_ms.store(0, Ordering::SeqCst);
-                                    duration_ms_arc.store(next.duration_ms, Ordering::SeqCst);
-                                    *current_title.lock().await = Some(next.title.clone());
-                                    *current_artist.lock().await = Some(next.artist.clone());
                                     // #6497 — la piste suivante n'a pas de flux :
                                     // l'URI de la piste finie ne doit plus être
                                     // rapportée, comme aux enchaînements DSD natif
                                     // et HTTP. Sinon le garde-fou du rejeu (#5411)
                                     // croit que la piste finie est rejouée et
                                     // relance la suivante depuis zéro.
+                                    //
+                                    // Et l'URI est effacée AVANT la remise à zéro
+                                    // de la position : `get_status` lit la
+                                    // position puis l'URI, et un sondage tombé
+                                    // entre les deux écritures voyait « position
+                                    // 0 + URI de la piste finie », la preuve
+                                    // même du rejeu. Dans cet ordre, il voit au
+                                    // pire l'URI vide avec la position de fin de
+                                    // piste, ce que l'enchaînement HTTP produit
+                                    // déjà et qui ne nomme aucun flux.
                                     *current_uri.lock().await = Some(String::new());
+                                    position_ms.store(0, Ordering::SeqCst);
+                                    duration_ms_arc.store(next.duration_ms, Ordering::SeqCst);
+                                    *current_title.lock().await = Some(next.title.clone());
+                                    *current_artist.lock().await = Some(next.artist.clone());
                                     continue 'direct_tracks;
                                 }
                                 None => {
@@ -4220,3 +4232,7 @@ mod tests_horloge_pause_http_oaat {
         assert_eq!(debut_pts_ns, u64::MAX);
     }
 }
+
+#[cfg(all(test, feature = "oaat"))]
+#[path = "course_position_uri_6497_tests.rs"]
+mod course_position_uri_6497_tests;
