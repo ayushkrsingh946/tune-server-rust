@@ -67,9 +67,18 @@ pub(super) async fn albums_manquants(
                 .into_response();
         }
     };
-    let bibliotheque: Vec<AlbumPossede> = AlbumRepo::with_backend(state.backend.clone())
-        .list_by_artist(id)
-        .unwrap_or_default()
+    // Une bibliothèque illisible n'est pas une bibliothèque vide : la prendre
+    // pour vide annoncerait toute la discographie « manquante » (relecture
+    // de #6636). On rend `indisponible`, comme une panne de MusicBrainz.
+    let albums = match AlbumRepo::with_backend(state.backend.clone()).list_by_artist(id) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(artist_id = id, erreur = %e, "albums_manquants_bibliotheque_illisible_6288");
+            return Json(json!({"statut": "indisponible", "mbid": mbid, "manquants": []}))
+                .into_response();
+        }
+    };
+    let bibliotheque: Vec<AlbumPossede> = albums
         .into_iter()
         .map(|a| AlbumPossede {
             titre: a.title,

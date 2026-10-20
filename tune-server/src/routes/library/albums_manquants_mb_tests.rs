@@ -126,3 +126,29 @@ async fn la_route_soustrait_la_bibliotheque_de_la_discographie_gardee_6288() {
     .await;
     assert_eq!(v["manquants"].as_array().unwrap().len(), 2, "{v}");
 }
+
+/// Relecture de #6636 — une bibliothèque illisible ne fait pas annoncer toute
+/// la discographie « manquante » : la route rend `indisponible`.
+#[tokio::test]
+async fn une_bibliotheque_illisible_n_invente_aucun_manque_6288() {
+    let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+    let id = artiste(&state, Some(ARTISTE));
+    am::garder(
+        &state.backend,
+        ARTISTE,
+        &Discographie {
+            groupes: vec![g(1, "Meddle", &[], "1971-10-30")],
+            tronquee: false,
+            lu_le: chrono::Utc::now().timestamp(),
+        },
+    );
+    // La lecture des albums échoue : la table a disparu.
+    state.backend.execute("DROP TABLE albums", &[]).unwrap();
+    let (statut, v) = get(&state, &format!("/artists/{id}/missing-albums")).await;
+    assert_eq!(statut, 200);
+    assert_eq!(
+        v["statut"], "indisponible",
+        "une bibliothèque illisible a été prise pour vide : {v}"
+    );
+    assert_eq!(v["manquants"], json!([]));
+}
