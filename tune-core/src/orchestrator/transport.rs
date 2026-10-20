@@ -2425,6 +2425,22 @@ impl PlaybackOrchestrator {
             Some(ref sid) => self.streamer.is_seekable_session(sid).await,
             None => false,
         };
+        // #6370 — une sortie d'agent vient de recevoir un flux DÉCODÉ qui
+        // commence à la position : elle doit le savoir pour rapporter la
+        // position dans la piste, et non depuis le début du flux neuf. C'est
+        // le contrat de `LocalOutput::seek` (« noter la position d'un flux
+        // relancé ») ; `SortieAgentTune::seek` le tient chez le maître.
+        if output_type == Some(TYPE_SORTIE_AGENT_TUNE)
+            && !session_is_range_seekable
+            && position_ms > 0
+        {
+            if let Some(output) = { self.outputs.lock().await.get(did) }
+                && let Err(e) = output.lock().await.seek(position_ms).await
+            {
+                warn!(zone_id, position_ms, error = %e, "agent_depart_du_flux_non_note");
+            }
+            return;
+        }
         if !replay_needs_output_seek(
             is_network_output_type(output_type),
             session_is_range_seekable,
@@ -3757,6 +3773,12 @@ impl PlaybackOrchestrator {
             let is_local_output =
                 zone_output_type.as_deref() == Some("local") || zone_output_type.is_none();
             let is_oaat_output = zone_output_type.as_deref() == Some("oaat");
+            // #6370 — la sortie d'un agent Tune est une sortie LOCALE de
+            // l'agent : elle lit son flux d'un bout à l'autre et son `seek` ne
+            // fait que noter la position (`LocalOutput::seek`). Le maître
+            // relance donc le flux à la position, comme pour sa propre sortie
+            // locale ; les agents installés n'ont rien à changer.
+            let is_agent_tune_output = zone_output_type.as_deref() == Some(TYPE_SORTIE_AGENT_TUNE);
             let has_track = state.now_playing.is_some();
             // #6017 (Cyrille, fil 2194, Yamaha R-N2000A) — une piste de la
             // BIBLIOTHÈQUE convertie à la volée (AAC → WAV) est servie par un
@@ -3786,7 +3808,7 @@ impl PlaybackOrchestrator {
                     self.playback.seek(zone_id, original_position_ms).await;
                     return Err(OutputCommandError::failed(OutputCommand::Seek, e));
                 }
-            } else if (is_local_output || is_oaat_output) && has_track {
+            } else if (is_local_output || is_oaat_output || is_agent_tune_output) && has_track {
                 info!(zone_id, position_ms, "seek_local_output_recreating_stream");
                 match self
                     .replay_zone_at_position(zone_id, position_ms, "seek")
