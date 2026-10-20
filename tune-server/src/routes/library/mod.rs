@@ -26,6 +26,8 @@ mod edition_balises;
 mod enrich;
 // Lot 1 de l'enrichissement d'après MetaRust, de Xavier Joly (#4805).
 mod enrichissement_metarust;
+// #6001 — liens ProgArchives / Metal Archives / AllMusic, arbre des genres libre.
+mod liens_et_genres_mb;
 mod passes_metarust;
 // #5469 — les passes que `crate::reprise_des_passes` sait relancer.
 pub(crate) use artwork::{demarrer_images_artistes, demarrer_pochettes_albums};
@@ -483,6 +485,18 @@ pub fn router() -> Router<AppState> {
             "/genre-tree",
             get(genres::genre_tree).put(genres::update_genre_tree),
         )
+        .route(
+            "/genre-tree/musicbrainz",
+            get(liens_et_genres_mb::arbre_musicbrainz),
+        )
+        .route(
+            "/artists/{id}/external-links",
+            get(liens_et_genres_mb::liens_artiste),
+        )
+        .route(
+            "/albums/{id}/external-links",
+            get(liens_et_genres_mb::liens_album),
+        )
         .route("/albums/top-rated", get(albums::top_rated_albums))
         // Lot 1 de l'enrichissement d'après MetaRust (#4805) : complétude,
         // instruments Wikidata, propositions Discogs, BPM.
@@ -660,6 +674,11 @@ pub fn router() -> Router<AppState> {
             get(duplicates::couverture_empreintes).post(duplicates::empreinter_maintenant),
         )
         .route("/duplicates/resolve", post(duplicates::resolve_duplicate))
+        // #6300 — retirer un album en double en entier (masquage, confirmé).
+        .route(
+            "/duplicates/resolve-album",
+            post(duplicates::retirer_album_doublon),
+        )
         .route("/activity", get(stats::library_activity))
         .route("/albums/{id}/bio", get(albums::album_bio))
         .route("/albums/{id}/similar", get(albums::album_similar))

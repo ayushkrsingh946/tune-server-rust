@@ -955,6 +955,24 @@ pub trait StreamingService: Send + Sync {
         false
     }
 
+    /// Les playlists de la bibliothèque du compte, possédées ET suivies, lues
+    /// EN ENTIER, chacune avec `editable` (`Some(false)` : suivie).
+    ///
+    /// #6461 (FabienM, fil 2302, point 1) : chez Qobuz, une playlist
+    /// éditoriale n'entre dans la bibliothèque que si on la met en favori, et
+    /// en sort quand on retire le cœur. Le miroir ([`crate::streaming::favorites_mirror`])
+    /// relit donc ces playlists suivies comme des favoris.
+    ///
+    /// * `None` (défaut) : le service ne sait pas le dire — les playlists
+    ///   restent poussées sans jamais être relues, comme avant ;
+    /// * `Some(Err)` : la lecture a échoué OU n'est pas complète. Le miroir
+    ///   retire une playlist que la lecture ne nomme plus : une liste tronquée
+    ///   lui ferait retirer tout ce qui dépasse la coupe. Une lecture
+    ///   incomplète n'est donc jamais rendue en `Ok`.
+    async fn playlists_de_la_bibliotheque(&self) -> Option<Result<Vec<StreamPlaylist>, TuneError>> {
+        None
+    }
+
     async fn add_favorite(&mut self, fav_type: &str, item_id: &str) -> Result<(), TuneError> {
         let _ = (fav_type, item_id);
         Err(TuneError::Unsupported("not supported".into()))

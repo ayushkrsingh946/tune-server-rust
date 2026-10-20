@@ -1362,6 +1362,13 @@ impl PlaybackOrchestrator {
             .await
             .unwrap_or(false)
     }
+    /// #6256 — rebâtit l'étage casque d'une sortie locale qui joue, et dit
+    /// seulement s'il l'a fait. `refresh_zone_crossfeed` rend `false` aussi
+    /// quand l'étage vient d'être VIDÉ ; une désinstallation, qui vide, a
+    /// besoin de savoir que la sortie l'a reçu.
+    pub async fn rebatir_l_etage_casque_en_direct(&self, zone_id: i64) -> bool {
+        self.pousser_le_crossfeed_en_direct(zone_id).await.is_some()
+    }
     /// [`Self::refresh_zone_crossfeed`], mais qui dit QUAND le réglage atteint
     /// le son, au lieu d'un booléen à plusieurs sens (#4680).
     ///

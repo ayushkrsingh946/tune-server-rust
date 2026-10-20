@@ -41,6 +41,17 @@
 //! ou au chargement d'un autre disque ([`MemoireCd::chargement`]). Un disque
 //! chargé en partie garde le comportement de #6043 : l'éjection libère et
 //! arrête.
+//!
+//! ## Charger sans jouer (#6596)
+//!
+//! Le chargement se lance aussi SANS lecture : [`MemoireCd::charger_le_disque`]
+//! (route `POST /memoire/charger`), que le client propose à l'insertion. Il ne
+//! touche ni à la file ni à la lecture d'aucune zone ; la lecture lancée
+//! ensuite (`FournisseurCd::ouvrir`) retrouve ce chargement par
+//! [`MemoireCd::chargement`] et se sert dans la mémoire. Chaque pas de
+//! pourcentage, puis la fin, passent par l'observateur
+//! ([`MemoireCd::observer`]) : le greffon en fait les évènements
+//! [`EVT_PROGRESSION`] et [`EVT_TERMINE`].
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -64,6 +75,33 @@ pub const OCTETS_D_UN_CD: u64 = 700 * MIO;
 pub const PLAFOND_PAR_DEFAUT: u64 = 800 * MIO;
 /// Plancher du plafond réglable : de quoi tenir une longue piste.
 pub const PLAFOND_MINIMUM: u64 = 64 * MIO;
+
+/// #6596 — les évènements du chargement, sur le bus puis sur le WebSocket :
+/// la [`Progression`] à chaque point de pourcentage gagné, puis une fois à la
+/// fin (`fin` renseignée : `termine` = prêt, `echec` ou `ejecte` = échec,
+/// `libere` = rendu à la demande).
+pub const EVT_PROGRESSION: &str = "cd.memoire.progression";
+pub const EVT_TERMINE: &str = "cd.memoire.termine";
+
+/// Ce que le greffon fait d'une progression (les évènements ci-dessus).
+pub type Observateur = Arc<dyn Fn(&Progression) + Send + Sync>;
+
+/// #6596 — l'observateur de production : chaque progression devient
+/// [`EVT_PROGRESSION`], la fin [`EVT_TERMINE`], avec la [`Progression`]
+/// entière (celle que rendent `GET /etat` et `GET /memoire`).
+pub fn observateur_du_bus(bus: tune_core::event_bus::EventBus) -> Observateur {
+    Arc::new(move |p: &Progression| {
+        let evenement = if p.fin.is_some() {
+            EVT_TERMINE
+        } else {
+            EVT_PROGRESSION
+        };
+        bus.emit(
+            evenement,
+            serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
+        );
+    })
+}
 
 /// Clés de réglage (table `settings`).
 pub const CLE_ACTIF: &str = "cd_charger_en_memoire";
@@ -131,6 +169,9 @@ pub enum Fin {
     Ejecte,
     /// Libéré (éjection commandée, réglage, autre disque, extraction).
     Libere,
+    /// #6596 — le chargement n'a pas pu aller au bout (lecture, écriture ou
+    /// fichier temporaire impossible) : la mémoire est rendue.
+    Echec,
 }
 
 enum Stockage {
@@ -243,10 +284,12 @@ pub struct Chargement {
     arret: AtomicBool,
     fil: Mutex<Option<std::thread::JoinHandle<()>>>,
     prochain_lecteur: AtomicU64,
+    /// #6596 — reçoit la progression (évènements du greffon).
+    observateur: Option<Observateur>,
 }
 
 impl Chargement {
-    fn new(toc: &Toc, disc_id: String, generation: u64) -> Self {
+    fn new(toc: &Toc, disc_id: String, generation: u64, observateur: Option<Observateur>) -> Self {
         let pistes: Vec<Piste> = toc
             .pistes_audio()
             .map(|p| {
@@ -281,6 +324,14 @@ impl Chargement {
             arret: AtomicBool::new(false),
             fil: Mutex::new(None),
             prochain_lecteur: AtomicU64::new(1),
+            observateur,
+        }
+    }
+
+    /// #6596 — passe la progression à l'observateur, s'il y en a un.
+    fn annoncer(&self) {
+        if let Some(o) = &self.observateur {
+            o(&self.progression());
         }
     }
 
@@ -310,18 +361,26 @@ impl Chargement {
 
     fn terminer(&self, fin: Fin) {
         let mut e = self.verrou();
+        let mut change = false;
         if e.fin.is_none() || fin != Fin::Termine {
             if fin != Fin::Termine {
                 e.rendre_la_memoire();
             }
+            change = e.fin.as_ref() != Some(&fin);
             e.fin = Some(fin);
         }
         drop(e);
+        // L'annonce AVANT le réveil : qui attend la fin la trouve annoncée.
+        if change {
+            self.annoncer();
+        }
         self.signal.notify_all();
     }
 
     fn charger(&self, lecteur: &dyn LecteurDisque, plafond: u64) {
         tracing::info!(disc_id = %self.disc_id, plafond, "cd_memoire_chargement_demarre");
+        self.annoncer();
+        let mut pourcentage_annonce = 0u8;
         let mut bilan = Bilan::default();
         loop {
             if self.arret.load(Ordering::SeqCst) {
@@ -353,7 +412,7 @@ impl Chargement {
                             Err(err) => {
                                 tracing::warn!(%err, "cd_memoire_fichier_temporaire_impossible");
                                 drop(e);
-                                return self.terminer(Fin::Libere);
+                                return self.terminer(Fin::Echec);
                             }
                         }
                     };
@@ -375,7 +434,7 @@ impl Chargement {
                 }
                 Err(err) => {
                     tracing::warn!(%err, "cd_memoire_lecture_impossible");
-                    return self.terminer(Fin::Libere);
+                    return self.terminer(Fin::Echec);
                 }
             };
             let mut e = self.verrou();
@@ -387,15 +446,22 @@ impl Chargement {
             if let Err(err) = ecrire(e.pistes[i].stockage.as_mut(), decalage, &octets) {
                 tracing::warn!(%err, "cd_memoire_ecriture_impossible");
                 drop(e);
-                return self.terminer(Fin::Libere);
+                return self.terminer(Fin::Echec);
             }
             e.pistes[i].blocs[b] = true;
             e.secteurs_charges += n as u64;
             e.secteurs_perdus += bilan.secteurs_illisibles - perdus_avant;
             e.piste_en_cours = Some(e.pistes[i].numero);
             e.curseur = (i, b + 1);
+            let pourcentage = pourcentage_de(e.secteurs_charges, self.secteurs_total);
             drop(e);
             self.signal.notify_all();
+            // #6596 — un évènement par point gagné, pas un par bloc (un CD
+            // en compte des milliers). Le 100 % part avec la fin.
+            if pourcentage > pourcentage_annonce && pourcentage < 100 {
+                pourcentage_annonce = pourcentage;
+                self.annoncer();
+            }
         }
     }
 
@@ -426,9 +492,7 @@ impl Chargement {
             disc_id: self.disc_id.clone(),
             secteurs_charges: e.secteurs_charges,
             secteurs_total: self.secteurs_total,
-            pourcentage: (e.secteurs_charges * 100)
-                .checked_div(self.secteurs_total)
-                .unwrap_or(100) as u8,
+            pourcentage: pourcentage_de(e.secteurs_charges, self.secteurs_total),
             pistes_chargees: e
                 .pistes
                 .iter()
@@ -500,6 +564,10 @@ impl Chargement {
             self.signal.notify_all();
         }
     }
+}
+
+fn pourcentage_de(charges: u64, total: u64) -> u8 {
+    (charges * 100).checked_div(total).unwrap_or(100) as u8
 }
 
 fn ejection() -> std::io::Error {
@@ -602,6 +670,8 @@ pub struct MemoireCd {
     /// #6410 — le disque courant, entier en mémoire, a été éjecté : la
     /// lecture continue depuis la mémoire.
     garde: AtomicBool,
+    /// #6596 — les évènements du greffon, passés à chaque chargement.
+    observateur: RwLock<Option<Observateur>>,
 }
 
 impl MemoireCd {
@@ -611,7 +681,13 @@ impl MemoireCd {
             courant: Mutex::new(None),
             ram_disponible: ram_disponible(),
             garde: AtomicBool::new(false),
+            observateur: RwLock::new(None),
         }
+    }
+
+    /// #6596 — la progression de chaque chargement à venir passe par `o`.
+    pub fn observer(&self, o: Observateur) {
+        *self.observateur.write().unwrap_or_else(|p| p.into_inner()) = Some(o);
     }
 
     /// Les réglages rangés, à défaut ceux que la RAM disponible permet.
@@ -685,7 +761,17 @@ impl MemoireCd {
             }
             ancien.liberer();
         }
-        let c = Arc::new(Chargement::new(toc, disc_id.to_string(), generation));
+        let observateur = self
+            .observateur
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let c = Arc::new(Chargement::new(
+            toc,
+            disc_id.to_string(),
+            generation,
+            observateur,
+        ));
         {
             let mut e = c.verrou();
             if let Some(depart) = e.situer(depart) {
@@ -695,6 +781,36 @@ impl MemoireCd {
         c.demarrer(lecteur.clone(), r.plafond_octets);
         *courant = Some(c.clone());
         Some(c)
+    }
+
+    /// #6596 (relecture rc7) — le disque d'un AUTRE `disc_id` qui tient
+    /// encore la mémoire (chargement en cours, ou entier : gardé après son
+    /// éjection, #6410), et s'il est encore en cours de chargement. Charger
+    /// un autre disque le libérerait.
+    pub fn autre_disque_en_memoire(&self, disc_id: &str) -> Option<(String, bool)> {
+        let c = self.courant()?;
+        if c.disc_id == disc_id {
+            return None;
+        }
+        match c.verrou().fin {
+            None => Some((c.disc_id.clone(), true)),
+            Some(Fin::Termine) => Some((c.disc_id.clone(), false)),
+            _ => None,
+        }
+    }
+
+    /// #6596 — « Charger en mémoire » sans rien jouer : le disque entier, du
+    /// début, ou le chargement déjà en cours (ou fini) de ce disque. Aucune
+    /// zone n'est touchée. `None` si le réglage est désactivé.
+    pub fn charger_le_disque(
+        &self,
+        lecteur: &Arc<dyn LecteurDisque>,
+        toc: &Toc,
+        disc_id: &str,
+        generation: u64,
+    ) -> Option<Arc<Chargement>> {
+        let depart = toc.pistes_audio().next().map(|p| p.debut).unwrap_or(0);
+        self.chargement(lecteur, toc, disc_id, generation, depart)
     }
 
     /// Arrête le chargement en cours et rend la mémoire. Bloquant.

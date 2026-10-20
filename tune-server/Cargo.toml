@@ -1719,3 +1719,12 @@ required-features = ["postgres"]
 [[test]]
 name = "services_remplacables_6336"
 path = "tests/services_remplacables_6336.rs"
+
+# #6454 — `GET /profiles` ne rend plus `200 []` sur une base en échec : un
+# 500 au code lisible, et une ligne ERROR au journal. Abonné `tracing` GLOBAL,
+# donc un binaire à lui seul et un seul essai dedans (leçon de
+# `panne_sql_journalisee`). `autotests = false` plus haut : sans cette cible,
+# le fichier ne serait jamais compilé.
+[[test]]
+name = "profils_panne_de_base_6454"
+path = "tests/profils_panne_de_base_6454.rs"

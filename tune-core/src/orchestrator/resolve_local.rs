@@ -3243,6 +3243,12 @@ impl PlaybackOrchestrator {
             info,
             ..
         } = format;
+        // #6630 — le décodeur part de `seek_ms` : la durée de la session est
+        // celle qui RESTE à servir, comme celle du départ natif (#6059). Sans
+        // quoi `Content-Length` annonçait la piste entière et le corps se
+        // fermait plus tôt (`IncompleteBody` chez le client).
+        let mut info = info;
+        info.duration_ms = duree_servie_apres_le_seek(info.duration_ms, req.seek_ms);
         let flux = {
             // ── Streaming transcode (WAV for local/OAAT) ──────────
             // Use the computed WAV content length for the DIDL size
@@ -3806,6 +3812,18 @@ impl PlaybackOrchestrator {
             )
         };
         Ok(flux)
+    }
+}
+
+/// #6630 — la durée qu'une session décodée à partir de `seek_ms` sert
+/// vraiment : la durée de la piste moins la position de départ. Depuis le
+/// début (`seek_ms` nul ou absent), rien ne change. Un départ au-delà de la
+/// fin rend `Some(0)`, que `StreamInfo::wav_content_length` lit comme une
+/// longueur inconnue : pas de `Content-Length` plutôt qu'un faux.
+fn duree_servie_apres_le_seek(duree_ms: Option<u64>, seek_ms: Option<u64>) -> Option<u64> {
+    match seek_ms.filter(|s| *s > 0) {
+        Some(seek) => duree_ms.map(|d| d.saturating_sub(seek)),
+        None => duree_ms,
     }
 }
 
