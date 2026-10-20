@@ -1614,7 +1614,13 @@ impl PlaybackOrchestrator {
         let stream_url = self
             .streamer
             .get_stream_url(&session_id, &server_ip, conteneur);
-        info!(url = %audio_url, conteneur, stream_id = %session_id, "direct_proxy_session");
+        // L'hôte seul : le chemin ou la requête d'un flux privé ou payant porte
+        // souvent un jeton, qui n'a rien à faire au journal (#6468).
+        let hote = reqwest::Url::parse(audio_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        info!(hote = %hote, conteneur, stream_id = %session_id, "direct_proxy_session");
         (stream_url, session_id)
     }
 

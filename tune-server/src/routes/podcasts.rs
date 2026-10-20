@@ -481,7 +481,7 @@ async fn play_episode(
                         None,
                     )
                     .await;
-                info!(zone_id, output_type, stream_url = %url, "podcast_episode_relaye");
+                info!(zone_id, output_type, stream_id = %session, "podcast_episode_relaye");
                 Some((url, session))
             } else {
                 None
