@@ -10283,6 +10283,7 @@ async fn banc_session_morte_pendant_l_envoi_6658(
         channels: Some(2),
         origin_url: None,
         bitrate_kbps: None,
+        format_source: None,
     };
     (orch, sid, req, resolved, barriere)
 }
