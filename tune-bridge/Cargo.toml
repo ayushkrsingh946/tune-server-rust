@@ -34,6 +34,8 @@ tune-laissez-passer = { path = "../tune-laissez-passer" }
 tempfile = "3"
 # Le faux site des tests signe avec les cles de test des vecteurs.
 tune-laissez-passer = { path = "../tune-laissez-passer", features = ["fabrique"] }
-# Un vrai client WebSocket pour verifier la fermeture d'une session coupee.
-# Deja dans Cargo.lock (tune-core, `cloud-relay`) : aucune caisse nouvelle.
+# #6564 : un faux serveur Tune sur une vraie WebSocket, et l'ancien format
+# base64, dans les tests de bout en bout du pont. #6603 : aussi un vrai
+# client WebSocket pour verifier la fermeture d'une session coupee.
 tokio-tungstenite = "0.26"
+base64 = "0.22"

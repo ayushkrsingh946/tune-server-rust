@@ -162,6 +162,61 @@ async fn les_octets_d_un_flux_audio_sont_comptes_exactement() {
     assert_eq!(m.formats[0].sessions, 1);
 }
 
+/// Le même témoin quand le serveur envoie ses morceaux en trames binaires
+/// (#6564) : l'entrée audio compte les octets EXACTS des trames binaires,
+/// en-tête compris, et non plus la longueur d'un base64 qui ne circule plus.
+#[tokio::test]
+async fn les_octets_d_un_flux_binaire_sont_comptes_exactement() {
+    let (state, mut rx) = pont();
+    let son: [&[u8]; 2] = [b"fLaC", b"\0\0\0\x22"];
+    let serveur = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let brut = recevoir(&mut rx).await;
+            let msg: serde_json::Value = serde_json::from_str(&brut).unwrap();
+            let id = msg["id"].as_str().unwrap().to_string();
+            let debut = serde_json::json!({
+                "type": "relay.stream_start", "id": id, "status": 200,
+                "headers": { "content-type": "audio/flac" },
+            })
+            .to_string();
+            let fin = serde_json::json!({"type": "relay.stream_end", "id": id}).to_string();
+            let mut rangs = crate::morceau_binaire::Rangs::default();
+            let mut emis = debut.len() + fin.len();
+            crate::ws_server::handle_server_message(&state, "srv", &debut).await;
+            for (seq, octets) in son.iter().enumerate() {
+                // Le format de `crate::morceau_binaire`, écrit à la main.
+                let mut trame = vec![1u8, id.len() as u8];
+                trame.extend_from_slice(id.as_bytes());
+                trame.extend_from_slice(&(seq as u64).to_be_bytes());
+                trame.extend_from_slice(octets);
+                emis += trame.len();
+                crate::ws_server::handle_server_binary(&state, "srv", &trame, &mut rangs).await;
+            }
+            crate::ws_server::handle_server_message(&state, "srv", &fin).await;
+            (brut.len(), emis, rx)
+        })
+    };
+    let r = flux(&state, "piste-6564.flac", None).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(corps_entier(r).await, b"fLaC\0\0\0\x22");
+    let (recu, emis, _rx) = serveur.await.unwrap();
+
+    let m = state.trafic.clore_minute(0);
+    assert_eq!(
+        m.categories.audio.r#in, emis as u64,
+        "entree audio : les trames binaires du serveur, en-tete compris"
+    );
+    assert_eq!(m.categories.audio.out, 8 + recu as u64);
+    assert_eq!(
+        (m.categories.api.r#in, m.categories.api.out),
+        (0, 0),
+        "un morceau binaire n'est pas de l'api"
+    );
+    assert_eq!(m.sessions.completed, 1);
+    assert_eq!(m.servers[0].bytes_in, m.categories.audio.r#in);
+}
+
 /// Le navigateur part au milieu (saut de piste ou coupure) : la session finit
 /// `client_closed`, seuls les octets REMIS sont comptés en sortie, et la
 /// requête suivante du même flux avec un `Range` est une reprise.
