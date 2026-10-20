@@ -660,6 +660,11 @@ pub fn router() -> Router<AppState> {
             get(duplicates::couverture_empreintes).post(duplicates::empreinter_maintenant),
         )
         .route("/duplicates/resolve", post(duplicates::resolve_duplicate))
+        // #6300 — retirer un album en double en entier (masquage, confirmé).
+        .route(
+            "/duplicates/resolve-album",
+            post(duplicates::retirer_album_doublon),
+        )
         .route("/activity", get(stats::library_activity))
         .route("/albums/{id}/bio", get(albums::album_bio))
         .route("/albums/{id}/similar", get(albums::album_similar))
