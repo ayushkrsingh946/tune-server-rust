@@ -2463,6 +2463,54 @@ impl PlaybackOrchestrator {
         .await;
     }
 
+    /// #6380 (Sandro, fils 2351 et 2352, Diretta Renderer en DLNA) — la
+    /// « Lecture » qui suit un REDÉMARRAGE, à la position restaurée.
+    ///
+    /// Les chemins « Lecture après arrêt » de `routes/playback.rs` passent la
+    /// position restaurée dans `seek_ms` (#2876). Mais une piste de la
+    /// bibliothèque en passthrough part dans une session FICHIER, une piste
+    /// Qobuz dans une session MANDATAIRE : ces sessions servent depuis
+    /// l'octet 0 et ne lisent jamais `seek_ms` (#2893). Le renderer ouvrait
+    /// donc le flux en `bytes=0-`, sans aucun `Seek` derrière : le morceau
+    /// repartait de 0:00 alors que le journal annonçait
+    /// `reprise_a_la_position_restauree position_ms=7000`.
+    ///
+    /// Même remède que la relecture, le rétablissement de `resume` et la
+    /// reprise après décrochage : [`Self::seek_output_after_replay`], avec sa
+    /// règle ([`replay_needs_output_seek`] : sortie réseau, session seekable,
+    /// position non nulle), son garde du départ natif (#6059) et son `Seek`
+    /// détaché après la pose. Une session décodée (OAAT, sortie locale,
+    /// traitement actif) part déjà de l'offset et ne reçoit rien de plus.
+    ///
+    /// Sans position (`seek_ms` nul ou absent), c'est exactement
+    /// [`Self::play`].
+    pub async fn play_a_la_position_restauree(
+        &self,
+        req: PlayRequest,
+    ) -> Result<PlayResult, String> {
+        let zone_id = req.zone_id;
+        let position_ms = req.seek_ms.unwrap_or(0);
+        let device_id = req.output_device_id.clone().or_else(|| {
+            ZoneRepo::with_backend(self.db.clone())
+                .get(zone_id)
+                .ok()
+                .flatten()
+                .and_then(|z| z.output_device_id)
+        });
+        let resultat = self.play(req).await?;
+        // Rien n'est parti vers la sortie (lecture évincée, double appui
+        // fusionné) : il n'y a pas de flux neuf à rattraper.
+        if position_ms > 0
+            && resultat.output_sent
+            && let Some(did) = device_id
+        {
+            let output_type = self.output_type_of(&did).await;
+            self.seek_output_after_replay(zone_id, Some(&did), output_type.as_deref(), position_ms)
+                .await;
+        }
+        Ok(resultat)
+    }
+
     /// Fil 2125 (#5711) — le saut de la reprise automatique après décrochage
     /// du renderer (#4645), appelé par le sondeur juste après
     /// `play_from_queue`.
