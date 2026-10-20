@@ -38,7 +38,7 @@ use crate::poller::decisions;
 const FLUX_FINI: &str = "95d3dfd1-000e-4bcd-96da-8ceef446eb47";
 
 /// WAV canonique 16 bits, 44,1 kHz, stéréo, de `millis` ms, au contenu non nul.
-fn wav(millis: u32) -> Vec<u8> {
+pub(super) fn wav(millis: u32) -> Vec<u8> {
     let trames = 44_100 * millis / 1000;
     let data_size = trames * 4;
     let mut b = b"RIFF".to_vec();
@@ -60,7 +60,13 @@ fn wav(millis: u32) -> Vec<u8> {
 
 /// Faux endpoint PCM : HelloAck, accepte tout FormatPropose, répond à
 /// l'horloge, avale l'audio. Rien n'est joué.
-async fn faux_endpoint() -> u16 {
+pub(super) async fn faux_endpoint() -> u16 {
+    faux_endpoint_avec(false).await
+}
+
+/// Le même, qui annonce aussi le DSD natif (`DsdU8`, jusqu'au DSD512) quand
+/// `dsd` est vrai.
+pub(super) async fn faux_endpoint_avec(dsd: bool) -> u16 {
     let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let control_port = tcp.local_addr().unwrap().port();
     let audio_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -100,12 +106,20 @@ async fn faux_endpoint() -> u16 {
                                 capabilities: EndpointCapabilities {
                                     pcm_max_rate: 384_000,
                                     pcm_max_bits: 32,
-                                    dsd_max_rate: None,
+                                    dsd_max_rate: dsd.then_some(512),
                                     channels_max: 2,
-                                    formats: vec![
-                                        oaat_core::format::AudioFormat::PcmS16le,
-                                        oaat_core::format::AudioFormat::PcmS24le,
-                                    ],
+                                    formats: if dsd {
+                                        vec![
+                                            oaat_core::format::AudioFormat::PcmS16le,
+                                            oaat_core::format::AudioFormat::PcmS24le,
+                                            oaat_core::format::AudioFormat::DsdU8,
+                                        ]
+                                    } else {
+                                        vec![
+                                            oaat_core::format::AudioFormat::PcmS16le,
+                                            oaat_core::format::AudioFormat::PcmS24le,
+                                        ]
+                                    },
                                     volume: None,
                                     gapless: true,
                                     seek: false,

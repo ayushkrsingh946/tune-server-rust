@@ -197,6 +197,8 @@ tokio = { workspace = true, features = ["test-util"] }
 tune-core = { path = "../tune-core", default-features = false, features = [
     "journal-de-test",
     "isolement-disque-de-test",
+    # #6336 : services remplaçables en test (tests/services_remplacables_6336.rs).
+    "services-factices",
 ] }
 
 # Purge à froid de la mémoire libre gardée par la glibc : binaire à part, le
@@ -216,6 +218,12 @@ path = "tests/sendspin_point_d_acces_s2a.rs"
 [[test]]
 name = "pont_lien_d_acces"
 path = "tests/pont_lien_d_acces.rs"
+
+# Le pont se pilote en administrateur ; renouvellement du lien d'accès.
+# `autotests = false` plus haut : sans cette cible, jamais compilé.
+[[test]]
+name = "pont_administration"
+path = "tests/pont_administration.rs"
 
 # #3326 — le mode de transition (un `client/hello` en clair). `autotests =
 # false` plus haut : sans cette cible, le fichier ne serait JAMAIS compilé, et
@@ -1703,3 +1711,11 @@ path = "tests/playlist_manager_alias_deprecies.rs"
 name = "pg_balises_6124"
 path = "tests/pg_balises_6124.rs"
 required-features = ["postgres"]
+
+# #6336 — AirPlay 2, SMB, Qobuz, TIDAL et Deezer éprouvés par le vrai routeur
+# contre des faux locaux. Binaire à lui seul : les substitutions de programmes
+# (`tune_core::services_factices`) sont un état de PROCESSUS. `autotests =
+# false` plus haut : sans cette cible, le banc ne serait JAMAIS compilé.
+[[test]]
+name = "services_remplacables_6336"
+path = "tests/services_remplacables_6336.rs"
