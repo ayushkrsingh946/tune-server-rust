@@ -112,3 +112,38 @@ async fn une_requete_fautive_rend_400_avec_sa_position_6287() {
     let (statut, corps) = requete(&app, "  ").await;
     assert_eq!(statut, StatusCode::BAD_REQUEST, "{corps}");
 }
+
+/// Relecture rc7 : sous NON, un critère refusé rendrait toute la
+/// bibliothèque. La route refuse la requête entière.
+#[tokio::test]
+async fn un_refus_sous_une_negation_rend_400_6287() {
+    let app = app();
+    let (statut, corps) = requete(&app, "non ajout:foo..bar").await;
+    assert_eq!(statut, StatusCode::BAD_REQUEST, "{corps}");
+    assert_eq!(corps["error"], "requete_invalide");
+    assert!(
+        corps["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("négation"),
+        "{corps}"
+    );
+    // Sans NON, le refus reste signalé et ne retient rien.
+    let (statut, corps) = requete(&app, "ajout:foo..bar").await;
+    assert_eq!(statut, StatusCode::OK, "{corps}");
+    assert_eq!(corps["total"], 0, "{corps}");
+    assert_ne!(corps["regles_refusees"], json!([]), "{corps}");
+}
+
+/// Relecture rc7 : longueur et profondeur bornées, en 400.
+#[tokio::test]
+async fn une_requete_demesuree_rend_400_6287() {
+    let app = app();
+    let longue = format!("titre:{}", "a".repeat(5000));
+    let profonde = format!("{}genre:jazz{}", "(".repeat(500), ")".repeat(500));
+    for q in [longue, profonde] {
+        let (statut, corps) = requete(&app, &q).await;
+        assert_eq!(statut, StatusCode::BAD_REQUEST, "{corps}");
+        assert_eq!(corps["error"], "requete_invalide", "{corps}");
+    }
+}

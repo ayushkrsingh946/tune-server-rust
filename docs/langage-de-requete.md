@@ -42,7 +42,7 @@ ET lie plus fort que OU : `a b ou c` se lit `(a ET b) OU c`.
 | texte (genre, compositeur…) | contient | `=` égal, `!=` différent, `:vide`, `!=vide` |
 | nombre (année, durée…) | égal ; `a..b` entre | `>` `>=` `<` `<=` `!=` ; la durée accepte `90s`, `5min`, `1h`, `4:30` |
 | écoutes | égal ; `a..b` entre | `>` `>=` `<` `<=` (« moins de » devient « entre 0 et … » : une piste jamais écoutée a zéro écoute) |
-| date (ajout, dernière écoute) | `:30j` (30 derniers jours), `:jamais` ; `a..b` entre | `>` après, `<` avant |
+| date (ajout, dernière écoute) | `:30j` (30 derniers jours), `:jamais` ; `a..b` entre | `>` après, `<` avant (strictes : `>=` et `<=` sont refusés) |
 | étiquette | par identifiant | `!=` |
 | favori | `favori`, `favori:album`, `favori:artiste` | `!=` |
 
@@ -67,6 +67,18 @@ genre:jazz annee:1955..1965 non credit(role: producer)
 (compositeur:Bach ou compositeur:Haendel) duree>10min
 ecoutes>=5 derniere_ecoute<2025-01-01
 ```
+
+### Les bornes
+
+Une requête fait au plus 2 000 caractères et 32 niveaux imbriqués
+(parenthèses et négations cumulées). Au-delà, la route rend `400
+requete_invalide`.
+
+Sous une négation, un critère que le moteur refuse (une plage de dates
+illisible, par exemple) vaudrait FAUX, et sa négation VRAI : la requête
+rendrait toute la bibliothèque. Elle est donc refusée entière, en `400
+requete_invalide` avec `position: null`. Hors négation, le refus ne retient
+rien et reste signalé dans `regles_refusees`, comme à l'aperçu.
 
 ## Vers l'éditeur visuel
 

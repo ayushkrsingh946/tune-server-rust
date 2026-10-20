@@ -382,3 +382,68 @@ fn une_valeur_ne_sort_jamais_de_sa_regle_6287() {
         "le tiret interne reste dans le mot"
     );
 }
+
+// ── Relecture rc7 : bornes, négation d'un refus, dates, débordements ───────
+
+/// Une requête trop longue ou trop imbriquée est refusée à l'analyse : la
+/// descente récursive (analyse puis compilation) ne doit pas dépendre de ce
+/// qu'envoie le client.
+#[test]
+fn une_requete_est_bornee_en_longueur_et_en_profondeur_6287() {
+    let longue = format!("titre:\"{}\"", "a".repeat(LONGUEUR_MAX));
+    let e = analyser(&longue).expect_err("requête trop longue acceptée");
+    assert!(e.message.contains("trop longue"), "{e}");
+    let juste = format!("titre:{}", "a".repeat(LONGUEUR_MAX - 6));
+    assert!(
+        analyser(&juste).is_ok(),
+        "{LONGUEUR_MAX} caractères passent"
+    );
+
+    let parentheses = |n: usize| format!("{}genre:jazz{}", "(".repeat(n), ")".repeat(n));
+    assert!(analyser(&parentheses(PROFONDEUR_MAX)).is_ok());
+    let e = analyser(&parentheses(PROFONDEUR_MAX + 1)).expect_err("imbrication sans borne");
+    assert!(e.message.contains("imbriquées"), "{e}");
+
+    let negations = |n: usize| format!("{}genre:jazz", "non ".repeat(n));
+    assert!(analyser(&negations(PROFONDEUR_MAX)).is_ok());
+    let e = analyser(&negations(PROFONDEUR_MAX + 1)).expect_err("négations sans borne");
+    assert!(e.message.contains("imbriquées"), "{e}");
+    // 1 000 parenthèses : une erreur, pas un débordement de pile.
+    assert!(analyser(&parentheses(1000)).is_err());
+}
+
+/// Sous NON, un critère que le moteur refuse (FAUX) deviendrait VRAI : la
+/// compilation le signale à part, pour que la route refuse la requête.
+#[test]
+fn un_refus_sous_une_negation_est_signale_a_part_6287() {
+    let ctx = RefCtx::root(&EmptyResolver, Some(1));
+    let c = compiler(&analyser("non ajout:foo..bar").unwrap(), &ctx);
+    assert!(!c.refusees.is_empty(), "le moteur devait refuser la plage");
+    assert_eq!(c.refusees_sous_non, c.refusees);
+    let c = compiler(&analyser("genre:jazz ajout:foo..bar").unwrap(), &ctx);
+    assert!(!c.refusees.is_empty());
+    assert!(c.refusees_sous_non.is_empty(), "sans NON, FAUX reste FAUX");
+}
+
+/// Le moteur ne connaît que `>` et `<` sur les dates : `>=` et `<=` sont
+/// refusés plutôt que rabattus sans le dire.
+#[test]
+fn une_date_refuse_les_comparaisons_larges_6287() {
+    for texte in ["ajout>=2024-01-01", "derniere_ecoute<=2024-01-01"] {
+        let e = analyser(texte).expect_err(texte);
+        assert!(e.message.contains("strictes"), "{texte} : {e}");
+    }
+    assert_eq!(
+        regle_seule("ajout>2024-01-01"),
+        json!({"field": "added_at", "op": ">", "value": "2024-01-01"})
+    );
+}
+
+/// Une durée démesurée est refusée, sans débordement arithmétique.
+#[test]
+fn une_duree_demesuree_est_refusee_6287() {
+    assert_eq!(duree_ms("9223372036854775807h"), None);
+    assert_eq!(duree_ms("9223372036854775807:00"), None);
+    assert_eq!(duree_ms("4:30"), Some(270_000));
+    assert!(analyser("duree>9223372036854775807h").is_err());
+}

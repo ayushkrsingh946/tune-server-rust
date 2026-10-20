@@ -1094,7 +1094,10 @@ struct RequeteTextuelle {
 ///   `match_mode` (ou `null` : requête imbriquée ou niée, sans forme
 ///   visuelle) ;
 /// - 400 : `{"error": "requete_invalide", "message", "position"}`, la position
-///   en caractères depuis le début de la requête.
+///   en caractères depuis le début de la requête. La requête est bornée
+///   (`LONGUEUR_MAX` caractères, `PROFONDEUR_MAX` imbrications). Un critère
+///   que le moteur refuse sous une négation refuse toute la requête, avec
+///   `position: null`.
 ///
 /// Les favoris de SERVICE et les pistes de catalogue qu'ajoute l'aperçu
 /// (règles `source`, `catalogue:`) ne sont pas ajoutés ici : la requête porte
@@ -1124,6 +1127,22 @@ async fn requete_textuelle(
         let resolver = DbRefResolver::new(&state.backend);
         let ctx = RefCtx::root(&resolver, Some(profile.id()));
         let compilee = crate::requete_texte::compiler(&arbre, &ctx);
+        // Sous NON, un critère refusé (FAUX) deviendrait VRAI et rendrait
+        // toute la bibliothèque : la requête entière est refusée.
+        if !compilee.refusees_sous_non.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "requete_invalide",
+                    "message": format!(
+                        "critère refusé sous une négation (il rendrait toute la bibliothèque) : {}",
+                        compilee.refusees_sous_non.join(", ")
+                    ),
+                    "position": null,
+                })),
+            )
+                .into_response();
+        }
         // L'ordre et la borne : ceux du moteur, sans règle.
         let (_w, order, limit_clause, _r) =
             build_smart_query_rapport("[]", "all", sort_by, sort_order, body.max_tracks, &ctx);

@@ -299,7 +299,10 @@ fn nombre(s: &str) -> Option<i64> {
 fn duree_ms(s: &str) -> Option<i64> {
     let s = simplifier(s);
     if let Some((m, sec)) = s.split_once(':') {
-        return Some((nombre(m)? * 60 + nombre(sec)?) * 1000);
+        return nombre(m)?
+            .checked_mul(60)?
+            .checked_add(nombre(sec)?)?
+            .checked_mul(1000);
     }
     let (chiffres, unite): (String, String) = s.chars().partition(|c| c.is_ascii_digit());
     let n: i64 = chiffres.parse().ok()?;
@@ -313,7 +316,7 @@ fn duree_ms(s: &str) -> Option<i64> {
     if !s.starts_with(|c: char| c.is_ascii_digit()) {
         return None;
     }
-    Some(n * facteur * 1000)
+    n.checked_mul(facteur)?.checked_mul(1000)
 }
 
 /// `30j`, `30d`, `30` : un nombre de jours.
@@ -415,9 +418,13 @@ fn regle(
                     Some(n) => r(regles_sql::DANS_LES_DERNIERS_JOURS, json!(n)),
                     None => refus("« :30j » (les 30 derniers jours), « :jamais » ou une plage"),
                 },
-                ">" | ">=" => r(">", json!(valeur)),
-                "<" | "<=" => r("<", json!(valeur)),
-                _ => refus("une date se compare par « > », « < », une plage ou « :30j »"),
+                ">" => r(">", json!(valeur)),
+                "<" => r("<", json!(valeur)),
+                // Le moteur ne connaît que les comparaisons strictes : `>=`
+                // rabattu sur `>` perdrait la borne sans le dire.
+                _ => {
+                    refus("une date se compare par « > », « < » (strictes), une plage ou « :30j »")
+                }
             }
         }
         Famille::Source => match op {
@@ -487,7 +494,15 @@ struct Analyse {
     jetons: Vec<(usize, Jeton)>,
     i: usize,
     fin: usize,
+    /// Parenthèses et négations ouvertes : l'analyse et la compilation
+    /// descendent d'un appel par niveau.
+    profondeur: usize,
 }
+
+/// La plus longue requête acceptée, en caractères.
+pub const LONGUEUR_MAX: usize = 2000;
+/// Le plus d'imbrications acceptées (parenthèses et négations cumulées).
+pub const PROFONDEUR_MAX: usize = 32;
 
 fn est_mot(j: Option<&Jeton>, mots: &[&str]) -> bool {
     matches!(j, Some(Jeton::Mot(m)) if mots.contains(&simplifier(m).as_str()))
@@ -504,6 +519,17 @@ impl Analyse {
 
     fn position(&self) -> usize {
         self.jetons.get(self.i).map_or(self.fin, |(p, _)| *p)
+    }
+
+    fn descendre(&mut self) -> Result<(), ErreurDeRequete> {
+        self.profondeur += 1;
+        if self.profondeur > PROFONDEUR_MAX {
+            return Err(erreur(
+                self.position(),
+                format!("plus de {PROFONDEUR_MAX} parenthèses ou négations imbriquées"),
+            ));
+        }
+        Ok(())
     }
 
     fn prendre(&mut self) -> Option<(usize, Jeton)> {
@@ -556,7 +582,10 @@ impl Analyse {
     fn unaire(&mut self) -> Result<Noeud, ErreurDeRequete> {
         if matches!(self.voir(), Some(Jeton::Non)) || est_mot(self.voir(), MOTS_NON) {
             self.i += 1;
-            return Ok(Noeud::Non(Box::new(self.unaire()?)));
+            self.descendre()?;
+            let n = self.unaire()?;
+            self.profondeur -= 1;
+            return Ok(Noeud::Non(Box::new(n)));
         }
         self.atome()
     }
@@ -565,7 +594,9 @@ impl Analyse {
         let position = self.position();
         match self.prendre() {
             Some((_, Jeton::ParOuvrante)) => {
+                self.descendre()?;
                 let dedans = self.ou()?;
+                self.profondeur -= 1;
                 match self.prendre() {
                     Some((_, Jeton::ParFermante)) => Ok(dedans),
                     _ => Err(erreur(position, "parenthèse ouverte jamais fermée")),
@@ -701,6 +732,12 @@ fn decrire(j: &Jeton) -> String {
 /// Lit une requête. Une requête vide est une erreur : elle ne dit pas quoi
 /// chercher, et rendre la bibliothèque entière serait la faute de #1231.
 pub fn analyser(texte: &str) -> Result<Noeud, ErreurDeRequete> {
+    if texte.chars().count() > LONGUEUR_MAX {
+        return Err(erreur(
+            LONGUEUR_MAX,
+            format!("requête trop longue : {LONGUEUR_MAX} caractères au plus"),
+        ));
+    }
     let jetons = lire_les_jetons(texte)?;
     if jetons.is_empty() {
         return Err(erreur(0, "requête vide"));
@@ -709,6 +746,7 @@ pub fn analyser(texte: &str) -> Result<Noeud, ErreurDeRequete> {
         jetons,
         i: 0,
         fin: texte.chars().count(),
+        profondeur: 0,
     };
     let arbre = a.ou()?;
     if let Some((p, j)) = a.prendre() {
@@ -748,46 +786,65 @@ pub struct RequeteCompilee {
     /// Les critères que le moteur n'a pas su traduire (`champ op`) : ils
     /// valent FAUX, et l'appelant doit le dire (#4467).
     pub refusees: Vec<String>,
+    /// Ceux d'entre eux qui sont sous une négation. FAUX nié vaut VRAI : la
+    /// requête rendrait toute la bibliothèque, l'appelant doit la refuser.
+    pub refusees_sous_non: Vec<String>,
 }
 
 /// Compile l'arbre : chaque règle par le moteur des playlists, les
 /// combinaisons ici.
 pub fn compiler(arbre: &Noeud, ctx: &RefCtx) -> RequeteCompilee {
-    let mut refusees = Vec::new();
-    let condition = condition_de(arbre, ctx, &mut refusees);
+    let mut refus = Refus::default();
+    let condition = condition_de(arbre, ctx, &mut refus, false);
     RequeteCompilee {
         condition,
-        refusees,
+        refusees: refus.toutes,
+        refusees_sous_non: refus.sous_non,
     }
 }
 
-fn condition_de(noeud: &Noeud, ctx: &RefCtx, refusees: &mut Vec<String>) -> String {
+#[derive(Default)]
+struct Refus {
+    toutes: Vec<String>,
+    sous_non: Vec<String>,
+}
+
+fn condition_de(noeud: &Noeud, ctx: &RefCtx, refus: &mut Refus, sous_non: bool) -> String {
     match noeud {
         Noeud::Regle(r) => {
             let regles = Value::Array(vec![r.clone()]).to_string();
-            let (w, _o, _l, mut refus) =
+            let (w, _o, _l, refusees) =
                 build_smart_query_rapport(&regles, "all", "title", "asc", None, ctx);
-            refusees.append(&mut refus);
+            if sous_non {
+                refus.sous_non.extend(refusees.iter().cloned());
+            }
+            refus.toutes.extend(refusees);
             match w.trim().strip_prefix("WHERE ") {
                 Some(c) => format!("({c})"),
                 // Une règle sans condition ne retient rien : jamais « tout ».
                 None => format!("({})", regles_sql::FAUX),
             }
         }
-        Noeud::Et(t) => joindre(t, " AND ", ctx, refusees),
-        Noeud::Ou(t) => joindre(t, " OR ", ctx, refusees),
+        Noeud::Et(t) => joindre(t, " AND ", ctx, refus, sous_non),
+        Noeud::Ou(t) => joindre(t, " OR ", ctx, refus, sous_non),
         Noeud::Non(n) => format!(
             "(NOT COALESCE({}, {}))",
-            condition_de(n, ctx, refusees),
+            condition_de(n, ctx, refus, true),
             regles_sql::FAUX
         ),
     }
 }
 
-fn joindre(termes: &[Noeud], liant: &str, ctx: &RefCtx, refusees: &mut Vec<String>) -> String {
+fn joindre(
+    termes: &[Noeud],
+    liant: &str,
+    ctx: &RefCtx,
+    refus: &mut Refus,
+    sous_non: bool,
+) -> String {
     let parties: Vec<String> = termes
         .iter()
-        .map(|t| condition_de(t, ctx, refusees))
+        .map(|t| condition_de(t, ctx, refus, sous_non))
         .collect();
     format!("({})", parties.join(liant))
 }
