@@ -1958,6 +1958,28 @@ impl QobuzService {
             .unwrap_or_default()
     }
 
+    /// Les playlists de l'utilisateur, si la réponse les contient TOUTES
+    /// (#6461) : autant d'éléments que le `total` annoncé, sinon `Err`.
+    pub(crate) fn playlists_completes(
+        data: &serde_json::Value,
+    ) -> Result<Vec<StreamPlaylist>, TuneError> {
+        let recus = data["playlists"]["items"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0) as u64;
+        match data["playlists"]["total"].as_u64() {
+            Some(total) if recus >= total => Ok(Self::map_user_playlists(data)),
+            Some(total) => {
+                warn!(recus, total, "qobuz_playlists_lecture_incomplete_6461");
+                Err(format!("qobuz: lecture des playlists incomplète ({recus} sur {total})").into())
+            }
+            None => {
+                warn!(recus, "qobuz_playlists_sans_total_6461");
+                Err("qobuz: lecture des playlists sans total annoncé".into())
+            }
+        }
+    }
+
     /// Map a Qobuz playlist item (editorial selection or search hit) to
     /// StreamPlaylist.
     fn map_featured_playlist(item: &serde_json::Value) -> StreamPlaylist {
@@ -3185,8 +3207,20 @@ impl StreamingService for QobuzService {
 
     /// #6461 — `/playlist/getUserPlaylists` rend les playlists possédées ET
     /// suivies ; `map_user_playlists` les distingue par le propriétaire.
-    fn playlists_suivies_relues(&self) -> bool {
-        true
+    ///
+    /// `detail_pagine` coupe à `PLAFOND_ELEMENTS_DETAIL`, ou quand Qobuz sert
+    /// des pages plus courtes qu'il ne l'annonce, et rend quand même `Ok`
+    /// (relecture de #6616). Ici, moins d'éléments que le `total` annoncé — ou
+    /// pas de `total` du tout — est une lecture INCOMPLÈTE, donc une erreur.
+    async fn playlists_de_la_bibliotheque(&self) -> Option<Result<Vec<StreamPlaylist>, TuneError>> {
+        let data = match self
+            .detail_pagine("/playlist/getUserPlaylists", &[], "playlists")
+            .await
+        {
+            Ok(d) => d,
+            Err(e) => return Some(Err(e.into())),
+        };
+        Some(Self::playlists_completes(&data))
     }
 
     async fn add_favorite(&mut self, fav_type: &str, item_id: &str) -> Result<(), TuneError> {
@@ -7566,16 +7600,57 @@ mod tests_playlists_proprietaire_2097 {
         assert!(v[2].get("editable").is_none());
     }
 
-    /// #6461 — le miroir des favoris relit les playlists suivies de Qobuz :
-    /// sans ce drapeau, une playlist éditoriale suivie n'aurait jamais son
-    /// cœur dans Tune, et la retirer de la bibliothèque Qobuz serait
-    /// impossible depuis Tune.
+    /// #6461 — le miroir ne reçoit les playlists de Qobuz que si la lecture
+    /// est COMPLÈTE : une lecture tronquée lui ferait retirer le cœur de tout
+    /// ce qui dépasse la coupe (relecture de #6616).
     #[test]
-    fn qobuz_annonce_ses_playlists_suivies_au_miroir_6461() {
-        let svc = QobuzService::new(String::from("app"), String::from("secret"));
+    fn une_lecture_tronquee_des_playlists_est_une_erreur_6461() {
+        let complete = reponse();
+        let pl = QobuzService::playlists_completes(&complete).expect("lecture complète");
+        assert_eq!(pl.len(), 3);
+        assert_eq!(pl[1].editable, Some(false));
+
+        let mut tronquee = reponse();
+        tronquee["playlists"]["total"] = json!(5001);
         assert!(
-            svc.playlists_suivies_relues(),
-            "Qobuz doit annoncer que getUserPlaylists distingue les playlists suivies"
+            QobuzService::playlists_completes(&tronquee).is_err(),
+            "3 éléments pour 5001 annoncés : la lecture doit être déclarée incomplète"
+        );
+
+        let mut sans_total = reponse();
+        sans_total["playlists"]
+            .as_object_mut()
+            .unwrap()
+            .remove("total");
+        assert!(QobuzService::playlists_completes(&sans_total).is_err());
+    }
+
+    /// Le même contrat par le connecteur réel, contre un Qobuz simulé qui
+    /// annonce 7 playlists et n'en sert que 3 : `playlists_de_la_bibliotheque`
+    /// rend `Err`, jamais une liste partielle.
+    #[tokio::test]
+    async fn qobuz_ne_rend_jamais_une_liste_de_playlists_partielle_6461() {
+        use axum::{Json, Router};
+        let app = Router::new().fallback(|| async {
+            let mut r = reponse();
+            r["playlists"]["total"] = json!(7);
+            Json(r)
+        });
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("port libre");
+        let adresse = ecoute.local_addr().expect("adresse locale");
+        tokio::spawn(async move {
+            let _ = axum::serve(ecoute, app).await;
+        });
+        let svc = QobuzService::connecte_a_base_forcee(format!("http://{adresse}"));
+        let lecture = svc
+            .playlists_de_la_bibliotheque()
+            .await
+            .expect("Qobuz relit ses playlists");
+        assert!(
+            lecture.is_err(),
+            "une liste partielle a été rendue comme complète : {lecture:?}"
         );
     }
 }

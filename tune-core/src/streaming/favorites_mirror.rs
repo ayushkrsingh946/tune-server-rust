@@ -44,7 +44,7 @@
 //! déjà là.
 //!
 //! Relues seulement chez un service qui sait dire lesquelles il SUIT
-//! ([`StreamingService::playlists_suivies_relues`], #6461) : une playlist
+//! ([`StreamingService::playlists_de_la_bibliotheque`], #6461) : une playlist
 //! suivie est un favori, une playlist suivie qui ne l'est plus a été retirée
 //! de la bibliothèque du service. Trois prudences propres aux playlists :
 //!
@@ -783,12 +783,13 @@ fn reconcilier(
 /// Les playlists que le compte SUIT, comme favoris, et celles qu'il possède,
 /// à laisser hors de la réconciliation (#6461).
 ///
-/// `Err` — et donc rien de retiré — dès qu'une playlist ne dit pas son
-/// auteur : on ne devine pas si elle est suivie ou possédée.
-async fn lire_les_playlists_suivies(
-    svc: &dyn StreamingService,
+/// `Err` — et donc rien de retiré — si la lecture a échoué ou est incomplète
+/// (le service le dit), ou dès qu'une playlist ne dit pas son auteur : on ne
+/// devine pas si elle est suivie ou possédée.
+fn trier_les_playlists(
+    lecture: Result<Vec<crate::streaming::traits::StreamPlaylist>, crate::error::TuneError>,
 ) -> Result<(Vec<Entree>, Reserves), String> {
-    let playlists = svc.get_user_playlists().await.map_err(|e| e.to_string())?;
+    let playlists = lecture.map_err(|e| e.to_string())?;
     let mut suivies = Vec::new();
     let mut reserves = Reserves {
         garder_les_anciennes: true,
@@ -898,8 +899,8 @@ pub async fn rafraichir(
                     .map(|e| (e, Reserves::default())),
             ));
         }
-        if svc.playlists_suivies_relues() {
-            lectures.push(("playlist", lire_les_playlists_suivies(&**svc).await));
+        if let Some(lecture) = svc.playlists_de_la_bibliotheque().await {
+            lectures.push(("playlist", trier_les_playlists(lecture)));
         }
         (service, lectures)
     };

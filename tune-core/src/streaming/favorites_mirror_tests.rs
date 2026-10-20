@@ -31,6 +31,8 @@ struct Compte {
     /// La bibliothèque de playlists du compte : `id → editable` (`Some(true)`
     /// possédée, `Some(false)` suivie, `None` auteur inconnu).
     playlists: BTreeMap<String, Option<bool>>,
+    /// La lecture des playlists se déclare incomplète (#6461, relecture).
+    playlists_tronquees: bool,
 }
 
 struct ServiceSimule {
@@ -99,9 +101,6 @@ impl StreamingService for ServiceSimule {
     fn favoris_miroir(&self) -> bool {
         true
     }
-    fn playlists_suivies_relues(&self) -> bool {
-        self.compte.lock().unwrap().relit_playlists
-    }
     async fn authenticate(&mut self, _c: &serde_json::Value) -> Result<AuthStatus, TuneError> {
         Ok(Default::default())
     }
@@ -137,6 +136,19 @@ impl StreamingService for ServiceSimule {
     }
     async fn get_playlist_tracks(&self, _id: &str) -> Result<Vec<StreamTrack>, TuneError> {
         Err("hors sujet".into())
+    }
+    async fn playlists_de_la_bibliotheque(&self) -> Option<Result<Vec<StreamPlaylist>, TuneError>> {
+        let (relit, tronquee) = {
+            let c = self.compte.lock().unwrap();
+            (c.relit_playlists, c.playlists_tronquees)
+        };
+        if !relit {
+            return None;
+        }
+        if tronquee {
+            return Some(Err("lecture incomplète simulée".into()));
+        }
+        Some(self.get_user_playlists().await)
     }
     async fn get_user_playlists(&self) -> Result<Vec<StreamPlaylist>, TuneError> {
         let c = self.compte.lock().unwrap();
@@ -906,4 +918,88 @@ async fn les_playlists_relues_ne_retirent_ni_n_abonnent_sans_certitude_6461() {
     assert_eq!(bilan.retires, 0, "{bilan:?}");
     assert_eq!(bilan.echecs, 1, "{bilan:?}");
     assert_eq!(ids(&backend, pid), vec!["ancienne", "perso", "suivie"]);
+}
+
+/// Témoin 6461-4 (relecture de #6616) — une lecture des playlists que le
+/// service déclare incomplète ne retire RIEN : sans cette garde, une liste
+/// tronquée retirerait le cœur de tout ce qui dépasse la coupe.
+#[tokio::test]
+async fn une_lecture_incomplete_des_playlists_ne_retire_rien_6461() {
+    let (backend, profils, _dir) = base(1);
+    let pid = profils[0];
+    let (arc, compte) = ServiceSimule::nouveau("miroir-6461d");
+    bibliotheque_de_playlists(&compte, &[("a", Some(false)), ("b", Some(false))]);
+    rafraichir(&arc, &backend, pid).await;
+    assert_eq!(ids(&backend, pid), vec!["a", "b"]);
+
+    {
+        let mut c = compte.lock().unwrap();
+        c.playlists.remove("b");
+        c.playlists_tronquees = true;
+    }
+    let bilan = rafraichir(&arc, &backend, pid).await;
+    assert_eq!(bilan.retires, 0, "{bilan:?}");
+    assert_eq!(bilan.echecs, 1, "{bilan:?}");
+    assert_eq!(
+        ids(&backend, pid),
+        vec!["a", "b"],
+        "une lecture incomplète a retiré des cœurs"
+    );
+}
+
+/// Témoin 6461-5 (relecture de #6616), de bout en bout : le VRAI connecteur
+/// Qobuz contre un Qobuz factice qui annonce 7 playlists et n'en sert que 3 —
+/// la coupe de `detail_pagine`. Aucune ligne `synchro` ne disparaît.
+#[tokio::test]
+async fn qobuz_tronque_aucune_playlist_synchro_ne_disparait_6461() {
+    use axum::{Json, Router};
+    let app = Router::new().fallback(|uri: axum::http::Uri| async move {
+        if uri.path().ends_with("/playlist/getUserPlaylists") {
+            Json(json!({
+                "user": {"id": 1234},
+                "playlists": {"offset": 0, "limit": 500, "total": 7, "items": [
+                    {"id": 11, "name": "Ma playlist", "owner": {"id": 1234, "name": "fabien"}},
+                    {"id": 22, "name": "Jazz Essentials", "owner": {"id": 2, "name": "Qobuz"}},
+                    {"id": 33, "name": "Classique", "owner": {"id": 2, "name": "Qobuz"}}
+                ]}
+            }))
+        } else {
+            Json(json!({}))
+        }
+    });
+    let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("port libre");
+    let adresse = ecoute.local_addr().expect("adresse locale");
+    tokio::spawn(async move {
+        let _ = axum::serve(ecoute, app).await;
+    });
+    let svc: Box<dyn StreamingService> = Box::new(
+        crate::streaming::qobuz::QobuzService::connecte_a_base_forcee(format!("http://{adresse}")),
+    );
+    let arc: ServiceArc = Arc::new(RwLock::new(svc));
+
+    let (backend, profils, _dir) = base(2);
+    // « 44 » est suivie chez Qobuz mais au-delà de la coupe : la réponse
+    // tronquée ne la nomme pas.
+    for id in ["22", "33", "44"] {
+        ecrire_partout(
+            &backend,
+            &profils,
+            "qobuz",
+            &favori("playlist", id),
+            ETAT_SYNCHRO,
+            None,
+        )
+        .unwrap();
+    }
+    let bilan = rafraichir(&arc, &backend, profils[0]).await;
+    assert_eq!(bilan.retires, 0, "{bilan:?}");
+    for &pid in &profils {
+        assert_eq!(
+            ids(&backend, pid),
+            vec!["22", "33", "44"],
+            "une lecture tronquée de Qobuz a retiré des playlists synchro"
+        );
+    }
 }
