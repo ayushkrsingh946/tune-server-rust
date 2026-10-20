@@ -218,16 +218,27 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/favorites/check", post(check_favorites))
 }
 
-async fn list_profiles(State(state): State<AppState>) -> Json<Value> {
+async fn list_profiles(State(state): State<AppState>) -> Response {
     let repo = ProfileRepo::with_backend(state.backend.clone());
     // Don't swallow a DB error as an empty list: the web client would then
-    // auto-create "Default" and mask real profiles with no visible error.
-    // Log it so a schema/column drift on an older DB is diagnosable.
-    let items = repo.list().unwrap_or_else(|e| {
-        tracing::error!(error = %e, "list_profiles: repo.list() failed, returning empty");
-        Vec::new()
-    });
-    Json(json!(items))
+    // auto-create "Default" and mask real profiles with no visible error
+    // (#6454). Log it so a schema/column drift on an older DB is
+    // diagnosable, and answer a 500 with a stable code the client can read.
+    match repo.list() {
+        Ok(items) => Json(json!(items)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "list_profiles: repo.list() failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "profils_illisibles",
+                    "code": "profils_illisibles",
+                    "message": "La liste des profils n'a pas pu être lue dans la base.",
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn get_active_profile(State(state): State<AppState>) -> Json<Value> {

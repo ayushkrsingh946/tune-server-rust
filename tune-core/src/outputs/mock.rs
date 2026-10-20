@@ -90,7 +90,14 @@ pub struct MockOutput {
     session_perdue_a_la_reprise: Arc<AtomicBool>,
     /// #6062 — posé par un `resume` refusé : la session a été perdue.
     session_perdue: Arc<AtomicBool>,
+    /// #6658 — armée, `play_media` signale son entrée (premier `Notify`) puis
+    /// attend le feu vert (second `Notify`) : la fenêtre où une sortie locale
+    /// arrête le flux précédent avant d'ouvrir le nouveau.
+    barriere_de_lecture: Arc<std::sync::Mutex<Option<BarriereDeLecture>>>,
 }
+
+/// #6658 — (entrée dans `play_media`, feu vert pour en sortir).
+type BarriereDeLecture = (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 
 impl MockOutput {
     pub fn new(id: &str, name: &str) -> Self {
@@ -126,7 +133,20 @@ impl MockOutput {
             refus_de_set_next: Arc::new(std::sync::Mutex::new(None)),
             session_perdue_a_la_reprise: Arc::new(AtomicBool::new(false)),
             session_perdue: Arc::new(AtomicBool::new(false)),
+            barriere_de_lecture: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// #6658 — le prochain `play_media` s'arrêtera à mi-chemin : il signale
+    /// son entrée sur le premier `Notify` rendu, et n'aboutit qu'au signal du
+    /// second.
+    pub fn retenir_la_lecture(&self) -> BarriereDeLecture {
+        let barriere = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        *self.barriere_de_lecture.lock().unwrap() = Some(barriere.clone());
+        barriere
     }
 
     /// #6062 — la prochaine reprise trouvera l'appareil sans session (voir
@@ -390,6 +410,11 @@ impl OutputTarget for MockOutput {
                 title: media.title.map(String::from),
             });
             return Err(motif);
+        }
+        let barriere = self.barriere_de_lecture.lock().unwrap().take();
+        if let Some((entree, feu_vert)) = barriere {
+            entree.notify_one();
+            feu_vert.notified().await;
         }
         *self.state.lock().await = TransportState::Playing;
         *self.current_uri.lock().await = Some(media.url.to_string());

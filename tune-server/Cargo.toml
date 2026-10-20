@@ -1720,6 +1720,15 @@ required-features = ["postgres"]
 name = "services_remplacables_6336"
 path = "tests/services_remplacables_6336.rs"
 
+# #6454 — `GET /profiles` ne rend plus `200 []` sur une base en échec : un
+# 500 au code lisible, et une ligne ERROR au journal. Abonné `tracing` GLOBAL,
+# donc un binaire à lui seul et un seul essai dedans (leçon de
+# `panne_sql_journalisee`). `autotests = false` plus haut : sans cette cible,
+# le fichier ne serait jamais compilé.
+[[test]]
+name = "profils_panne_de_base_6454"
+path = "tests/profils_panne_de_base_6454.rs"
+
 # #6212 / #6634 — la gravure du Dynamic Range cède à la lecture et n'écrit pas
 # dans le fichier joué, par la route montée. Binaire à lui seul : le témoin de
 # lecture et la politique des freins sont des états de PROCESSUS. `autotests =

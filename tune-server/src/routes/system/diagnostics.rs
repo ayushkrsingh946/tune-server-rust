@@ -1034,9 +1034,12 @@ pub(super) async fn diagnostics(State(state): State<AppState>) -> Json<Value> {
 ///
 /// Réutilise la lecture sysfs du garde thermique
 /// (`tune_core::audio::thermal::cpu_package_temp_celsius`) : paquet CPU quand
-/// il est identifiable, sinon maximum des zones. La lecture est synchrone et
-/// certains pilotes `hwmon` (disques) peuvent tarder : elle passe par
-/// `spawn_blocking` et abandonne au-delà de 300 ms. Le rapport de diagnostic
+/// il est identifiable, sinon maximum des zones. Quand le serveur tourne,
+/// c'est la médiane des relevés de fond (#5320) : lire la sonde ICI tombait
+/// sur la pointe que provoque la collecte de l'écran. Sans échantillonneur,
+/// la lecture est synchrone et certains pilotes `hwmon` (disques) peuvent
+/// tarder : elle passe par `spawn_blocking` et abandonne au-delà de 300 ms.
+/// Le rapport de diagnostic
 /// ne doit jamais attendre un capteur.
 async fn temperature_processeur() -> Option<f64> {
     let lecture = tokio::task::spawn_blocking(tune_core::audio::thermal::cpu_package_temp_celsius);
