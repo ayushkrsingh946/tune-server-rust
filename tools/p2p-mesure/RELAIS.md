@@ -17,8 +17,8 @@ cargo install iroh-relay@1.3.0 --features server --locked --root ~/iroh-relay-1.
 ```
 
 La feature `server` est obligatoire : sans elle, le binaire n'existe pas.
-Compilé le 20/10/2026 en session cloud avec cette commande (Rust 1.99.1) :
-voir la PR. Cible du VPS : `x86_64-unknown-linux-gnu` ; compiler sur une
+Cette commande a été passée telle quelle le 20/10/2026 en session cloud
+(Rust 1.99.1) : `iroh-relay 1.3.0` compile. Cible du VPS : `x86_64-unknown-linux-gnu` ; compiler sur une
 distribution dont la glibc n'est pas plus récente que celle du VPS, ou ajouter
 `--target x86_64-unknown-linux-musl`.
 
@@ -115,6 +115,32 @@ La limite de 2,5 Mo/s (20 Mbit/s) laisse passer un flux 24/192 (7 Mbit/s) et
 borne l'essai en vrac quand il reste en relais : le `debit_max_mbps` mesuré en
 relais est alors celui de cette limite, pas celui du chemin. À noter dans le
 rapport, ou à lever pour la durée des essais longs.
+
+`quic_bind_addr = "[::]:7842"` demande un noyau avec IPv6 : sans IPv6, le relais
+refuse de démarrer (« Failed to bind QAD listener … Address family not
+supported by protocol »). Dans ce cas, écrire `"0.0.0.0:7842"`. Si le VPS a de
+l'IPv6, garder `[::]` (double pile sous Linux), sinon les clients en IPv6 n'ont
+pas de QAD.
+
+### Ce qui a été vérifié, et ce qui ne l'a pas été
+
+Vérifié le 20/10/2026 en session cloud, avec le binaire compilé ci-dessus, ce
+fichier tel quel (chemins du certificat et liste blanche remplacés, QAD sur
+`0.0.0.0:7842` faute d'IPv6) et un certificat auto-signé pour
+`relay.mozaiklabs.fr` :
+
+- la configuration est acceptée, mode `Reloading` compris ;
+- HTTPS interne `127.0.0.1:3443` : TLS 1.3, `/ping` répond 200 ;
+- HTTP interne `127.0.0.1:3340` : `/generate_204` répond 204 ;
+- métriques `127.0.0.1:9090` : 200 ;
+- QAD liée sur UDP 7842 ;
+- un essai `p2p-mesure` complet à travers un `iroh-relay` 1.3.0 local en HTTP :
+  serveur accroché au relais (ligne `Relais :`), client connecté par le relais
+  à 43 ms puis passé en direct à 74 ms.
+
+Non vérifié (pas de Caddy, pas de DNS, pas de VPS ici) : le bloc Caddy, le
+chemin réel des certificats de Caddy et leurs droits de lecture, l'ouverture de
+7842/udp chez Contabo, un essai par `https://relay.mozaiklabs.fr`.
 
 ## 6. Service systemd
 
