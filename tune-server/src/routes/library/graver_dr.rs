@@ -38,8 +38,12 @@
 //! (`tache_de_fond_ralentie_pour_la_lecture`). Et elle n'écrit JAMAIS dans le
 //! fichier d'une piste qu'une zone tient, en lecture ou en pause : ce fichier
 //! est reporté (`dr_gravure_reportee_fichier_en_lecture`) et gravé après les
-//! autres, une fois libéré (`dr_gravure_reprise_apres_la_lecture`). Sans
-//! lecture, rien ne change.
+//! autres, une fois libéré (`dr_gravure_reprise_apres_la_lecture`). Cette
+//! attente est bornée ([`ATTENTE_MAX_DES_REPORTEES`]) : au-delà, le fichier
+//! est compté `skipped` et la passe finit `done`. L'autorisation d'écrire
+//! dans les fichiers est relue avant CHAQUE gravure : retirée en cours de
+//! passe, elle l'arrête (`interrupted`, `raison`). Sans lecture, rien ne
+//! change.
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -296,10 +300,15 @@ async fn fichier_en_lecture(
         let Some(track_id) = zone.now_playing.and_then(|np| np.track_id) else {
             continue;
         };
-        if let Ok(Some(piste)) = pistes.get(track_id)
-            && piste.file_path.as_deref() == Some(chemin)
-        {
-            return true;
+        match pistes.get(track_id) {
+            Ok(Some(piste)) if piste.file_path.as_deref() == Some(chemin) => return true,
+            Ok(_) => {}
+            // Base illisible : on ne sait pas ce qui joue, donc on n'écrit
+            // pas — le fichier est reporté, pas risqué.
+            Err(e) => {
+                warn!(track_id, error = %e, "dr_gravure_piste_jouee_illisible");
+                return true;
+            }
         }
     }
     false
@@ -312,6 +321,131 @@ fn attente_du_fichier_en_lecture() -> std::time::Duration {
     priorite::politique::politique()
         .pause_entre_elements()
         .max(std::time::Duration::from_secs(1))
+}
+
+/// Combien de temps un fichier reporté peut attendre que sa zone le lâche.
+///
+/// Au-delà, il est compté `skipped` et la passe finit `done` : une zone
+/// laissée en pause sur la piste ne doit pas garder la passe `running` (et
+/// toute relance en 409) indéfiniment, ni faire écrire le fichier des heures
+/// plus tard. La piste garde `dr_source = analysis` : la passe suivante la
+/// reprendra.
+const ATTENTE_MAX_DES_REPORTEES: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Pourquoi la passe s'arrête avant la fin de sa liste.
+const RAISON_ECRITURE_DESACTIVEE: &str = "ecriture_fichiers_desactivee";
+
+/// La passe elle-même : toutes les candidates, les fichiers tenus par une
+/// zone reportés puis repris (au plus `attente_max`), et l'écriture dans les
+/// fichiers relue avant chaque fichier.
+async fn derouler_la_passe(
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    taches: &crate::background_tasks::BackgroundTasks,
+    playback: &tune_core::playback::PlaybackManager,
+    candidates: &[(i64, String, String)],
+    attente_max: std::time::Duration,
+) {
+    let total = candidates.len();
+    let repo = TrackMetadataRepo::with_backend(backend.clone());
+    let pistes = tune_core::db::track_repo::TrackRepo::with_backend(backend.clone());
+    let mut c = Compteurs::default();
+    taches.update_progress(TACHE_GRAVER_DR, 0, total as u64, "Dynamic Range");
+    // L'utilisateur peut retirer l'autorisation pendant la passe — et une
+    // passe qui attend un fichier reporté peut durer : relue avant CHAQUE
+    // écriture, jamais seulement au lancement.
+    let abandon = |c: &Compteurs| {
+        let mut v = c.statut(ETAT_INTERROMPU, total);
+        v["raison"] = json!(RAISON_ECRITURE_DESACTIVEE);
+        ecrire_statut(backend, &v);
+        info!(
+            total,
+            written = c.written,
+            "graver_dr_abandonnee_ecriture_fichiers_desactivee"
+        );
+    };
+
+    // #6212 — les pistes dont le fichier jouait à leur tour : reprises
+    // après les autres, une fois que plus aucune zone ne les tient.
+    let mut reportees: Vec<&(i64, String, String)> = Vec::new();
+    for candidate in candidates {
+        let traitees = c.traitees();
+        if traitees % JALON_AVANCEMENT == 0 {
+            taches.update_progress(
+                TACHE_GRAVER_DR,
+                traitees as u64,
+                total as u64,
+                "Dynamic Range",
+            );
+            ecrire_statut(backend, &c.statut("running", total));
+        }
+        // #6212 / #6634 — la même politique que les autres passes
+        // freinées (#4681) : pendant qu'une zone joue, une pause entre
+        // deux fichiers, et la passe nommée au relevé.
+        priorite::ceder_a_la_lecture(priorite::ID_GRAVER_DR).await;
+        if fichier_en_lecture(playback, &pistes, &candidate.1).await {
+            info!(
+                track_id = candidate.0,
+                chemin = %candidate.1,
+                "dr_gravure_reportee_fichier_en_lecture"
+            );
+            reportees.push(candidate);
+            continue;
+        }
+        if !tune_core::metadata::ecriture_fichiers::autorisee(backend) {
+            abandon(&c);
+            return;
+        }
+        graver_une(backend, &repo, &pistes, candidate, &mut c).await;
+    }
+
+    let debut_attente = std::time::Instant::now();
+    while !reportees.is_empty() {
+        if debut_attente.elapsed() >= attente_max {
+            c.skipped += reportees.len() as i32;
+            for candidate in &reportees {
+                info!(
+                    track_id = candidate.0,
+                    chemin = %candidate.1,
+                    attente_s = debut_attente.elapsed().as_secs(),
+                    "dr_gravure_abandonnee_fichier_toujours_tenu"
+                );
+            }
+            break;
+        }
+        tokio::time::sleep(attente_du_fichier_en_lecture().min(attente_max)).await;
+        let mut encore = Vec::with_capacity(reportees.len());
+        for candidate in reportees {
+            priorite::ceder_a_la_lecture(priorite::ID_GRAVER_DR).await;
+            if fichier_en_lecture(playback, &pistes, &candidate.1).await {
+                encore.push(candidate);
+                continue;
+            }
+            if !tune_core::metadata::ecriture_fichiers::autorisee(backend) {
+                abandon(&c);
+                return;
+            }
+            info!(
+                track_id = candidate.0,
+                chemin = %candidate.1,
+                "dr_gravure_reprise_apres_la_lecture"
+            );
+            graver_une(backend, &repo, &pistes, candidate, &mut c).await;
+        }
+        reportees = encore;
+    }
+
+    taches.update_progress(TACHE_GRAVER_DR, total as u64, total as u64, "Dynamic Range");
+    ecrire_statut(backend, &c.statut("done", total));
+    let Compteurs {
+        written,
+        already,
+        skipped,
+        errors,
+    } = c;
+    info!(
+        total,
+        written, already, skipped, errors, "graver_dr_termine"
+    );
 }
 
 /// Graver UNE piste et la compter.
@@ -393,72 +527,14 @@ pub(crate) async fn lancer(State(state): State<AppState>) -> axum::response::Res
     let playback = state.playback.clone();
     tokio::spawn(async move {
         let _garde = garde;
-        let repo = TrackMetadataRepo::with_backend(backend.clone());
-        let pistes = tune_core::db::track_repo::TrackRepo::with_backend(backend.clone());
-        let mut c = Compteurs::default();
-        taches.update_progress(TACHE_GRAVER_DR, 0, total as u64, "Dynamic Range");
-
-        // #6212 — les pistes dont le fichier jouait à leur tour : reprises
-        // après les autres, une fois que plus aucune zone ne les tient.
-        let mut reportees: Vec<&(i64, String, String)> = Vec::new();
-        for candidate in &candidates {
-            let traitees = c.traitees();
-            if traitees % JALON_AVANCEMENT == 0 {
-                taches.update_progress(
-                    TACHE_GRAVER_DR,
-                    traitees as u64,
-                    total as u64,
-                    "Dynamic Range",
-                );
-                ecrire_statut(&backend, &c.statut("running", total));
-            }
-            // #6212 / #6634 — la même politique que les autres passes
-            // freinées (#4681) : pendant qu'une zone joue, une pause entre
-            // deux fichiers, et la passe nommée au relevé.
-            priorite::ceder_a_la_lecture(priorite::ID_GRAVER_DR).await;
-            if fichier_en_lecture(&playback, &pistes, &candidate.1).await {
-                info!(
-                    track_id = candidate.0,
-                    chemin = %candidate.1,
-                    "dr_gravure_reportee_fichier_en_lecture"
-                );
-                reportees.push(candidate);
-                continue;
-            }
-            graver_une(&backend, &repo, &pistes, candidate, &mut c).await;
-        }
-
-        while !reportees.is_empty() {
-            tokio::time::sleep(attente_du_fichier_en_lecture()).await;
-            let mut encore = Vec::with_capacity(reportees.len());
-            for candidate in reportees {
-                priorite::ceder_a_la_lecture(priorite::ID_GRAVER_DR).await;
-                if fichier_en_lecture(&playback, &pistes, &candidate.1).await {
-                    encore.push(candidate);
-                    continue;
-                }
-                info!(
-                    track_id = candidate.0,
-                    chemin = %candidate.1,
-                    "dr_gravure_reprise_apres_la_lecture"
-                );
-                graver_une(&backend, &repo, &pistes, candidate, &mut c).await;
-            }
-            reportees = encore;
-        }
-
-        taches.update_progress(TACHE_GRAVER_DR, total as u64, total as u64, "Dynamic Range");
-        ecrire_statut(&backend, &c.statut("done", total));
-        let Compteurs {
-            written,
-            already,
-            skipped,
-            errors,
-        } = c;
-        info!(
-            total,
-            written, already, skipped, errors, "graver_dr_termine"
-        );
+        derouler_la_passe(
+            &backend,
+            &taches,
+            &playback,
+            &candidates,
+            ATTENTE_MAX_DES_REPORTEES,
+        )
+        .await;
     });
 
     (
@@ -816,6 +892,138 @@ mod tests_source_locale_20260927 {
         assert!(
             ids.contains(&1),
             "la piste LOCALE 1 doit rester candidate — candidates {ids:?}"
+        );
+    }
+}
+
+/// Relecture rc7 de #6654 — l'attente d'un fichier reporté est BORNÉE, et
+/// l'écriture dans les fichiers est relue avant chaque gravure.
+///
+/// Ces témoins ne touchent pas au témoin de lecture global (`priorite`) : la
+/// zone qui tient la piste vit dans le `PlaybackManager` de leur propre
+/// `AppState`. Aucune pause de frein, aucun voisin gêné.
+#[cfg(test)]
+mod tests_attente_bornee_6212 {
+    use super::*;
+    use std::time::Duration;
+    use tune_core::db::backend::ToSqlValue;
+
+    const ZONE: i64 = 62;
+
+    /// Une piste FLAC à graver, son fichier, et un état où les écritures
+    /// dans les fichiers sont autorisées.
+    fn banc() -> (tune_core::test_scratch::ScratchDir, String, AppState) {
+        let dir = tune_core::test_scratch::scratch_dir("gravure-dr-attente-6212");
+        let cible = dir.path().join("tenue.flac");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tune-core/tests/fixtures/test.flac"),
+            &cible,
+        )
+        .unwrap();
+        let chemin = cible.to_string_lossy().into_owned();
+        let s = AppState::new(":memory:", 0, Default::default()).unwrap();
+        crate::routes::ecriture_fichiers::activer_pour_test(&s.backend);
+        s.backend
+            .execute(
+                "INSERT INTO tracks (id, title, file_path) VALUES (1, 'tenue', ?1)",
+                &[&chemin as &dyn ToSqlValue],
+            )
+            .unwrap();
+        let repo = TrackMetadataRepo::with_backend(s.backend.clone());
+        repo.set(1, "dr_track", "12").unwrap();
+        repo.set(1, "dr_source", "analysis").unwrap();
+        (dir, chemin, s)
+    }
+
+    async fn tenir_la_piste(s: &AppState) {
+        s.playback
+            .play(
+                ZONE,
+                tune_core::playback::NowPlaying {
+                    track_id: Some(1),
+                    title: "tenue".into(),
+                    source: "local".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+    }
+
+    /// Une zone laissée EN PAUSE sur la piste : la passe ne reste pas
+    /// `running` à vie. Passé le délai, le fichier est compté `skipped`,
+    /// intact, et la passe finit `done` ; la piste reste à graver.
+    #[tokio::test]
+    async fn une_piste_tenue_en_pause_ne_bloque_pas_la_passe_indefiniment() {
+        let (_dir, chemin, s) = banc();
+        let avant = std::fs::read(&chemin).unwrap();
+        tenir_la_piste(&s).await;
+        s.playback.pause(ZONE).await;
+        let (_, candidates) = inventaire(&s);
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            derouler_la_passe(
+                &s.backend,
+                &s.background_tasks,
+                &s.playback,
+                &candidates,
+                Duration::from_millis(300),
+            ),
+        )
+        .await
+        .expect("l'attente d'un fichier reporté doit être bornée");
+
+        let statut = lire_statut(&s);
+        assert_eq!(statut["status"], "done", "{statut}");
+        assert_eq!(statut["skipped"], 1, "{statut}");
+        assert_eq!(statut["written"], 0, "{statut}");
+        assert!(
+            std::fs::read(&chemin).unwrap() == avant,
+            "le fichier tenu ne doit pas être écrit"
+        );
+        assert_eq!(inventaire(&s).0.a_graver, 1, "la piste reste à graver");
+    }
+
+    /// L'écriture dans les fichiers est retirée pendant que la passe attend
+    /// le fichier reporté : la zone le lâche, et pourtant RIEN n'est écrit —
+    /// la passe s'arrête et le dit.
+    #[tokio::test]
+    async fn une_autorisation_retiree_pendant_l_attente_arrete_la_passe() {
+        let (_dir, chemin, s) = banc();
+        let avant = std::fs::read(&chemin).unwrap();
+        tenir_la_piste(&s).await;
+        let (_, candidates) = inventaire(&s);
+
+        let passe = {
+            let s = s.clone();
+            tokio::spawn(async move {
+                derouler_la_passe(
+                    &s.backend,
+                    &s.background_tasks,
+                    &s.playback,
+                    &candidates,
+                    Duration::from_secs(60),
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        tune_core::db::settings_repo::SettingsRepo::with_backend(s.backend.clone())
+            .set(tune_core::metadata::ecriture_fichiers::CLE, "false")
+            .unwrap();
+        s.playback.stop(ZONE).await;
+        tokio::time::timeout(Duration::from_secs(10), passe)
+            .await
+            .expect("la passe doit s'arrêter")
+            .unwrap();
+
+        let statut = lire_statut(&s);
+        assert_eq!(statut["status"], ETAT_INTERROMPU, "{statut}");
+        assert_eq!(statut["raison"], RAISON_ECRITURE_DESACTIVEE, "{statut}");
+        assert!(
+            std::fs::read(&chemin).unwrap() == avant,
+            "autorisation retirée : le fichier reporté ne doit pas être écrit"
         );
     }
 }
