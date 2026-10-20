@@ -1514,9 +1514,13 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
         event_bus.emit("library.scan.completed", report);
 
         // #6332 — le débit des pistes déjà en base, inchangées, que ce scan
-        // n'a pas relues : complété ici, borné, sans relecture complète.
+        // n'a pas relues : complété dans un fil à part, hors du droit de
+        // scanner, interrompu par le scan suivant (`lancer_en_fond`).
         if !arrete {
-            tune_core::library::debit_des_pistes::completer_les_debits(db.as_ref());
+            tune_core::library::debit_des_pistes::lancer_en_fond(
+                db.clone(),
+                crate::routes::system::scan::droit_de_scanner_tenu,
+            );
         }
 
         // Le compteur du registre est ce qui a CHANGE, pas ce qui a ete vu :

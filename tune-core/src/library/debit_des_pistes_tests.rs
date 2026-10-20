@@ -105,13 +105,19 @@ fn le_rescan_complete_les_pistes_existantes_6332() {
     let deja = piste(&db, "/m/c.mp3", "mp3", Some(320));
     let muet = piste(&db, "/m/d.ogg", "ogg", None);
     let lus = std::sync::Mutex::new(Vec::new());
-    let r = completer_avec(db.as_ref(), 100, Duration::from_secs(60), |p| {
-        lus.lock().unwrap().push(p.to_string_lossy().to_string());
-        Ok(match p.to_str() {
-            Some("/m/a.flac") => Some(902),
-            _ => None,
-        })
-    });
+    let r = completer_avec(
+        db.as_ref(),
+        100,
+        Duration::from_secs(60),
+        || true,
+        |p| {
+            lus.lock().unwrap().push(p.to_string_lossy().to_string());
+            Ok(match p.to_str() {
+                Some("/m/a.flac") => Some(902),
+                _ => None,
+            })
+        },
+    );
     assert_eq!(debit(&db, flac), Some(902));
     assert_eq!(
         debit(&db, dsf),
@@ -139,9 +145,13 @@ fn le_rescan_complete_les_pistes_existantes_6332() {
         }
     );
     // Un second rescan n'a plus rien à faire.
-    let r2 = completer_avec(db.as_ref(), 100, Duration::from_secs(60), |_| {
-        panic!("rien ne doit être relu")
-    });
+    let r2 = completer_avec(
+        db.as_ref(),
+        100,
+        Duration::from_secs(60),
+        || true,
+        |_| panic!("rien ne doit être relu"),
+    );
     assert_eq!(r2, RapportDebits::default());
 }
 
@@ -152,15 +162,27 @@ fn la_passe_est_bornee_et_reprend_au_scan_suivant_6332() {
     for i in 0..5 {
         piste(&db, &format!("/m/{i}.flac"), "flac", None);
     }
-    let r = completer_avec(db.as_ref(), 2, Duration::from_secs(60), |_| Ok(Some(900)));
+    let r = completer_avec(
+        db.as_ref(),
+        2,
+        Duration::from_secs(60),
+        || true,
+        |_| Ok(Some(900)),
+    );
     assert_eq!((r.lus, r.interrompue), (2, true));
-    let r = completer_avec(db.as_ref(), 10, Duration::from_secs(60), |p| {
-        if p.ends_with("3.flac") {
-            Err(())
-        } else {
-            Ok(Some(900))
-        }
-    });
+    let r = completer_avec(
+        db.as_ref(),
+        10,
+        Duration::from_secs(60),
+        || true,
+        |p| {
+            if p.ends_with("3.flac") {
+                Err(())
+            } else {
+                Ok(Some(900))
+            }
+        },
+    );
     assert_eq!(
         (r.lus, r.interrompue),
         (1, true),
@@ -207,7 +229,13 @@ async fn pg_le_debit_aller_retour_et_complement_6332() {
         assert_eq!(debit(&db, mp3), Some(128), "PG : le débit n'est pas écrit");
         let flac = piste(&db, "/m/a.flac", "flac", None);
         let dsf = piste(&db, "/m/b.dsf", "dsf", None);
-        let r = completer_avec(db.as_ref(), 100, Duration::from_secs(60), |_| Ok(Some(902)));
+        let r = completer_avec(
+            db.as_ref(),
+            100,
+            Duration::from_secs(60),
+            || true,
+            |_| Ok(Some(902)),
+        );
         assert_eq!(debit(&db, flac), Some(902));
         assert_eq!(debit(&db, dsf), Some(5644));
         assert_eq!((r.dsd_calcules, r.lus), (1, 1));
@@ -225,5 +253,69 @@ async fn pg_le_debit_aller_retour_et_complement_6332() {
     assert_eq!(
         typ, "bigint",
         "PG 091 : `tracks.bitrate_kbps` doit être BIGINT"
+    );
+}
+
+/// Relecture rc7, point 5 : un fichier qui ne répond pas arrêtait la passe au
+/// MÊME endroit à chaque scan, et les pistes suivantes n'étaient jamais
+/// complétées. Il est désormais marqué inconnu avant l'arrêt : le scan suivant
+/// passe au-delà.
+#[test]
+fn un_fichier_muet_ne_bloque_pas_les_scans_suivants_6332() {
+    let db = base_sqlite();
+    let muet = piste(&db, "/m/0-muet.flac", "flac", None);
+    let a = piste(&db, "/m/1.flac", "flac", None);
+    let b = piste(&db, "/m/2.flac", "flac", None);
+    let lire = |p: &std::path::Path| {
+        if p.ends_with("0-muet.flac") {
+            Err(())
+        } else {
+            Ok(Some(900))
+        }
+    };
+    let r1 = completer_avec(db.as_ref(), 10, Duration::from_secs(60), || true, lire);
+    assert!(r1.interrompue, "le stockage muet arrête la passe");
+    assert_eq!(
+        debit(&db, muet),
+        Some(0),
+        "le fichier muet doit être marqué inconnu"
+    );
+    let r2 = completer_avec(db.as_ref(), 10, Duration::from_secs(60), || true, lire);
+    assert_eq!(
+        (debit(&db, a), debit(&db, b), r2.lus),
+        (Some(900), Some(900), 2),
+        "le scan suivant doit passer au-delà du fichier muet, pas buter dessus"
+    );
+}
+
+/// Relecture rc7, point 4 : la passe cède la place à un nouveau scan.
+#[test]
+fn la_passe_cede_la_place_a_un_nouveau_scan_6332() {
+    let db = base_sqlite();
+    let id = piste(&db, "/m/a.flac", "flac", None);
+    let r = completer_avec(
+        db.as_ref(),
+        10,
+        Duration::from_secs(60),
+        || false,
+        |_| panic!("un scan tient le droit : rien ne doit être lu"),
+    );
+    assert!(r.interrompue);
+    assert_eq!(debit(&db, id), None);
+}
+
+/// Le réglage `scan_bitrate_backfill = false` coupe la passe ; absent, elle
+/// tourne.
+#[test]
+fn le_reglage_coupe_la_passe_6332() {
+    let db = base_sqlite();
+    assert!(active(&db), "absent : la passe tourne");
+    crate::db::settings_repo::SettingsRepo::with_backend(db.clone())
+        .set(CLE_REGLAGE, "false")
+        .unwrap();
+    assert!(!active(&db));
+    assert!(
+        !lancer_en_fond(db.clone(), || false),
+        "réglage coupé : aucune passe lancée"
     );
 }

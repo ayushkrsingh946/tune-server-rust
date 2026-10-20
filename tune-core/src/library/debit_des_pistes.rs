@@ -21,11 +21,22 @@
 //!
 //! Un fichier dont le débit ne se lit pas reçoit [`DEBIT_INCONNU`] (0) : il
 //! n'est pas relu à chaque scan. Le prochain scan qui le relit en entier
-//! (fichier modifié, « Scan complet ») récrit la vraie valeur.
+//! (fichier modifié, « Scan complet ») récrit la vraie valeur. Un fichier qui
+//! ne RÉPOND pas est marqué de même avant que la passe s'arrête : sans quoi
+//! elle bloquerait au même endroit à chaque scan, et les pistes suivantes ne
+//! seraient jamais complétées.
+//!
+//! La passe tourne dans son propre fil ([`lancer_en_fond`]), APRÈS que le scan
+//! a rendu le droit de scanner : un nouveau scan n'est jamais refusé à cause
+//! d'elle, et elle lui cède la place (elle s'interrompt dès qu'un scan tient
+//! le droit). Une seule à la fois. Le réglage [`CLE_REGLAGE`] à `false` la
+//! coupe.
 //!
 //! Rien n'est supprimé, aucune autre colonne n'est touchée.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -46,6 +57,15 @@ const DELAI_PAR_FICHIER: Duration = Duration::from_secs(10);
 
 /// « Lu, débit inconnu » : la ligne n'est plus candidate au complément.
 pub const DEBIT_INCONNU: i64 = 0;
+
+/// Réglage qui coupe la passe quand il vaut `false` (absent : active).
+pub const CLE_REGLAGE: &str = "scan_bitrate_backfill";
+
+/// Attente au plus que le scan qui vient de finir rende le droit de scanner.
+const ATTENTE_DU_DROIT: Duration = Duration::from_secs(600);
+
+/// Une passe à la fois.
+static EN_COURS: AtomicBool = AtomicBool::new(false);
 
 /// Ce que la passe a fait, pour le journal.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -161,6 +181,7 @@ pub fn completer_avec(
     db: &dyn DbBackend,
     limite: usize,
     budget: Duration,
+    continuer: impl Fn() -> bool,
     lire: impl Fn(&Path) -> Result<Option<u32>, ()>,
 ) -> RapportDebits {
     let mut rapport = RapportDebits {
@@ -170,7 +191,7 @@ pub fn completer_avec(
     let lot = candidates(db, limite);
     let debut = Instant::now();
     for (i, (id, chemin)) in lot.iter().enumerate() {
-        if debut.elapsed() >= budget {
+        if debut.elapsed() >= budget || !continuer() {
             rapport.interrompue = true;
             break;
         }
@@ -186,6 +207,11 @@ pub fn completer_avec(
                 }
             }
             Err(()) => {
+                // Marqué inconnu AVANT l'arrêt : le scan suivant reprend après
+                // lui au lieu de buter au même endroit.
+                if ecrire(db, *id, DEBIT_INCONNU) {
+                    rapport.inconnus += 1;
+                }
                 warn!(chemin = %chemin, deja = i, "debit_lecture_sans_reponse — passe arrêtée");
                 rapport.interrompue = true;
                 break;
@@ -198,11 +224,25 @@ pub fn completer_avec(
     rapport
 }
 
-/// La passe de fin de scan, avec la vraie lecture bornée.
-pub fn completer_les_debits(db: &dyn DbBackend) -> RapportDebits {
-    let rapport = completer_avec(db, LOT_PAR_SCAN, BUDGET_PAR_SCAN, |p| {
-        lire_borne(p, DELAI_PAR_FICHIER)
-    });
+/// Le réglage [`CLE_REGLAGE`] laisse-t-il tourner la passe ?
+pub fn active(db: &Arc<dyn DbBackend>) -> bool {
+    crate::db::settings_repo::SettingsRepo::with_backend(db.clone())
+        .get(CLE_REGLAGE)
+        .ok()
+        .flatten()
+        .is_none_or(|v| v.trim() != "false")
+}
+
+/// La passe de fin de scan, avec la vraie lecture bornée. `occupe` dit si un
+/// scan tient le droit de scanner : la passe s'arrête dès qu'il est vrai.
+pub fn completer_les_debits(db: &dyn DbBackend, occupe: impl Fn() -> bool) -> RapportDebits {
+    let rapport = completer_avec(
+        db,
+        LOT_PAR_SCAN,
+        BUDGET_PAR_SCAN,
+        || !occupe(),
+        |p| lire_borne(p, DELAI_PAR_FICHIER),
+    );
     if rapport != RapportDebits::default() {
         info!(
             dsd_calcules = rapport.dsd_calcules,
@@ -213,6 +253,36 @@ pub fn completer_les_debits(db: &dyn DbBackend) -> RapportDebits {
         );
     }
     rapport
+}
+
+/// Lance la passe dans son propre fil, sans tenir le droit de scanner : elle
+/// attend d'abord que le scan qui vient de finir le rende (`occupe` faux),
+/// puis cède la place au premier scan suivant. Rend `false` sans rien lancer
+/// si le réglage la coupe ou si une passe tourne déjà.
+pub fn lancer_en_fond(db: Arc<dyn DbBackend>, occupe: fn() -> bool) -> bool {
+    if !active(&db) {
+        return false;
+    }
+    if EN_COURS.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let lance = std::thread::Builder::new()
+        .name("debit-des-pistes".into())
+        .spawn(move || {
+            let debut = Instant::now();
+            while occupe() && debut.elapsed() < ATTENTE_DU_DROIT {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            if !occupe() {
+                completer_les_debits(db.as_ref(), occupe);
+            }
+            EN_COURS.store(false, Ordering::SeqCst);
+        });
+    if lance.is_err() {
+        EN_COURS.store(false, Ordering::SeqCst);
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
