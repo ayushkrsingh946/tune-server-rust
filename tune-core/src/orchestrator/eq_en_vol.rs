@@ -235,26 +235,40 @@ mod tests {
             "prémisse : cet égaliseur change le niveau du sinus"
         );
 
-        // Coupure en vol (#5215, décision du 10/10) : la courbe s'efface,
-        // le préampli reste. Fondu fini, le relais rend le sinus au niveau
-        // du préampli, et le neutre qui le porte reste monté.
+        // Coupure en vol (#5215, décision du 10/10) : la courbe s'efface à
+        // niveau constant, le préampli gardé est porté par un neutre. Puis
+        // (#6524 b) ce préampli s'éteint vers 0 dB : 300 ms de courbe et 3 s
+        // d'extinction plus tard, le relais rend le signal SEC et le neutre
+        // n'est plus monté.
         let preampli = crate::audio::eq::EqProcessor::new(&profil(), SR, 2)
             .preamp_db(0)
             .expect("préampli chiffré");
         assert!(preampli < -1.0, "prémisse : réserve de {preampli} dB");
         poste.poser(None);
-        passer(&mut dsp, &mut position, 8, bloc, &mut servi);
+        passer(&mut dsp, &mut position, 2, bloc, &mut servi);
+        assert!(
+            dsp.eq.as_ref().is_some_and(|e| e.est_neutre()),
+            "pendant le fondu, le préampli gardé est porté par un égaliseur neutre"
+        );
+        let blocs_d_extinction = (SR as usize * 3_500 / 1_000).div_ceil(bloc);
+        passer(
+            &mut dsp,
+            &mut position,
+            blocs_d_extinction,
+            bloc,
+            &mut servi,
+        );
         let avant = position;
         let apres = passer(&mut dsp, &mut position, 2, bloc, &mut servi);
         let ecart_db = 20.0 * (rms(&apres) / rms(&sinus(avant + bloc, bloc))).log10();
         assert!(
-            (ecart_db - preampli).abs() < 0.1,
-            "égaliseur coupé, fondu fini : le relais garde le préampli \
-             ({ecart_db:+.2} dB pour {preampli:+.2} dB)"
+            ecart_db.abs() < 0.1,
+            "égaliseur coupé, extinction finie : le relais rend le signal sec \
+             ({ecart_db:+.2} dB ; préampli {preampli:+.2} dB)"
         );
         assert!(
-            dsp.eq.as_ref().is_some_and(|e| e.est_neutre()),
-            "le préampli gardé reste porté par un égaliseur neutre"
+            dsp.eq.as_ref().is_none_or(|e| e.est_neutre_au_repos()),
+            "plus aucun gain gardé : rien ne reste monté"
         );
 
         // Aucune marche sur tout le flux : le plus grand saut d'un

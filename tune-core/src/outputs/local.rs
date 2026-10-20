@@ -1290,8 +1290,9 @@ impl LocalOutput {
         {
             let mut emplacement = self.eq.lock().unwrap();
             // #5215 (décision du 10/10) — l'égaliseur reste coupé : le
-            // préampli gardé à la coupure vaut aussi pour cette piste, sans
-            // retour à 0 dB. Jamais sous PURE, qui ne doit rien laisser monté.
+            // préampli gardé à la coupure passe sur cette piste sans saut, et
+            // y poursuit son extinction vers 0 dB (#6524 b). Jamais sous PURE,
+            // qui ne doit rien laisser monté.
             if eq.is_none() && !self.pure_bypass.load(Ordering::Relaxed) {
                 eq = emplacement
                     .as_ref()
@@ -1417,8 +1418,9 @@ impl LocalOutput {
     }
 
     /// #6211 (décision du 19/10) — sur un flux sans fin, le préampli gardé
-    /// par un égaliseur coupé s'éteint en fondu ; sur une piste, la règle
-    /// #5215 reste entière (rien ne change).
+    /// par un égaliseur coupé s'éteint en fondu dès la coupure ; sur une
+    /// piste, il s'éteint après le fondu de la courbe (#6524 b, dans
+    /// `EqProcessor`).
     fn eteindre_si_flux_sans_fin(&self, eq: &mut Option<super::super::audio::eq::EqProcessor>) {
         if self.flux_sans_fin.load(Ordering::Relaxed)
             && let Some(eq) = eq.as_mut()
@@ -3824,7 +3826,12 @@ fn local_dsp_runtime_state(
     else {
         return OutputDspState::Unknown;
     };
-    if eq.is_some() || convolver.is_some() || crossfeed.is_some() {
+    // #6524 (b) — un égaliseur coupé qui ne garde plus rien et n'a plus de
+    // fondu est l'identité exacte : il ne touche pas le signal, il ne doit pas
+    // faire dire « DSP appliqué » le temps que la boucle le retire. Un neutre
+    // qui porte encore un gain (fondu, préampli en extinction), lui, l'applique.
+    let eq_agit = eq.as_ref().is_some_and(|p| !p.est_neutre_au_repos());
+    if eq_agit || convolver.is_some() || crossfeed.is_some() {
         OutputDspState::Applied
     } else {
         OutputDspState::Inactive

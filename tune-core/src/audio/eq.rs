@@ -40,6 +40,12 @@ pub const SEUIL_DE_RAMPE_DB: f64 = 1.0;
 /// 0 dB par une rampe (linéaire en dB) de quelques secondes : assez lente
 /// pour ne faire entendre aucune marche, assez courte pour que « remettre à
 /// plat » rende le niveau d'avant l'égaliseur.
+///
+/// #6524 (b) — la même rampe vaut désormais pour TOUT flux, pistes comprises :
+/// une fois la courbe effacée (fondu de [`RAMPE_DE_BASCULE_MS`] à niveau
+/// constant, #5215), le préampli gardé s'éteint ainsi. Gardé à vie, il
+/// laissait un gain dans la chaîne d'un égaliseur coupé et remis à plat, et
+/// la sortie disait « DSP appliqué » à juste titre (Jean, fil 1798).
 pub const EXTINCTION_SUR_FLUX_SANS_FIN_MS: u32 = 3_000;
 
 /// #6211 — extinction en cours du préampli gardé : `depart` est le gain par
@@ -73,7 +79,8 @@ pub struct EqProcessor {
     gain_moyen_db: f64,
     /// #5215 (décision du 10/10) — gain linéaire par canal que porte un
     /// égaliseur COUPÉ en vol : le préampli (et la compensation portée) de
-    /// celui qu'on quitte, pour que le niveau perçu ne bouge pas. `None` :
+    /// celui qu'on quitte, pour que le niveau perçu ne bouge pas pendant le
+    /// fondu de la courbe ; ensuite il s'éteint vers 0 dB (#6524 b). `None` :
     /// identité, le neutre se retire une fois son fondu fini.
     gain_garde: Option<Vec<f32>>,
     /// #6211 — sur un flux sans fin, le préampli gardé s'éteint en fondu
@@ -145,6 +152,10 @@ impl EqProcessor {
     /// retirait jusqu'ici une réserve de −12,56 dB : +12 dB d'un coup au
     /// casque (Levente Toth, fil 1974), puis en 200 ms. Désormais le niveau
     /// perçu reste celui de l'instant ; seule la courbe s'efface, par le fondu.
+    ///
+    /// #6524 (b) — le fondu de la courbe fini, ce gain s'éteint vers 0 dB en
+    /// [`EXTINCTION_SUR_FLUX_SANS_FIN_MS`] (voir `process_interleaved`) : pas
+    /// de marche, et plus de gain résiduel une fois l'égaliseur coupé.
     fn neutre(precedent: &Self) -> Self {
         let canaux = precedent.channels.max(1);
         let gains: Vec<f32> = (0..canaux)
@@ -277,11 +288,12 @@ impl EqProcessor {
         matches!(self.engine, Engine::Neutre)
     }
 
-    /// #5215 (décision de Bertrand du 10/10, seconde partie) — tant que
-    /// l'égaliseur reste COUPÉ, le préampli gardé vaut pour TOUTES les pistes
-    /// suivantes, sans saut. Rend, pour la piste qui commence, un neutre qui
-    /// porte le même gain, sans fondu (début de piste : rien à fondre). `None`
-    /// quand `self` n'est pas un neutre qui garde un préampli.
+    /// #5215 (décision de Bertrand du 10/10, seconde partie) — une piste qui
+    /// commence pendant que le préampli gardé s'éteint ne le fait pas sauter :
+    /// rend, pour cette piste, un neutre qui porte le gain atteint et reprend
+    /// son extinction (#6524 b), sans fondu de courbe (début de piste : rien
+    /// à fondre). `None` quand `self` n'est pas un neutre qui garde un
+    /// préampli.
     ///
     /// Un gain identique sur tous les canaux (le cas d'un préampli) est rangé
     /// en un seul coefficient : il vaut alors quel que soit le nombre de
@@ -303,7 +315,7 @@ impl EqProcessor {
             // que de décaler les canaux.
             vec![gains.iter().sum::<f32>() / gains.len() as f32]
         };
-        Some(Self {
+        let mut reporte = Self {
             engine: Engine::Neutre,
             sample_rate,
             channels,
@@ -314,7 +326,11 @@ impl EqProcessor {
             extinction: None,
             clipping: Default::default(),
             closed: AtomicBool::new(false),
-        })
+        };
+        // #6524 (b) — le gain reporté n'est pas gardé à vie : il reprend son
+        // extinction vers 0 dB là où la piste précédente l'a laissée.
+        reporte.eteindre_le_preampli_garde();
+        Some(reporte)
     }
 
     /// #6211 (décision de Bertrand du 19/10) — sur un flux SANS FIN (radio),
@@ -324,8 +340,9 @@ impl EqProcessor {
     /// et se retire ([`Self::est_neutre_au_repos`]).
     ///
     /// Sans effet sur un égaliseur actif, sur un neutre qui ne garde rien, ou
-    /// quand une extinction est déjà en cours. Les pistes n'appellent jamais
-    /// ceci : la règle #5215 y reste entière.
+    /// quand une extinction est déjà en cours. Sur une radio elle part dès la
+    /// coupure ; sur tout flux, elle part aussi à la fin du fondu de la
+    /// courbe (#6524 b).
     pub fn eteindre_le_preampli_garde(&mut self) {
         if !self.est_neutre() || self.extinction.is_some() {
             return;
@@ -435,6 +452,11 @@ impl EqProcessor {
         fondu.fait += samples.len() / canaux;
         if fondu.fait < fondu.total {
             self.fondu = Some(fondu);
+        } else {
+            // #6524 (b) — la courbe s'est effacée à niveau constant (#5215) :
+            // le préampli gardé s'éteint maintenant jusqu'à 0 dB, en fondu.
+            // Sans effet hors d'un neutre qui garde un gain.
+            self.eteindre_le_preampli_garde();
         }
         stats
     }
