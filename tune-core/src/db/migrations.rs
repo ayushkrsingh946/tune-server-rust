@@ -2510,6 +2510,33 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "radio_stations_external_id",
         up: "",
     },
+    // #6285 — la détection des faux hi-res : le verdict de chaque piste
+    // (`verifie`, `conforme`, `douteux` + raison, `non_concluant`), la
+    // coupure spectrale et les bits effectifs mesurés sur un extrait. La table
+    // naît VIDE : la passe de fond (désactivée par défaut) la remplit.
+    // `ON DELETE CASCADE` : une piste retirée emporte sa mesure.
+    //
+    // Numérotée 127 / PG 091 : la 126 / PG 090 (#6516) est la dernière sur
+    // `batch/bugs-rc7-20261015` le 20/10. ⚠️ La PR de #6466 (historique par
+    // conteneurs) tient AUSSI 127 / 091 : la seconde fusionnée se renumérote
+    // (règle de la 119). Jumelle PG : 091.
+    Migration {
+        version: 127,
+        name: "hires_verifications",
+        up: "
+CREATE TABLE IF NOT EXISTS hires_verifications (
+    track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    verdict TEXT NOT NULL,
+    raison TEXT,
+    coupure_hz REAL,
+    bits_effectifs INTEGER,
+    sample_rate INTEGER,
+    bits_declares INTEGER,
+    mesure_le TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_hires_verifications_verdict ON hires_verifications(verdict);
+",
+    },
 ];
 
 /// SQL de la migration 125 (#6179) — voir son entree dans `MIGRATIONS`.
@@ -5299,6 +5326,13 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         90,
         "radio_stations_external_id",
         include_str!("../../migrations/postgres/090_radio_stations_external_id.sql"),
+    ),
+    // Jumelle de la SQLite 127 (#6285) : `hires_verifications`, le verdict
+    // des faux hi-res par piste. Naît vide.
+    (
+        91,
+        "hires_verifications",
+        include_str!("../../migrations/postgres/091_hires_verifications.sql"),
     ),
 ];
 
@@ -8511,7 +8545,9 @@ mod tests {
         // Pose les colonnes de la ligne introuvable, que `get_entries` NOMME.
         // 90 : `radio_stations_external_id` (#6516), jumelle de la SQLite 126.
         // Pose le lien des radios avec l'annuaire, que le rapprochement NOMME.
-        assert_eq!(pg_latest_version(), 90, "latest PG migration must be 90");
+        // 91 : `hires_verifications` (#6285), jumelle de la SQLite 127. Crée la
+        // table des verdicts des faux hi-res, que la passe de fond NOMME.
+        assert_eq!(pg_latest_version(), 91, "latest PG migration must be 91");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),
