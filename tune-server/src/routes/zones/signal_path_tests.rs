@@ -4946,3 +4946,77 @@ fn descriptions_eq_et_replaygain_suivent_les_douze_langues_6496() {
         );
     }
 }
+
+// ─── #6542 — Devialet AIR ───────────────────────────────────────────────────
+
+fn zone_devialet_air() -> (Arc<dyn DbBackend>, Zone) {
+    let db = SqliteDb::open_in_memory().unwrap();
+    db.init_schema().unwrap();
+    tune_core::db::migrations::run_migrations(&db).unwrap();
+    let backend: Arc<dyn DbBackend> = Arc::new(db);
+    let repo = ZoneRepo::with_backend(backend.clone());
+    let id = repo
+        .create(
+            "D400-WIFI",
+            Some("devialet_air"),
+            Some("devialet-air:02:00:5e:00:00:01"),
+        )
+        .unwrap();
+    let zone = repo.get(id).unwrap().unwrap();
+    (backend, zone)
+}
+
+fn flac_a(sample_rate: u32) -> ZoneState {
+    let mut ps = flac_playing();
+    if let Some(np) = ps.now_playing.as_mut() {
+        np.sample_rate = Some(sample_rate);
+    }
+    ps
+}
+
+/// Un FLAC 24/96 vers un Devialet Expert : le transport est nommé, et le
+/// chemin reste bit-perfect (AIR est sans perte jusqu'à 96 kHz).
+#[test]
+fn air_6542_flac_24_96_vers_devialet_air_reste_bit_perfect() {
+    let (backend, zone) = zone_devialet_air();
+    let mut ps = flac_a(96_000);
+    ps.transformations_reelles = Some(TransformationsReelles::nouvelles(
+        tune_core::outputs::traits::AudioSpec::nouvelle(
+            96_000,
+            tune_core::outputs::traits::ProfondeurPcm::Entier24,
+            2,
+        )
+        .unwrap(),
+        tune_core::outputs::traits::FormatOuvert::new(96_000, 2),
+        false,
+    ));
+    let sp = build_signal_path(&ps, &zone, &backend, Some("D400-WIFI"), "none", None).unwrap();
+    assert_eq!(step_desc(&sp, "Transport").as_deref(), Some("Devialet AIR"));
+    assert_eq!(sp.get("bit_perfect").and_then(Value::as_bool), Some(true));
+    assert_eq!(step_desc(&sp, "Resampler"), None);
+}
+
+/// Un FLAC 24/192 : la sortie rééchantillonne à 96 kHz et le DÉCLARE ; le
+/// chemin du signal montre l'étape et retire le bit-perfect.
+#[test]
+fn air_6542_flac_24_192_vers_devialet_air_affiche_le_reechantillonnage_a_96_khz() {
+    let (backend, zone) = zone_devialet_air();
+    let mut ps = flac_a(192_000);
+    ps.transformations_reelles = Some(TransformationsReelles::nouvelles(
+        tune_core::outputs::traits::AudioSpec::nouvelle(
+            192_000,
+            tune_core::outputs::traits::ProfondeurPcm::Entier24,
+            2,
+        )
+        .unwrap(),
+        tune_core::outputs::traits::FormatOuvert::new(96_000, 2),
+        false,
+    ));
+    let sp = build_signal_path(&ps, &zone, &backend, Some("D400-WIFI"), "none", None).unwrap();
+    assert_eq!(step_desc(&sp, "Transport").as_deref(), Some("Devialet AIR"));
+    assert_eq!(sp.get("bit_perfect").and_then(Value::as_bool), Some(false));
+    assert_eq!(
+        step_desc(&sp, "Resampler").as_deref(),
+        Some("192kHz \u{2192} 96kHz (mesuré)")
+    );
+}
