@@ -7,7 +7,11 @@
 //! types_secondaires, premiere_sortie}], possedes, retenus, tronquee}`.
 //! `statut` : `ok`, `non_identifie` (l'artiste n'a pas d'identifiant
 //! MusicBrainz), `inconnu` (MusicBrainz ne le connaît pas), `indisponible`
-//! (MusicBrainz n'a pas répondu — rien n'est gardé).
+//! (MusicBrainz n'a pas répondu — rien n'est gardé), `sans_album` (aucun
+//! album de l'artiste dans la bibliothèque : rien n'est comparé).
+//!
+//! Une bibliothèque illisible n'est PAS un statut : `500 {code:
+//! "bibliotheque_illisible", error}`, sans liste.
 //!
 //! La bibliothèque comparée : les albums dont l'artiste est l'ARTISTE DE
 //! L'ALBUM (`albums.artist_id`), masqués exclus — la même liste que sa fiche.
@@ -23,6 +27,10 @@ use tune_core::db::artist_repo::ArtistRepo;
 use tune_core::metadata::albums_manquants::{self as am, AlbumPossede, Lecture};
 
 use crate::state::AppState;
+
+/// Le `code` d'une erreur de lecture de la bibliothèque : stable, traduit par
+/// l'écran. Le texte de `error` est réservé au journal et aux outils.
+pub(super) const CODE_BIBLIOTHEQUE_ILLISIBLE: &str = "bibliotheque_illisible";
 
 #[derive(Deserialize)]
 pub(super) struct ManquantsQuery {
@@ -69,15 +77,29 @@ pub(super) async fn albums_manquants(
     };
     // Une bibliothèque illisible n'est pas une bibliothèque vide : la prendre
     // pour vide annoncerait toute la discographie « manquante » (relecture
-    // de #6636). On rend `indisponible`, comme une panne de MusicBrainz.
+    // de #6636). L'erreur remonte comme une ERREUR — 500, avec un `code`
+    // stable que l'écran traduit — et sans aucune liste.
     let albums = match AlbumRepo::with_backend(state.backend.clone()).list_by_artist(id) {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(artist_id = id, erreur = %e, "albums_manquants_bibliotheque_illisible_6288");
-            return Json(json!({"statut": "indisponible", "mbid": mbid, "manquants": []}))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "code": CODE_BIBLIOTHEQUE_ILLISIBLE,
+                    "error": "la bibliothèque n'a pas pu être lue : aucune comparaison n'est faite",
+                })),
+            )
                 .into_response();
         }
     };
+    // Aucun album de l'artiste dans la bibliothèque (il n'y figure que par des
+    // pistes d'autres albums) : comparer annoncerait toute sa discographie.
+    // On ne compare pas, et on le dit.
+    if albums.is_empty() {
+        return Json(json!({"statut": "sans_album", "mbid": mbid, "manquants": []}))
+            .into_response();
+    }
     let bibliotheque: Vec<AlbumPossede> = albums
         .into_iter()
         .map(|a| AlbumPossede {

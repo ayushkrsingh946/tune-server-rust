@@ -127,10 +127,10 @@ async fn la_route_soustrait_la_bibliotheque_de_la_discographie_gardee_6288() {
     assert_eq!(v["manquants"].as_array().unwrap().len(), 2, "{v}");
 }
 
-/// Relecture de #6636 — une bibliothèque illisible ne fait pas annoncer toute
-/// la discographie « manquante » : la route rend `indisponible`.
+/// Relecture de #6636 — une bibliothèque illisible remonte comme une ERREUR
+/// (500, `code: bibliotheque_illisible`), sans aucune liste de manquants.
 #[tokio::test]
-async fn une_bibliotheque_illisible_n_invente_aucun_manque_6288() {
+async fn une_bibliotheque_illisible_rend_une_erreur_et_aucun_manque_6288() {
     let state = AppState::new(":memory:", 0, Default::default()).unwrap();
     let id = artiste(&state, Some(ARTISTE));
     am::garder(
@@ -145,10 +145,34 @@ async fn une_bibliotheque_illisible_n_invente_aucun_manque_6288() {
     // La lecture des albums échoue : la table a disparu.
     state.backend.execute("DROP TABLE albums", &[]).unwrap();
     let (statut, v) = get(&state, &format!("/artists/{id}/missing-albums")).await;
-    assert_eq!(statut, 200);
     assert_eq!(
-        v["statut"], "indisponible",
-        "une bibliothèque illisible a été prise pour vide : {v}"
+        statut, 500,
+        "une bibliothèque illisible doit rendre une erreur, pas une réponse : {v}"
     );
+    assert_eq!(v["code"], "bibliotheque_illisible");
+    assert!(
+        v.get("manquants").is_none(),
+        "aucune liste de manquants ne doit accompagner l'erreur : {v}"
+    );
+}
+
+/// Un artiste sans aucun album dans la bibliothèque : rien n'est comparé, et
+/// sa discographie n'est pas annoncée manquante en bloc.
+#[tokio::test]
+async fn un_artiste_sans_album_n_est_pas_compare_6288() {
+    let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+    let id = artiste(&state, Some(ARTISTE));
+    am::garder(
+        &state.backend,
+        ARTISTE,
+        &Discographie {
+            groupes: vec![g(1, "Meddle", &[], "1971-10-30")],
+            tronquee: false,
+            lu_le: chrono::Utc::now().timestamp(),
+        },
+    );
+    let (statut, v) = get(&state, &format!("/artists/{id}/missing-albums")).await;
+    assert_eq!(statut, 200);
+    assert_eq!(v["statut"], "sans_album", "{v}");
     assert_eq!(v["manquants"], json!([]));
 }
