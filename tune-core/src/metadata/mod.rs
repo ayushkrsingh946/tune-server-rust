@@ -61,6 +61,103 @@ pub(crate) fn mb_artist_query(name: &str) -> String {
     format!("artist:\"{name}\" OR alias:\"{name}\"")
 }
 
+/// Nombre de candidats demandés à `ws/2/artist?query=` quand on cherche un
+/// MBID par le nom : assez pour voir l'artiste exact derrière un homonyme
+/// mieux classé (#6463), et le ou les homonymes exacts qui rendent le nom
+/// ambigu.
+pub(crate) const MB_ARTIST_CANDIDATES: usize = 10;
+
+/// Choisit le MBID d'un artiste dans une réponse `ws/2/artist?query=`.
+///
+/// # #6463 — « Christophe » recevait le portrait de Christophe Beck
+///
+/// FabienM (fil 2302, rc6) : l'artiste « Christophe » de sa bibliothèque porte
+/// une mauvaise image. Les deux recherches par le nom (`lookup_artist` du
+/// matcher et `search_musicbrainz_artist` de la passe d'images) demandaient
+/// `limit=1` et prenaient le premier résultat dès que son score atteignait 90.
+/// Or le score Lucene de MusicBrainz mesure la proximité TEXTUELLE, pas
+/// l'identité. Mesuré le 20/10/2026, pour `artist:"Christophe"` comme pour
+/// `artist:"Christophe" OR alias:"Christophe"` :
+///
+/// ```text
+/// 100  0df890e1-…  Christophe Beck   (Canadian score composer)
+///  98  5cef1748-…  Christophe        (French pop singer)
+/// ```
+///
+/// Le compositeur canadien emportait le MBID, donc ses images (Mozaiklabs par
+/// MBID, Fanart.tv, TheAudioDB, Wikidata). La recherche du client, elle, ne
+/// passe pas par ce MBID : sa vignette vient des services de streaming, d'où
+/// la bonne image au même nom.
+///
+/// La règle est celle que Discogs et Last.fm suivent déjà (#2221) : on ne
+/// retient qu'un candidat dont le NOM est celui cherché
+/// (`noms_d_artiste_identiques`), et s'il y en a plusieurs, on ne choisit pas.
+/// Un MBID faux s'installe durablement (il est persisté, et toute la cascade
+/// d'images s'y fie) ; pas de MBID, c'est seulement la cascade par le nom.
+///
+/// Un ALIAS identique ne compte qu'à défaut de nom identique : c'est lui qui
+/// fait trouver les noms en écriture native (`아이유` → `IU`, voir
+/// [`mb_artist_query`]), mais un alias est aussi ce qui rattache
+/// « Jean-Christophe » à Christophe Beck. Le seuil de score 90 reste exigé.
+pub(crate) fn mb_choisir_artiste(data: &serde_json::Value, wanted: &str) -> Option<String> {
+    let candidats: Vec<&serde_json::Value> = data
+        .get("artists")?
+        .as_array()?
+        .iter()
+        .filter(|a| a.get("score").and_then(|v| v.as_i64()).unwrap_or(0) >= 90)
+        .collect();
+
+    let par_nom: Vec<&serde_json::Value> = candidats
+        .iter()
+        .copied()
+        .filter(|a| {
+            a.get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| noms_d_artiste_identiques(n, wanted))
+        })
+        .collect();
+    let retenus = if par_nom.is_empty() {
+        candidats
+            .into_iter()
+            .filter(|a| {
+                a.get("aliases")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|aliases| {
+                        aliases.iter().any(|al| {
+                            al.get("name")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|n| noms_d_artiste_identiques(n, wanted))
+                        })
+                    })
+            })
+            .collect()
+    } else {
+        par_nom
+    };
+
+    let mut ids = retenus
+        .iter()
+        .filter_map(|a| a.get("id").and_then(|v| v.as_str()));
+    let choisi = ids.next()?;
+    // Deux entrées distinctes répondent au même nom : des homonymes, que rien
+    // ne départage ici.
+    if ids.any(|autre| autre != choisi) {
+        return None;
+    }
+    Some(choisi.to_string())
+}
+
+/// Deux noms d'artiste désignent-ils la MÊME entrée ? À la casse et aux espaces
+/// de bord près, rien d'autre : ni accents ni ponctuation repliés
+/// (« Motorhead » ≠ « Motörhead »). Même règle que
+/// `library::artwork::artist_name_matches_exactly`.
+pub(crate) fn noms_d_artiste_identiques(candidate: &str, wanted: &str) -> bool {
+    let candidate = candidate.trim();
+    let wanted = wanted.trim();
+    // Un nom vide se « retrouve » partout : il ne départage rien.
+    !candidate.is_empty() && !wanted.is_empty() && candidate.to_lowercase() == wanted.to_lowercase()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TrackCredit {
     pub name: String,
@@ -5165,6 +5262,91 @@ mod tests {
         assert_eq!(
             mb_artist_query("The Beatles"),
             "artist:\"The Beatles\" OR alias:\"The Beatles\""
+        );
+    }
+
+    /// Réponse `ws/2/artist?query=artist:"Christophe"` telle que MusicBrainz la
+    /// rend (mesurée le 20/10/2026, champs inutiles retirés) : le compositeur
+    /// canadien passe DEVANT le chanteur français, avec un meilleur score.
+    fn reponse_mb_christophe() -> serde_json::Value {
+        serde_json::json!({
+            "artists": [
+                {"id": "0df890e1-f4f2-4b21-a413-cd8af1af32d8", "score": 100,
+                 "name": "Christophe Beck", "disambiguation": "Canadian score composer",
+                 "aliases": [{"name": "Jean‐Christophe Beck"}, {"name": "Jean‐Christophe"}]},
+                {"id": "5cef1748-13f1-4155-b9f6-71cd4212b960", "score": 98,
+                 "name": "Christophe", "disambiguation": "French pop singer",
+                 "aliases": [{"name": "C. Bevilacqua"}, {"name": "Christophe Bevilacqua"}]},
+                {"id": "6784a34f-3d91-45a5-b7b3-be1eaa1096f1", "score": 91,
+                 "name": "Christophe Rousset"}
+            ]
+        })
+    }
+
+    #[test]
+    fn mb_un_homonyme_mieux_classe_ne_prend_pas_le_mbid_6463() {
+        assert_eq!(
+            mb_choisir_artiste(&reponse_mb_christophe(), "Christophe").as_deref(),
+            Some("5cef1748-13f1-4155-b9f6-71cd4212b960"),
+            "#6463 — « Christophe » doit recevoir le MBID du chanteur français \
+             (nom identique), pas celui de Christophe Beck classé premier"
+        );
+    }
+
+    #[test]
+    fn mb_deux_artistes_du_meme_nom_ne_sont_pas_departages_6463() {
+        let data = serde_json::json!({
+            "artists": [
+                {"id": "a", "score": 100, "name": "Christophe"},
+                {"id": "b", "score": 100, "name": "christophe", "disambiguation": "DJ belge"}
+            ]
+        });
+        assert_eq!(mb_choisir_artiste(&data, "Christophe"), None);
+        // Le même MBID rendu deux fois n'est pas un homonyme.
+        let doublon = serde_json::json!({
+            "artists": [
+                {"id": "a", "score": 100, "name": "Christophe"},
+                {"id": "a", "score": 95, "name": "Christophe"}
+            ]
+        });
+        assert_eq!(
+            mb_choisir_artiste(&doublon, "Christophe").as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn mb_sans_nom_identique_aucun_mbid_6463() {
+        // Le premier résultat, bien noté, ne porte pas le nom cherché.
+        let data = serde_json::json!({
+            "artists": [{"id": "x", "score": 100, "name": "The Beatles"}]
+        });
+        assert_eq!(mb_choisir_artiste(&data, "Beatles"), None);
+        // Nom identique mais score trop faible : le seuil tient toujours.
+        let faible = serde_json::json!({
+            "artists": [{"id": "y", "score": 80, "name": "Christophe"}]
+        });
+        assert_eq!(mb_choisir_artiste(&faible, "Christophe"), None);
+        assert_eq!(
+            mb_choisir_artiste(&serde_json::json!({}), "Christophe"),
+            None
+        );
+    }
+
+    #[test]
+    fn mb_l_alias_natif_reste_trouve_6463() {
+        // Le cas qu'`mb_artist_query` sert : le nom primaire est romanisé,
+        // l'écriture native n'est qu'un alias.
+        let data = serde_json::json!({
+            "artists": [
+                {"id": "iu", "score": 100, "name": "IU", "aliases": [{"name": "아이유"}]}
+            ]
+        });
+        assert_eq!(mb_choisir_artiste(&data, "아이유").as_deref(), Some("iu"));
+        // À défaut de nom identique, un alias identique et unique suffit.
+        assert_eq!(
+            mb_choisir_artiste(&reponse_mb_christophe(), "Jean‐Christophe"),
+            Some("0df890e1-f4f2-4b21-a413-cd8af1af32d8".to_string())
         );
     }
 
