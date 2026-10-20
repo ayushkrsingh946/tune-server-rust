@@ -160,6 +160,10 @@ pub struct TidalService {
     /// Racine de l'API, déplacée par les seuls témoins vers un serveur factice
     /// (#4803). `None` partout ailleurs : [`API_BASE`].
     base_forcee: Option<String>,
+    /// #6336 — racine OAuth (code d'appareil, jetons), déplacée par les seuls
+    /// bancs d'essai vers un serveur factice. `None` partout ailleurs :
+    /// [`AUTH_BASE`].
+    auth_forcee: Option<String>,
 }
 
 impl Default for TidalService {
@@ -192,7 +196,29 @@ impl TidalService {
             featured_cache: std::sync::Mutex::new(None),
             enabled_override: None,
             base_forcee: None,
+            auth_forcee: None,
         }
+    }
+
+    /// #6336 — un service dont l'API et l'OAuth sont `api` et `auth`, pour
+    /// éprouver la connexion par le vrai routeur sans joindre TIDAL. Réservé
+    /// aux bancs d'essai : aucun binaire publié ne le compile.
+    #[cfg(any(test, feature = "services-factices"))]
+    pub fn avec_bases_de_test(api: String, auth: String) -> Self {
+        let mut svc = Self::new();
+        svc.base_forcee = Some(api);
+        svc.auth_forcee = Some(auth);
+        svc
+    }
+
+    /// Racine de l'API : [`API_BASE`], sauf dans un banc d'essai.
+    fn api_base(&self) -> &str {
+        self.base_forcee.as_deref().unwrap_or(API_BASE)
+    }
+
+    /// Racine OAuth : [`AUTH_BASE`], sauf dans un banc d'essai.
+    fn auth_base(&self) -> &str {
+        self.auth_forcee.as_deref().unwrap_or(AUTH_BASE)
     }
 
     /// Download all DASH segments (init + media) and concatenate them into a
@@ -486,7 +512,7 @@ impl TidalService {
     ) -> Result<TokenResponse, String> {
         let resp = self
             .client
-            .post(format!("{AUTH_BASE}/token"))
+            .post(format!("{}/token", self.auth_base()))
             .form(&[
                 ("client_id", CLIENT_ID),
                 ("client_secret", CLIENT_SECRET),
@@ -592,7 +618,7 @@ impl TidalService {
 
         let resp = self
             .client
-            .post(format!("{AUTH_BASE}/token"))
+            .post(format!("{}/token", self.auth_base()))
             .form(&[
                 ("client_id", CLIENT_ID),
                 ("client_secret", CLIENT_SECRET),
@@ -740,7 +766,7 @@ impl TidalService {
 
     async fn api_get(&self, path: &str) -> Result<serde_json::Value, String> {
         let token = self.get_access_token().await?;
-        let base = self.base_forcee.as_deref().unwrap_or(API_BASE);
+        let base = self.api_base();
         let url = format!("{base}{path}");
         let resp = self
             .client
@@ -964,7 +990,10 @@ impl TidalService {
         quality: &str,
     ) -> Result<serde_json::Value, String> {
         let token = self.get_access_token().await?;
-        let url = format!("{API_BASE}/tracks/{track_id}/playbackinfopostpaywall");
+        let url = format!(
+            "{}/tracks/{track_id}/playbackinfopostpaywall",
+            self.api_base()
+        );
         let params = [
             ("audioquality", quality),
             ("playbackmode", "STREAM"),
@@ -1196,7 +1225,7 @@ impl TidalService {
     /// quoi le deuxième lot d'une playlist de plus de 100 titres échouerait.
     async fn etiquette_playlist(&self, playlist_id: &str) -> Result<String, String> {
         let token = self.get_access_token().await?;
-        let url = format!("{API_BASE}/playlists/{playlist_id}");
+        let url = format!("{}/playlists/{playlist_id}", self.api_base());
         let resp = self
             .client
             .get(&url)
@@ -1225,7 +1254,7 @@ impl TidalService {
         etiquette: Option<&str>,
     ) -> Result<serde_json::Value, String> {
         let token = self.get_access_token().await?;
-        let url = format!("{API_BASE}{path}");
+        let url = format!("{}{path}", self.api_base());
         let poser = |req: reqwest::RequestBuilder| match etiquette {
             Some(e) => req.header(reqwest::header::IF_NONE_MATCH, e),
             None => req,
@@ -1274,7 +1303,7 @@ impl TidalService {
 
     async fn api_delete(&self, path: &str) -> Result<(), String> {
         let token = self.get_access_token().await?;
-        let url = format!("{API_BASE}{path}");
+        let url = format!("{}{path}", self.api_base());
         let resp = self
             .client
             .delete(&url)
@@ -1520,7 +1549,7 @@ impl StreamingService for TidalService {
         if credentials.get("device_flow").and_then(|v| v.as_bool()) == Some(true) {
             let resp = self
                 .client
-                .post(format!("{AUTH_BASE}/device_authorization"))
+                .post(format!("{}/device_authorization", self.auth_base()))
                 .form(&[("client_id", CLIENT_ID), ("scope", "r_usr w_usr w_sub")])
                 .send()
                 .await
@@ -1582,7 +1611,7 @@ impl StreamingService for TidalService {
 
                 let resp = self
                     .client
-                    .post(format!("{AUTH_BASE}/token"))
+                    .post(format!("{}/token", self.auth_base()))
                     .form(&[
                         ("client_id", CLIENT_ID),
                         ("client_secret", CLIENT_SECRET),

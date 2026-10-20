@@ -86,6 +86,20 @@ pub struct QobuzService {
     /// production, de sorte qu'une base d'essai ne puisse jamais recevoir
     /// d'identifiants.
     base_forcee: Option<String>,
+    /// #6336 — toutes les adresses du service, connexion comprise, déplacées
+    /// vers un serveur simulé. `None` en production : seul
+    /// [`QobuzService::avec_bases_de_test`] la pose, et il n'existe que dans
+    /// les constructions de tests (feature `services-factices`).
+    bases_de_test: Option<BasesQobuz>,
+}
+
+/// #6336 — les trois adresses qu'un essai remplace : l'API directe, le relais,
+/// et la configuration distante relue avant chaque connexion.
+#[derive(Clone, Debug)]
+pub struct BasesQobuz {
+    pub api: String,
+    pub proxy: String,
+    pub config_distante: String,
 }
 
 /// Une lecture de favoris partagée par les demandes qui l'attendent.
@@ -569,6 +583,28 @@ impl QobuzService {
             cache_album: Mutex::new(HashMap::new()),
             favoris_en_vol: Mutex::new(HashMap::new()),
             base_forcee: None,
+            bases_de_test: None,
+        }
+    }
+
+    /// #6336 — un service dont TOUTES les adresses, connexion et configuration
+    /// distante comprises, sont celles de `bases`. Réservé aux bancs d'essai
+    /// (`tune-server/tests/services_remplacables_6336.rs`) : aucun binaire
+    /// publié ne le compile.
+    #[cfg(any(test, feature = "services-factices"))]
+    pub fn avec_bases_de_test(app_id: String, app_secret: String, bases: BasesQobuz) -> Self {
+        let mut svc = Self::new(app_id, app_secret);
+        svc.bases_de_test = Some(bases);
+        svc
+    }
+
+    /// (primaire, secours) pour la CONNEXION et, hors `base_forcee`, pour
+    /// l'API : l'ordre de production, sur les adresses d'essai s'il y en a.
+    fn bases_ordonnees(&self) -> (&str, &str) {
+        match self.bases_de_test {
+            Some(ref b) if self.proxy_first => (b.proxy.as_str(), b.api.as_str()),
+            Some(ref b) => (b.api.as_str(), b.proxy.as_str()),
+            None => endpoint_order(self.proxy_first),
         }
     }
 
@@ -601,7 +637,7 @@ impl QobuzService {
     fn bases_api(&self) -> (&str, &str) {
         match self.base_forcee {
             Some(ref base) => (base.as_str(), base.as_str()),
-            None => endpoint_order(self.proxy_first),
+            None => self.bases_ordonnees(),
         }
     }
 
@@ -615,7 +651,11 @@ impl QobuzService {
     }
 
     async fn refresh_credentials(&mut self) {
-        match self.client.get(REMOTE_CONFIG_URL).send().await {
+        let url = self
+            .bases_de_test
+            .as_ref()
+            .map_or(REMOTE_CONFIG_URL, |b| b.config_distante.as_str());
+        match self.client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(data) = resp.json::<serde_json::Value>().await {
                     let qobuz = &data["qobuz"];
@@ -2036,7 +2076,7 @@ impl QobuzService {
     ) -> Result<AuthStatus, String> {
         self.refresh_credentials().await;
 
-        let (primary, fallback) = endpoint_order(self.proxy_first);
+        let (primary, fallback) = self.bases_ordonnees();
         let data = match self.login_at(primary, username, password).await {
             Ok(d) => d,
             Err(err) if err.transient() => {
