@@ -115,3 +115,24 @@ fn regle_armee_non_appliquee_faute_de_voies_le_dit_6230() {
         zone_reaffectation_ignoree(&state.backend, 7, "local", None, Some(&reel(4, 8))).is_none()
     );
 }
+
+/// #6230, décision du 20/10 — la sortie s'ouvre sur les voies de la grille :
+/// une grille 6 → 2 sur un 5.1 ouvert en 2 voies est annoncée comme
+/// APPLIQUÉE (« Matrice 6 → 2 voies »), plus comme ignorée. Si le
+/// périphérique a refusé les 2 voies (ouvert en 6), la raison reste dite.
+#[test]
+fn grille_6_vers_2_ouverte_en_2_voies_est_annoncee_appliquee_6230() {
+    let state = etat_avec(7, rc::prereglage("5_1_to_stereo_itu"));
+    let etape = zone_reaffectation_step(&state.backend, 7, "local", None, Some(&reel(6, 2)))
+        .expect("la grille 6 → 2 s'applique sur 2 voies : l'étape doit apparaître");
+    assert!(etape.contains("Matrice 6 → 2 voies"), "{etape}");
+    assert!(!etape.contains("non appliquée"), "{etape}");
+    assert!(
+        zone_reaffectation_ignoree(&state.backend, 7, "local", None, Some(&reel(6, 2))).is_none(),
+        "appliquée : rien d'ignoré à signaler"
+    );
+    let refus = zone_reaffectation_ignoree(&state.backend, 7, "local", None, Some(&reel(6, 6)))
+        .expect("2 voies refusées : la règle ignorée se dit");
+    assert!(refus.contains("non appliquée"), "{refus}");
+    assert!(refus.contains("6 voies"), "{refus}");
+}
