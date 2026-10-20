@@ -1561,6 +1561,10 @@ impl PlaybackOrchestrator {
                 track_id,
                 local_output.current_format().map(|(_, ch)| u32::from(ch)),
             ));
+            // #6230 — une ouverture pilotée par la matrice (6 → 2) retrouve
+            // les voies de la source en entrant en PURE, et inversement : la
+            // réouverture a lieu plus bas, verrou de la sortie relâché.
+            let rouvrir_pour_les_voies = self.les_voies_imposent_de_rouvrir(zone_id, local_output);
             // Même raison pour la rampe (#1590) : `zone_soft_mute_ms` rend 0 en
             // PURE, donc une zone qui ENTRE en PURE doit la perdre dans le même
             // geste, et une zone qui en sort doit la retrouver — sans attendre
@@ -1580,6 +1584,10 @@ impl PlaybackOrchestrator {
                 replaygain = rg,
                 "zone_pure_dsp_refreshed_live"
             );
+            drop(output);
+            if rouvrir_pour_les_voies {
+                self.rouvrir_pour_les_voies(zone_id).await;
+            }
             true
         }
     }
@@ -2574,13 +2582,51 @@ impl PlaybackOrchestrator {
             );
             let armee = matrice.is_some();
             local_output.set_reaffectation(matrice);
+            // #6230 — une règle qui change le nombre de voies (6 → 6 devenue
+            // 6 → 2, ou retirée après une ouverture pilotée) rouvre la sortie.
+            let rouvrir = self.les_voies_imposent_de_rouvrir(zone_id, local_output);
             info!(
                 zone_id,
                 device_id = %device_id,
                 armee,
+                rouvrir,
                 "zone_reaffectation_refreshed_live"
             );
+            drop(output);
+            if rouvrir {
+                self.rouvrir_pour_les_voies(zone_id).await;
+            }
             true
+        }
+    }
+
+    /// #6230 — la matrice vient d'être reposée sur une sortie locale qui joue
+    /// : demande-t-elle un autre nombre de voies que l'ouverture en cours
+    /// ([`crate::outputs::local::LocalOutput::les_voies_imposent_de_rouvrir`]) ?
+    /// L'appelant tient le verrou de la sortie : il le relâche, puis appelle
+    /// [`Self::rouvrir_pour_les_voies`]. Sans règle armée, toujours non.
+    #[cfg(feature = "local-audio")]
+    pub(super) fn les_voies_imposent_de_rouvrir(
+        &self,
+        zone_id: i64,
+        local_output: &crate::outputs::local::LocalOutput,
+    ) -> bool {
+        local_output.les_voies_imposent_de_rouvrir()
+            && self.position_entretenue_par_le_sondeur(zone_id)
+    }
+
+    /// #6230 — rejouer la piste à la position courante, ce qui rouvre la
+    /// sortie sur les voies que la matrice demande. Verrou de la sortie
+    /// relâché par l'appelant.
+    #[cfg(feature = "local-audio")]
+    pub(super) async fn rouvrir_pour_les_voies(&self, zone_id: i64) {
+        let position_ms = self.playback.get_state(zone_id).await.position_ms.max(0) as u64;
+        match self
+            .replay_zone_at_position(zone_id, position_ms, "reaffectation_voies")
+            .await
+        {
+            Ok(()) => info!(zone_id, position_ms, "reaffectation_voies_rouvertes"),
+            Err(e) => warn!(zone_id, error = %e, "reaffectation_voies_reouverture_echouee"),
         }
     }
 
