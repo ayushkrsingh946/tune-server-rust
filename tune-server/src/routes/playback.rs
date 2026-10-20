@@ -1643,6 +1643,8 @@ mod refus_entier_negatif_3966;
 #[cfg(test)]
 mod depart_hors_bannis_6368;
 #[cfg(test)]
+mod file_volumineuse_6399;
+#[cfg(test)]
 mod saut_hors_file_4283;
 /// #4283 — `queue/jump` valide la position avant que le curseur ne bouge.
 #[cfg(test)]
@@ -4384,11 +4386,53 @@ pub(crate) async fn passer_les_zones_qui_jouent(
     passees
 }
 
+/// #6399 — `GET /zones/{id}/queue?offset=&limit=` : une fenêtre de la file.
+///
+/// Sans paramètre, la réponse reste la file ENTIÈRE, comme avant : aucun
+/// client déployé ne change de comportement. Mesuré sur une file factice de
+/// 3 000 titres (banc `file_volumineuse_6399`) : 1,7 Mo et ~50 ms par
+/// relecture ; la file du signalement en comptait 39 000.
+#[derive(Deserialize, Default)]
+struct FenetreDeFile {
+    offset: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// Le plafond d'une fenêtre : au-delà, autant relire la file entière.
+const FENETRE_MAX: i64 = 1_000;
+
+/// #6399 — l'ETag d'une réponse de file : un condensat de son CORPS.
+///
+/// Faible (`W/`) parce que la couche de compression réécrit les octets. Le
+/// condensat est celui du corps entier, bannis et `gapless_next` compris :
+/// un titre renommé, une ligne bannie ou un enchaînement changé changent
+/// l'ETag. Il n'épargne pas le calcul, il épargne le transfert et l'analyse
+/// côté navigateur — qui revalide de lui-même, la route étant servie en
+/// `no-cache, must-revalidate`.
+fn etag_de_file(corps: &[u8]) -> String {
+    use sha2::Digest as _;
+    let condensat = sha2::Sha256::digest(corps);
+    let hex: String = condensat[..12].iter().map(|b| format!("{b:02x}")).collect();
+    format!("W/\"q-{hex}\"")
+}
+
+/// `If-None-Match` couvre-t-il `etag` ? Liste à virgules, `*`, formes faibles
+/// et fortes confondues (comparaison faible, RFC 9110 §13.1.2).
+fn etag_correspond(if_none_match: Option<&str>, etag: &str) -> bool {
+    let nu = |e: &str| e.trim().trim_start_matches("W/").to_string();
+    if_none_match.is_some_and(|v| {
+        v.split(',')
+            .any(|candidat| candidat.trim() == "*" || nu(candidat) == nu(etag))
+    })
+}
+
 async fn get_queue(
     State(state): State<AppState>,
     profile: ActiveProfile,
     Path(zone_id): Path<i64>,
-) -> Json<Value> {
+    Query(fenetre): Query<FenetreDeFile>,
+    entetes: axum::http::HeaderMap,
+) -> axum::response::Response {
     let queue_repo = PlayQueueRepo::with_backend(state.backend.clone());
     let ps = state.playback.get_state(zone_id).await;
 
@@ -4396,13 +4440,49 @@ async fn get_queue(
     // streaming). `get_ordered` reads the whole `queue_items` table for the zone
     // in `position` order, COALESCE-ing the display fields from the tracks join
     // (local) or the inline columns (streaming).
-    let entries = queue_repo.get_ordered(zone_id).unwrap_or_default();
-    let position = entries
-        .iter()
-        .position(|e| e.is_current)
-        .map(|p| p as i64)
-        .unwrap_or(ps.queue_position);
-    let length = entries.len();
+    //
+    // #6399 — avec `offset`/`limit`, seule la fenêtre (plus la ligne qui la
+    // suit, pour son `gapless_next`) traverse la jointure ; le rang de la
+    // ligne en cours et la longueur se lisent sur la seule colonne
+    // `is_current`.
+    let demandee = match (fenetre.offset, fenetre.limit) {
+        (None, None) => None,
+        (o, l) => Some((
+            o.unwrap_or(0).max(0),
+            l.unwrap_or(FENETRE_MAX).clamp(0, FENETRE_MAX),
+        )),
+    };
+    let (entries, position, length, offset) = match demandee {
+        None => {
+            let entries = queue_repo.get_ordered(zone_id).unwrap_or_default();
+            let position = entries
+                .iter()
+                .position(|e| e.is_current)
+                .map(|p| p as i64)
+                .unwrap_or(ps.queue_position);
+            let length = entries.len();
+            (entries, position, length, 0i64)
+        }
+        Some((offset, limit)) => {
+            let (courant, length) = queue_repo
+                .current_index_and_length(zone_id)
+                .unwrap_or((None, 0));
+            let entries = queue_repo
+                .get_ordered_window(zone_id, offset, limit + 1)
+                .unwrap_or_default();
+            (
+                entries,
+                courant.unwrap_or(ps.queue_position),
+                length as usize,
+                offset,
+            )
+        }
+    };
+    // La ligne lue en plus ne sert qu'au `gapless_next` de la dernière.
+    let affichees = match demandee {
+        Some((_, limit)) => entries.len().min(limit as usize),
+        None => entries.len(),
+    };
     // #2934 — `gapless_next` : ce que CETTE ligne promet à la ligne affichée
     // juste après. Le client l'affiche depuis toujours (QueueView, badge
     // « Gapless ») ; aucune structure du serveur ne le portait, il ne vivait
@@ -4453,7 +4533,7 @@ async fn get_queue(
     } else {
         Default::default()
     };
-    let tracks: Vec<Value> = entries
+    let tracks: Vec<Value> = entries[..affichees]
         .iter()
         .enumerate()
         .map(|(idx, e)| {
@@ -4495,9 +4575,10 @@ async fn get_queue(
                     output_can_gapless,
                     output_type: &output_type,
                     output_prefers_local_file,
-                    index: idx as i64,
+                    index: offset + idx as i64,
                     successeur_reel: tune_core::poller::PositionPoller::next_position_after(
-                        &zs, idx as i64,
+                        &zs,
+                        offset + idx as i64,
                     ),
                     successeur_format: suivant.and_then(|s| s.format.as_deref()),
                     successeur_est_fichier_local: suivant.is_some_and(|s| s.file_path.is_some()),
@@ -4509,7 +4590,31 @@ async fn get_queue(
             v
         })
         .collect();
-    Json(json!({ "tracks": tracks, "position": position, "length": length }))
+    let mut corps = json!({ "tracks": tracks, "position": position, "length": length });
+    if let Some((offset, limit)) = demandee {
+        // Champs ADDITIFS, présents seulement quand une fenêtre est demandée.
+        corps["offset"] = json!(offset);
+        corps["limit"] = json!(limit);
+    }
+    let octets = serde_json::to_vec(&corps).unwrap_or_default();
+    let etag = etag_de_file(&octets);
+    let if_none_match = entetes
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    if etag_correspond(if_none_match, &etag) {
+        return (StatusCode::NOT_MODIFIED, [(axum::http::header::ETAG, etag)]).into_response();
+    }
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/json".to_string(),
+            ),
+            (axum::http::header::ETAG, etag),
+        ],
+        octets,
+    )
+        .into_response()
 }
 
 /// A client-supplied streaming title is usable only if it is present AND
