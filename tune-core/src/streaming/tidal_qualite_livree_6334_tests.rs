@@ -145,7 +145,10 @@ async fn la_cascade_garde_le_meilleur_repli_et_non_le_premier() {
             lecture_bts("LOSSLESS", "audio/flac", "flac", URL_FLAC),
         ),
         ("LOSSLESS", Reponse::Quota),
-        ("HIGH", lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC)),
+        (
+            "HIGH",
+            lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC),
+        ),
     ]);
     let (svc, journal) = faux_tidal(scenario).await;
 
@@ -226,8 +229,14 @@ async fn le_codec_est_lu_dans_le_manifeste_bts_et_non_deduit_de_la_qualite() {
 #[tokio::test]
 async fn le_mime_d_un_flux_bts_est_celui_de_l_audio() {
     let scenario = HashMap::from([
-        ("LOSSLESS", lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC)),
-        ("HIGH", lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC)),
+        (
+            "LOSSLESS",
+            lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC),
+        ),
+        (
+            "HIGH",
+            lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC),
+        ),
     ]);
     let (svc, _) = faux_tidal(scenario).await;
     let flux = svc
@@ -302,7 +311,10 @@ async fn un_flac_cd_garde_ses_16_bits() {
         .await
         .expect("un flux");
     assert_eq!(flux.quality.codec, "FLAC");
-    assert_eq!((flux.quality.sample_rate, flux.quality.bit_depth), (44_100, 16));
+    assert_eq!(
+        (flux.quality.sample_rate, flux.quality.bit_depth),
+        (44_100, 16)
+    );
 }
 
 /// Un AAC livré sous une étiquette sans perte n'hérite d'aucun débit inventé.

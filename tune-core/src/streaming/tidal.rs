@@ -1959,7 +1959,7 @@ impl StreamingService for TidalService {
                 .map_err(|e| format!("utf8: {e}"))?;
 
         // Parse the manifest to get URL + optional codec/mime from the manifest itself
-        let (url, codec_du_manifeste, mime_du_manifeste) = if manifest_mime == "application/dash+xml" {
+        let (url, man_codec, man_mime) = if manifest_mime == "application/dash+xml" {
             // Log raw manifest content for debugging Hi-Res issues
             debug!(
                 track_id,
@@ -2038,7 +2038,7 @@ impl StreamingService for TidalService {
         // Determine codec: prefer the manifest's own codec (DASH or BTS), then
         // fall back to audio quality level.
         // Manifest codecs: "flac" → FLAC, "mp4a.40.2" → AAC, "mp4a.40.5" → AAC HE
-        let codec = if let Some(ref dc) = codec_du_manifeste {
+        let codec = if let Some(ref dc) = man_codec {
             let dc_lower = dc.to_lowercase();
             if dc_lower == "flac" || dc_lower.starts_with("fla") {
                 "FLAC"
@@ -2091,7 +2091,7 @@ impl StreamingService for TidalService {
         } else if codec == "FLAC" {
             // DASH might report "audio/flac" or "audio/mp4" for FLAC-in-fMP4 container.
             // For playback, report what the actual codec is.
-            if let Some(ref dm) = mime_du_manifeste {
+            if let Some(ref dm) = man_mime {
                 if dm == "audio/flac" || dm == "audio/mp4" {
                     dm.as_str()
                 } else {
@@ -2100,7 +2100,7 @@ impl StreamingService for TidalService {
             } else {
                 "audio/flac"
             }
-        } else if let Some(ref dm) = mime_du_manifeste {
+        } else if let Some(ref dm) = man_mime {
             dm.as_str()
         } else if manifest_mime.starts_with("audio/") {
             // #6334 — jamais `application/vnd.tidal.bts` : c'est le type du
