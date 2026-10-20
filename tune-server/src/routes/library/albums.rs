@@ -2468,6 +2468,13 @@ pub(super) async fn update_album(
                 id,
                 body.apply_genre_to_tracks,
             );
+            // #6418 — la recopie a réécrit `albums.genres` EN BASE ; `album`
+            // en porte encore la valeur d'avant l'édition. La modale reporte
+            // cette réponse dans le magasin, et l'onglet Genres groupe sur ce
+            // tableau d'abord : l'album restait sous son ancien genre.
+            if let Ok(Some(relu)) = repo.get(id) {
+                album.genres = relu.genres;
+            }
         }
     }
 
@@ -3513,6 +3520,9 @@ mod tests_regroupement;
 
 #[cfg(test)]
 mod tests_contenu;
+
+#[cfg(test)]
+mod tests_genres_reponse_6418;
 
 /// #3397 — le témoin qui empêche les deux chemins de `GET /library/albums` de
 /// diverger.

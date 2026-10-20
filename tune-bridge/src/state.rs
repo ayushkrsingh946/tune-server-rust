@@ -273,6 +273,35 @@ mod tests {
         assert!(reg(&s, "srv-a", "tok-a2").is_ok());
     }
 
+    /// Renouvellement du lien d'accès (`POST /cloud/bridge/rotate-token`) :
+    /// le serveur referme sa session et se réinscrit avec un nouveau jeton.
+    /// L'ancien ne doit plus rien ouvrir, le nouveau oui.
+    #[test]
+    fn renewed_token_replaces_the_old_one_after_reconnect() {
+        let s = state_with_cap(10);
+        reg(&s, "srv-a", "tok-ancien").unwrap();
+
+        // Tant que la session à l'ancien jeton vit, un autre jeton ne la
+        // remplace pas : le serveur doit d'abord la refermer.
+        assert_eq!(
+            reg(&s, "srv-a", "tok-nouveau"),
+            Err("server_id already registered"),
+        );
+        assert_eq!(s.server_for_token("tok-nouveau"), None);
+
+        // Fermeture de la session (fin de `handle_server_ws`), réinscription.
+        s.unregister_server("srv-a");
+        reg(&s, "srv-a", "tok-nouveau").unwrap();
+
+        assert_eq!(
+            s.server_for_token("tok-ancien"),
+            None,
+            "l'ancien jeton ouvre encore le serveur"
+        );
+        assert_eq!(s.server_for_token("tok-nouveau").as_deref(), Some("srv-a"));
+        assert_eq!(s.tokens.len(), 1);
+    }
+
     #[test]
     fn max_servers_is_enforced_for_new_ids() {
         let s = state_with_cap(1);

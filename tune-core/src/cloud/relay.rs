@@ -11,9 +11,26 @@ use crate::db::settings_repo::SettingsRepo;
 
 use super::ENTETE_RELAIS;
 
+/// Délai entre la fermeture d'une session au jeton périmé et la nouvelle
+/// inscription (voir [`RelayClient::renouveler_jeton`]).
+const DELAI_DE_REINSCRIPTION: Duration = Duration::from_millis(500);
+
+/// Pourquoi une session avec le relais s'est terminée sans erreur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinDeSession {
+    /// Le relais a fermé, ou la connexion est tombée.
+    Fermee,
+    /// Le jeton a été renouvelé : se réinscrire tout de suite avec le nouveau.
+    JetonRenouvele,
+}
+
 pub struct RelayClient {
     pub server_id: String,
-    pub bridge_token: String,
+    /// Le jeton de pont présenté à l'inscription (`relay.register`). Il peut
+    /// changer en cours de route : [`RelayClient::renouveler_jeton`] y écrit
+    /// le nouveau, et la session ouverte avec l'ancien se referme pour se
+    /// réinscrire avec lui. Jamais journalisé.
+    jeton: tokio::sync::watch::Sender<String>,
     pub relay_url: String,
     pub local_port: u16,
     connected: Arc<AtomicBool>,
@@ -42,7 +59,7 @@ impl RelayClient {
         let http_flux = client_de_flux(PATIENCE_DE_FLUX);
         Self {
             server_id,
-            bridge_token,
+            jeton: tokio::sync::watch::Sender::new(bridge_token),
             relay_url,
             local_port,
             connected: Arc::new(AtomicBool::new(false)),
@@ -64,6 +81,20 @@ impl RelayClient {
         self.connected.load(Ordering::Relaxed)
     }
 
+    /// Remplace le jeton de pont, et fait réinscrire le serveur avec lui.
+    ///
+    /// Le relais (`tune-bridge`) range les jetons par serveur et les oublie
+    /// tous quand la connexion du serveur se ferme (`unregister_server`). La
+    /// session en cours, ouverte avec l'ancien jeton, est donc refermée, puis
+    /// rouverte aussitôt avec le nouveau : l'ancien n'ouvre plus rien, et
+    /// aucune version du relais n'a besoin d'un message de plus pour cela.
+    ///
+    /// Hors connexion (attente entre deux tentatives), la prochaine
+    /// inscription prend simplement le nouveau jeton.
+    pub fn renouveler_jeton(&self, nouveau: String) {
+        self.jeton.send_replace(nouveau);
+    }
+
     pub fn spawn(self: Arc<Self>) {
         let client = self.clone();
         tokio::spawn(async move {
@@ -76,9 +107,13 @@ impl RelayClient {
                     "connecting to relay"
                 );
 
-                match client.connect_and_run().await {
-                    Ok(()) => {
+                let fin = client.connect_and_run().await;
+                match &fin {
+                    Ok(FinDeSession::Fermee) => {
                         info!("relay connection closed gracefully");
+                    }
+                    Ok(FinDeSession::JetonRenouvele) => {
+                        info!("bridge token renewed, re-registering with relay");
                     }
                     Err(e) => {
                         warn!(error = %e, "relay connection failed");
@@ -87,6 +122,15 @@ impl RelayClient {
 
                 client.connected.store(false, Ordering::Relaxed);
                 *client.ws_tx.lock().await = None;
+
+                if matches!(fin, Ok(FinDeSession::JetonRenouvele)) {
+                    // Pas d'attente croissante : la coupure est voulue. Le court
+                    // délai laisse au relais le temps de voir la fermeture et
+                    // d'oublier l'ancien jeton avant la nouvelle inscription.
+                    attempt = 0;
+                    tokio::time::sleep(DELAI_DE_REINSCRIPTION).await;
+                    continue;
+                }
 
                 attempt += 1;
                 let backoff = Duration::from_secs(std::cmp::min(
@@ -102,8 +146,14 @@ impl RelayClient {
         });
     }
 
-    async fn connect_and_run(self: &Arc<Self>) -> Result<(), String> {
+    async fn connect_and_run(self: &Arc<Self>) -> Result<FinDeSession, String> {
         use tokio_tungstenite::tungstenite;
+
+        // Le jeton est lu ICI, et le récepteur le surveille pendant toute la
+        // session : un renouvellement survenu depuis cette lecture, même avant
+        // la fin de l'inscription, referme la session (voir plus bas).
+        let mut jeton = self.jeton.subscribe();
+        let bridge_token = jeton.borrow_and_update().clone();
 
         let (ws_stream, _) = tokio_tungstenite::connect_async(&self.relay_url)
             .await
@@ -117,7 +167,7 @@ impl RelayClient {
             "server_id": self.server_id,
             "server_name": hostname(),
             "version": crate::version(),
-            "bridge_token": self.bridge_token,
+            "bridge_token": bridge_token,
         });
         ws_tx
             .send(tungstenite::Message::Text(register.to_string().into()))
@@ -174,23 +224,33 @@ impl RelayClient {
         });
 
         // Reader: handle incoming messages from relay
+        let mut fin = FinDeSession::Fermee;
         loop {
-            match ws_rx.next().await {
-                Some(Ok(tungstenite::Message::Text(text))) => {
-                    self.handle_message(&text).await;
+            tokio::select! {
+                msg = ws_rx.next() => match msg {
+                    Some(Ok(tungstenite::Message::Text(text))) => {
+                        self.handle_message(&text).await;
+                    }
+                    Some(Ok(tungstenite::Message::Ping(data))) => {
+                        let pong = serde_json::json!({"type": "relay.pong"}).to_string();
+                        emettre_vers_le_relais(&self.ws_tx, pong).await;
+                        let _ = data; // ping data handled by tungstenite
+                    }
+                    Some(Ok(tungstenite::Message::Close(_))) | None | Some(Err(_)) => break,
+                    _ => {}
+                },
+                // Jeton renouvelé : cette session a été ouverte avec l'ancien.
+                // La quitter ferme la socket ; le relais oublie alors l'ancien
+                // jeton, et la boucle de `spawn` se réinscrit avec le nouveau.
+                Ok(()) = jeton.changed() => {
+                    fin = FinDeSession::JetonRenouvele;
+                    break;
                 }
-                Some(Ok(tungstenite::Message::Ping(data))) => {
-                    let pong = serde_json::json!({"type": "relay.pong"}).to_string();
-                    emettre_vers_le_relais(&self.ws_tx, pong).await;
-                    let _ = data; // ping data handled by tungstenite
-                }
-                Some(Ok(tungstenite::Message::Close(_))) | None | Some(Err(_)) => break,
-                _ => {}
             }
         }
 
         writer_handle.abort();
-        Ok(())
+        Ok(fin)
     }
 
     async fn handle_message(&self, text: &str) {
@@ -1068,6 +1128,10 @@ pub fn spawn_relay_client(
     client.clone().spawn();
     Some(client)
 }
+
+#[cfg(test)]
+#[path = "relay_renouvellement_tests.rs"]
+mod renouvellement_tests;
 
 /// Tune Circle T4 (#5327) : `relay.circle_stream_request`, contre un faux
 /// serveur local qui note chaque chemin demandé.
