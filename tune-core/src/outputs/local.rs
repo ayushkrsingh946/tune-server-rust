@@ -3991,12 +3991,12 @@ fn disposition_deplace_une_voie(
 /// puis adaptation des canaux, puis volume — et n'est plus bit-perfect. Jamais
 /// sur un porteur DoP, ni en PURE pour la matrice, comme l'étage de
 /// conversion (`adaptation_retenue`).
-// #6230 — la production passe par `prepare_windows_native_pcm_vers` (l'étage
+// #6230 — la production passe par `prepare_windows_native_pcm` (l'étage
 // natif, voies ouvertes comprises) ; cette forme à voies égales reste celle
 // des témoins d'empreinte.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-fn prepare_windows_native_pcm(
+fn prepare_windows_native_pcm_a_voies_egales(
     bytes: &[u8],
     bit_depth: u16,
     channels: u16,
@@ -4010,7 +4010,7 @@ fn prepare_windows_native_pcm(
     mono_downmix: &AtomicBool,
     adaptation: Option<AdaptationNative<'_>>,
 ) -> Option<PreparedNativePcm> {
-    prepare_windows_native_pcm_vers(
+    prepare_windows_native_pcm(
         bytes,
         bit_depth,
         channels,
@@ -4027,7 +4027,7 @@ fn prepare_windows_native_pcm(
     )
 }
 
-/// #6230 — `prepare_windows_native_pcm` vers un transport ouvert sur
+/// #6230 — la préparation vers un transport ouvert sur
 /// `sortie` voies, qui peut différer des `channels` de la source quand la
 /// grille de réaffectation pilote l'ouverture (une grille 6 → 2 ouvre 2
 /// voies). À `sortie == channels`, le rendu est exactement celui d'avant.
@@ -4042,7 +4042,7 @@ fn prepare_windows_native_pcm(
 /// lecture ordinaire.
 #[cfg(any(target_os = "windows", test))]
 #[allow(clippy::too_many_arguments)]
-fn prepare_windows_native_pcm_vers(
+fn prepare_windows_native_pcm(
     bytes: &[u8],
     bit_depth: u16,
     channels: u16,
@@ -4063,18 +4063,6 @@ fn prepare_windows_native_pcm_vers(
     }
 
     let dop = dop_latched || (bit_depth == 24 && is_dop_pcm(bytes, bit_depth, channels));
-    if dop && sortie != channels {
-        let trames = bytes.len() / (usize::from(channels.max(1)) * usize::from(bit_depth / 8));
-        warn!(
-            channels,
-            sortie, "native_dop_carrier_refused_on_piloted_channels"
-        );
-        return Some(PreparedNativePcm {
-            samples: vec![0; trames * usize::from(sortie)],
-            dop: false,
-            bit_perfect: false,
-        });
-    }
     let pure = pure_bypass.load(Ordering::Relaxed);
     let (matrice, declaree) = match adaptation {
         Some((reaffectation, disposition)) => {
@@ -4094,6 +4082,18 @@ fn prepare_windows_native_pcm_vers(
         || (volume_units == 1000
             && local_dsp_is_identity(eq, convolver, crossfeed, pure_bypass, mono_downmix)
             && !canaux_adaptes);
+    if dop && sortie != channels {
+        let trames = bytes.len() / (usize::from(channels.max(1)) * usize::from(bit_depth / 8));
+        warn!(
+            channels,
+            sortie, "native_dop_carrier_refused_on_piloted_channels"
+        );
+        return Some(PreparedNativePcm {
+            samples: vec![0; trames * usize::from(sortie)],
+            dop: false,
+            bit_perfect: false,
+        });
+    }
     let samples = if bit_perfect {
         pcm_bytes_to_native_i32(bytes, bit_depth)
     } else {

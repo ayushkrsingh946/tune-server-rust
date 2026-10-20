@@ -224,7 +224,7 @@ impl<'a> EtageNatif<'a> {
         if aligned_len == 0 {
             return EcritureNative::RienAPousser;
         }
-        let Some(prepared) = prepare_windows_native_pcm_vers(
+        let Some(prepared) = prepare_windows_native_pcm(
             &self.en_attente[..aligned_len],
             self.bit_depth(),
             self.spec.canaux(),
