@@ -199,3 +199,68 @@ fn a_rang_egal_le_premier_repli_reste() {
     garder_le_meilleur_repli(&mut repli, json!({"audioQuality": "HIGH", "n": 2}));
     assert_eq!(repli.unwrap()["n"], 1);
 }
+
+/// Défaut 2 : le codec était déduit de `audioQuality`, jamais lu dans le
+/// manifeste. Une réponse étiquetée `LOSSLESS` dont le manifeste BTS livre de
+/// l'AAC était annoncée FLAC ; c'est le manifeste qui fait foi.
+#[tokio::test]
+async fn le_codec_est_lu_dans_le_manifeste_bts_et_non_deduit_de_la_qualite() {
+    let scenario = HashMap::from([(
+        "LOSSLESS",
+        lecture_bts("LOSSLESS", "audio/mp4", "mp4a.40.2", URL_AAC),
+    )]);
+    let (svc, _) = faux_tidal(scenario).await;
+    let flux = svc
+        .get_track_url("29113109", Some("LOSSLESS"))
+        .await
+        .expect("un flux");
+    assert_eq!(
+        flux.quality.codec, "AAC",
+        "le manifeste BTS nomme mp4a.40.2 : c'est de l'AAC, quoi qu'en dise audioQuality"
+    );
+    assert_eq!(flux.mime_type, "audio/mp4");
+}
+
+/// Le MIME d'un flux BTS est celui des octets audio (`mimeType` du
+/// manifeste), jamais `application/vnd.tidal.bts`, le type du manifeste.
+#[tokio::test]
+async fn le_mime_d_un_flux_bts_est_celui_de_l_audio() {
+    let scenario = HashMap::from([
+        ("LOSSLESS", lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC)),
+        ("HIGH", lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC)),
+    ]);
+    let (svc, _) = faux_tidal(scenario).await;
+    let flux = svc
+        .get_track_url("29113110", Some("LOSSLESS"))
+        .await
+        .expect("un flux");
+    assert_eq!(flux.quality.codec, "AAC");
+    assert_eq!(flux.mime_type, "audio/mp4");
+}
+
+/// Le journal de la cascade nomme le codec du manifeste (BTS et DASH) ; le
+/// champ `codec` qu'il lisait à la racine n'existe pas.
+#[test]
+fn le_codec_annonce_est_celui_du_manifeste() {
+    let encode = |t: &str| base64::engine::general_purpose::STANDARD.encode(t);
+    let reponse_bts = json!({
+        "manifestMimeType": "application/vnd.tidal.bts",
+        "manifest": encode(&bts("audio/mp4", "mp4a.40.2", URL_AAC)),
+    });
+    assert_eq!(
+        codec_annonce_par_le_manifeste(&reponse_bts).as_deref(),
+        Some("mp4a.40.2")
+    );
+    let mpd = r#"<MPD><Period><AdaptationSet mimeType="audio/mp4">
+      <Representation codecs="flac" bandwidth="1411000">
+      <BaseURL>https://cdn.essai.invalid/flac.mp4</BaseURL>
+      </Representation></AdaptationSet></Period></MPD>"#;
+    let reponse_dash = json!({
+        "manifestMimeType": "application/dash+xml",
+        "manifest": encode(mpd),
+    });
+    assert_eq!(
+        codec_annonce_par_le_manifeste(&reponse_dash).as_deref(),
+        Some("flac")
+    );
+}

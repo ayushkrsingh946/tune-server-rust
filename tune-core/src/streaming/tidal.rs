@@ -1851,7 +1851,11 @@ impl StreamingService for TidalService {
                     // Check if Tidal actually returned the requested quality or
                     // downgraded silently (e.g. HI_RES_LOSSLESS → HIGH AAC).
                     let returned_quality = d["audioQuality"].as_str().unwrap_or("UNKNOWN");
-                    let returned_codec = d["codec"].as_str().unwrap_or("UNKNOWN");
+                    // #6334 — `codec` n'existe pas à la racine de la réponse
+                    // v1 : le lire rendait toujours `UNKNOWN`. Le codec est
+                    // celui que nomme le manifeste.
+                    let returned_codec = codec_annonce_par_le_manifeste(&d);
+                    let returned_codec = returned_codec.as_deref().unwrap_or("UNKNOWN");
                     let manifest_mime = d["manifestMimeType"].as_str().unwrap_or("");
                     let bit_depth = d["bitDepth"].as_u64();
                     let sample_rate = d["sampleRate"].as_u64();
@@ -1955,7 +1959,7 @@ impl StreamingService for TidalService {
                 .map_err(|e| format!("utf8: {e}"))?;
 
         // Parse the manifest to get URL + optional codec/mime from the manifest itself
-        let (url, dash_codec, dash_mime) = if manifest_mime == "application/dash+xml" {
+        let (url, codec_du_manifeste, mime_du_manifeste) = if manifest_mime == "application/dash+xml" {
             // Log raw manifest content for debugging Hi-Res issues
             debug!(
                 track_id,
@@ -2018,7 +2022,13 @@ impl StreamingService for TidalService {
                 .and_then(|u| u.as_str())
                 .ok_or("no url in manifest")?
                 .to_string();
-            (url, None, None)
+            // #6334 — le manifeste BTS nomme lui-même ce qu'il livre
+            // (`codecs` : `flac`, `mp4a.40.2` ; `mimeType` : `audio/flac`,
+            // `audio/mp4`). Les ignorer faisait déduire le codec de la seule
+            // `audioQuality`, et annoncer `application/vnd.tidal.bts` — le
+            // type du MANIFESTE — comme MIME du flux audio.
+            let (codecs, mime) = codec_et_mime_du_manifeste_bts(&manifest_json);
+            (url, codecs, mime)
         } else {
             (decoded, None, None)
         };
@@ -2026,9 +2036,10 @@ impl StreamingService for TidalService {
         let audio_quality = data["audioQuality"].as_str().unwrap_or("LOSSLESS");
         let (sample_rate, bit_depth) = Self::parse_quality_metadata(&data, audio_quality);
 
-        // Determine codec: prefer DASH manifest codec, then fall back to audio quality level.
-        // DASH codecs: "flac" → FLAC, "mp4a.40.2" → AAC, "mp4a.40.5" → AAC HE
-        let codec = if let Some(ref dc) = dash_codec {
+        // Determine codec: prefer the manifest's own codec (DASH or BTS), then
+        // fall back to audio quality level.
+        // Manifest codecs: "flac" → FLAC, "mp4a.40.2" → AAC, "mp4a.40.5" → AAC HE
+        let codec = if let Some(ref dc) = codec_du_manifeste {
             let dc_lower = dc.to_lowercase();
             if dc_lower == "flac" || dc_lower.starts_with("fla") {
                 "FLAC"
@@ -2037,14 +2048,14 @@ impl StreamingService for TidalService {
             } else if dc_lower.starts_with("mqa") {
                 "FLAC" // MQA is delivered as FLAC container
             } else {
-                // Unknown DASH codec — fall back to quality-based detection
+                // Unknown manifest codec — fall back to quality-based detection
                 match audio_quality {
                     "HI_RES_LOSSLESS" | "HI_RES" | "LOSSLESS" => "FLAC",
                     _ => "AAC",
                 }
             }
         } else {
-            // No DASH codec info — determine from audio quality level:
+            // No manifest codec info — determine from audio quality level:
             // HI_RES_LOSSLESS = FLAC Hi-Res, HI_RES = MQA/FLAC, LOSSLESS = FLAC CD
             // Only HIGH and below are AAC
             match audio_quality {
@@ -2053,7 +2064,8 @@ impl StreamingService for TidalService {
             }
         };
 
-        // Determine MIME type: prefer DASH manifest, then derive from codec.
+        // Determine MIME type: prefer the manifest (DASH or BTS), then derive
+        // from codec.
         // For DASH multi-segment downloads (file:// URLs), the file on disk is
         // an fMP4 container — report audio/mp4 so symphonia uses IsoMp4Reader.
         let is_dash_file = url.starts_with("file://");
@@ -2063,7 +2075,7 @@ impl StreamingService for TidalService {
         } else if codec == "FLAC" {
             // DASH might report "audio/flac" or "audio/mp4" for FLAC-in-fMP4 container.
             // For playback, report what the actual codec is.
-            if let Some(ref dm) = dash_mime {
+            if let Some(ref dm) = mime_du_manifeste {
                 if dm == "audio/flac" || dm == "audio/mp4" {
                     dm.as_str()
                 } else {
@@ -2072,9 +2084,11 @@ impl StreamingService for TidalService {
             } else {
                 "audio/flac"
             }
-        } else if let Some(ref dm) = dash_mime {
+        } else if let Some(ref dm) = mime_du_manifeste {
             dm.as_str()
-        } else if !manifest_mime.is_empty() && manifest_mime != "application/dash+xml" {
+        } else if manifest_mime.starts_with("audio/") {
+            // #6334 — jamais `application/vnd.tidal.bts` : c'est le type du
+            // manifeste, pas celui des octets audio.
             manifest_mime
         } else {
             "audio/mp4"
@@ -2622,6 +2636,32 @@ impl StreamingService for TidalService {
 }
 
 /// Rank audio quality levels for comparison. Higher = better.
+/// #6334 — `codecs` et `mimeType` d'un manifeste BTS déjà décodé.
+fn codec_et_mime_du_manifeste_bts(
+    manifeste: &serde_json::Value,
+) -> (Option<String>, Option<String>) {
+    let champ = |cle: &str| {
+        manifeste[cle]
+            .as_str()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(String::from)
+    };
+    (champ("codecs"), champ("mimeType"))
+}
+
+/// #6334 — le codec que nomme le manifeste d'une réponse `playbackinfo`
+/// (BTS ou DASH), pour le journal de la cascade. `None` s'il n'en nomme pas.
+fn codec_annonce_par_le_manifeste(reponse: &serde_json::Value) -> Option<String> {
+    let brut = base64_decode(reponse["manifest"].as_str()?).ok()?;
+    let texte = String::from_utf8(brut).ok()?;
+    if reponse["manifestMimeType"].as_str() == Some("application/dash+xml") {
+        parse_dash_manifest(&texte)?.codec
+    } else {
+        codec_et_mime_du_manifeste_bts(&serde_json::from_str(&texte).ok()?).0
+    }
+}
+
 /// #6334 — garde, parmi les réponses dégradées de la cascade, celle de la
 /// MEILLEURE qualité rendue, et non la première. `HI_RES_LOSSLESS` peut
 /// revenir en `HIGH`, puis `HI_RES` en `LOSSLESS` : si la marche suivante
