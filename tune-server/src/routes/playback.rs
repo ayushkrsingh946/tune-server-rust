@@ -12,6 +12,10 @@ mod seek_en_double_193_tests;
 mod session_locale_tests;
 #[path = "playback/session_message.rs"]
 mod session_message;
+// #6332 — le débit d'une piste locale dans l'état de zone.
+#[cfg(test)]
+#[path = "playback/debit_lecture_en_cours_6332_tests.rs"]
+mod debit_lecture_en_cours_6332_tests;
 #[cfg(test)]
 #[path = "playback/titre_seul_album_5372_tests.rs"]
 mod titre_seul_album_5372_tests;
@@ -743,6 +747,10 @@ pub(crate) async fn build_zone_json(state: &AppState, zone_id: i64) -> Value {
             // « Entreat » retomberait sur la page de The Cure (FabienM).
             "album_id": np.album_id,
             "artist_id": np.artist_id,
+            // #6332 — le débit, lui aussi : les autres charges utiles de zone
+            // sérialisent `NowPlaying` entier et le portent déjà ; celle-ci,
+            // écrite à la main, l'aurait tu jusqu'au prochain évènement.
+            "bitrate_kbps": np.bitrate_kbps,
         })),
         "position_ms": zone_state.position_ms,
         "queue_length": zone_state.queue_length,

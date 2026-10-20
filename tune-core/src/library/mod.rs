@@ -6,6 +6,8 @@ pub mod artwork_cache;
 pub mod artwork_proxy;
 pub mod audit;
 pub mod cover_fetcher;
+/// #6332 — compléter au rescan le débit des pistes déjà en base.
+pub mod debit_des_pistes;
 pub mod duplicate_detector;
 /// Les exemplaires d'une piste dans plusieurs répertoires (#4907).
 pub mod exemplaires;

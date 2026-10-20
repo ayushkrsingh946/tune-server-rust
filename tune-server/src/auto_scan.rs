@@ -1513,6 +1513,12 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
 
         event_bus.emit("library.scan.completed", report);
 
+        // #6332 — le débit des pistes déjà en base, inchangées, que ce scan
+        // n'a pas relues : complété ici, borné, sans relecture complète.
+        if !arrete {
+            tune_core::library::debit_des_pistes::completer_les_debits(db.as_ref());
+        }
+
         // Le compteur du registre est ce qui a CHANGE, pas ce qui a ete vu :
         // un scan qui relit 40 000 fichiers inchanges n'a rien fait, et
         // inscrire 40 000 le ferait passer pour un gros travail.

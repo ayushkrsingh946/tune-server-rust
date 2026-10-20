@@ -3369,6 +3369,13 @@ async fn spawn_library_scan_avec_lecteur(
 
         event_bus.emit("library.scan.completed", rapport_scan);
 
+        // #6332 — le débit des pistes déjà en base, inchangées, que ce scan
+        // n'a pas relues : complété APRÈS le rapport (le bandeau de fin n'attend
+        // pas), borné en nombre et en temps, sans relecture complète.
+        if !scan_cancel_requested() {
+            tune_core::library::debit_des_pistes::completer_les_debits(db.as_ref());
+        }
+
         // Launch batch artwork enrichment as a background task
         // This fetches covers from MusicBrainz Cover Art Archive for albums
         // that don't have embedded cover art.
