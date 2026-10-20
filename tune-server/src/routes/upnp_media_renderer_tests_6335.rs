@@ -149,8 +149,9 @@ impl Banc {
     /// La transition sans blanc constatée par le sondeur de la zone.
     async fn la_zone_enchaine(&self) {
         let ps = self.state.playback.get_state(self.zone).await;
-        let position = PositionPoller::prochaine_position_jouable(&self.state.backend, self.zone, &ps)
-            .expect("la zone doit avoir une suivante à enchaîner");
+        let position =
+            PositionPoller::prochaine_position_jouable(&self.state.backend, self.zone, &ps)
+                .expect("la zone doit avoir une suivante à enchaîner");
         self.state
             .orchestrator
             .advance_queue_metadata(self.zone, position)
@@ -159,7 +160,10 @@ impl Banc {
     }
 
     async fn vers_la_fin(&self, position_ms: i64) {
-        self.state.playback.reset_position(self.zone, position_ms).await;
+        self.state
+            .playback
+            .reset_position(self.zone, position_ms)
+            .await;
     }
 }
 
@@ -217,7 +221,10 @@ async fn la_suivante_tenue_est_enchainee_par_la_zone_sans_relance() {
         "la façade doit annoncer la suivante devenue courante (CurrentURI) : \
          c'est ce que le contrôleur surveille pour adopter son flux armé"
     );
-    assert!(vue.next_uri.is_empty(), "la suivante consommée ne doit plus être publiée");
+    assert!(
+        vue.next_uri.is_empty(),
+        "la suivante consommée ne doit plus être publiée"
+    );
     assert!(
         vue.position_ms < 1_000,
         "la position doit repartir pour la nouvelle piste, pas rester à la \
@@ -267,7 +274,10 @@ async fn un_next_juste_avant_la_fin_laisse_la_zone_enchainer() {
     );
     let vue = snapshot(&b.state, b.zone).await;
     assert_eq!(vue.uri, COURANTE, "la courante finit de jouer");
-    assert_eq!(vue.next_uri, ARMEE, "la suivante reste tenue jusqu'à l'enchaînement");
+    assert_eq!(
+        vue.next_uri, ARMEE,
+        "la suivante reste tenue jusqu'à l'enchaînement"
+    );
 
     b.la_zone_enchaine().await;
     assert_eq!(b.lectures().await, lectures_avant);
@@ -288,7 +298,11 @@ async fn un_next_en_milieu_de_piste_saute_tout_de_suite() {
         .basculer_sur_la_suivante_preparee()
         .await
         .expect("Next en milieu de piste doit être acquitté");
-    assert_eq!(b.lectures().await, lectures_avant + 1, "le saut lance la suivante");
+    assert_eq!(
+        b.lectures().await,
+        lectures_avant + 1,
+        "le saut lance la suivante"
+    );
     assert_eq!(snapshot(&b.state, b.zone).await.uri, ARMEE);
     let ps = b.state.playback.get_state(b.zone).await;
     assert_eq!(
@@ -309,7 +323,17 @@ async fn sans_suivante_la_file_de_la_zone_n_est_pas_touchee() {
     use tune_core::db::play_queue_repo::StreamingQueueItem;
     let b = Banc::new().await;
     let ligne = |uri: &str| -> StreamingQueueItem {
-        (uri.into(), "x".into(), String::new(), None, None, 0, Some("qobuz".into()), None, None)
+        (
+            uri.into(),
+            "x".into(),
+            String::new(),
+            None,
+            None,
+            0,
+            Some("qobuz".into()),
+            None,
+            None,
+        )
     };
     PlayQueueRepo::with_backend(b.state.backend.clone())
         .set_streaming_queue(b.zone, &[ligne("q1"), ligne("q2"), ligne("q3")])
@@ -321,12 +345,20 @@ async fn sans_suivante_la_file_de_la_zone_n_est_pas_touchee() {
         .await
         .expect("SetAVTransportURI + Play");
     assert_eq!(b.lectures().await, 1);
-    assert_eq!(b.file(), file_de_l_auditeur, "SetURI + Play ne touche pas la file");
+    assert_eq!(
+        b.file(),
+        file_de_l_auditeur,
+        "SetURI + Play ne touche pas la file"
+    );
     assert!(snapshot(&b.state, b.zone).await.next_uri.is_empty());
 
     // Stop sur une file qui n'est pas la nôtre : elle reste.
     b.controleur.stop().await.ok();
-    assert_eq!(b.file(), file_de_l_auditeur, "Stop ne retire pas la file de Tune");
+    assert_eq!(
+        b.file(),
+        file_de_l_auditeur,
+        "Stop ne retire pas la file de Tune"
+    );
 
     // Avec une suivante, puis un Stop : la file écrite par la façade part.
     b.courante_puis_suivante().await;
@@ -337,7 +369,10 @@ async fn sans_suivante_la_file_de_la_zone_n_est_pas_touchee() {
         "#6335 : après un Stop, la suivante effacée doit sortir de la file — \
          un Play de la courante l'enchaînerait sinon"
     );
-    assert_eq!(b.state.playback.get_state(b.zone).await.state, PlayState::Stopped);
+    assert_eq!(
+        b.state.playback.get_state(b.zone).await.state,
+        PlayState::Stopped
+    );
 }
 
 /// La décision du `Next`, cas par cas.
@@ -347,15 +382,37 @@ fn la_decision_du_next() {
     let joue = PlayState::Playing;
     assert_eq!(decider_le_next(None, true, true, joue, 0, 0), DejaEnchainee);
     assert_eq!(decider_le_next(None, false, true, joue, 0, 0), Enchainer);
-    assert_eq!(decider_le_next(Some(true), false, true, joue, 68_000, DUREE_MS), LaZoneEnchaine);
-    assert_eq!(decider_le_next(Some(true), false, true, joue, 20_000, DUREE_MS), Enchainer);
-    // Suivante non confiée (répétition, aléatoire) : la façade enchaîne.
-    assert_eq!(decider_le_next(Some(false), false, true, joue, 68_000, DUREE_MS), Enchainer);
-    // Zone reprise par Tune, arrêtée ou durée inconnue : pas d'attente.
-    assert_eq!(decider_le_next(Some(true), false, false, joue, 68_000, DUREE_MS), Enchainer);
     assert_eq!(
-        decider_le_next(Some(true), false, true, PlayState::Stopped, 68_000, DUREE_MS),
+        decider_le_next(Some(true), false, true, joue, 68_000, DUREE_MS),
+        LaZoneEnchaine
+    );
+    assert_eq!(
+        decider_le_next(Some(true), false, true, joue, 20_000, DUREE_MS),
         Enchainer
     );
-    assert_eq!(decider_le_next(Some(true), false, true, joue, 68_000, 0), Enchainer);
+    // Suivante non confiée (répétition, aléatoire) : la façade enchaîne.
+    assert_eq!(
+        decider_le_next(Some(false), false, true, joue, 68_000, DUREE_MS),
+        Enchainer
+    );
+    // Zone reprise par Tune, arrêtée ou durée inconnue : pas d'attente.
+    assert_eq!(
+        decider_le_next(Some(true), false, false, joue, 68_000, DUREE_MS),
+        Enchainer
+    );
+    assert_eq!(
+        decider_le_next(
+            Some(true),
+            false,
+            true,
+            PlayState::Stopped,
+            68_000,
+            DUREE_MS
+        ),
+        Enchainer
+    );
+    assert_eq!(
+        decider_le_next(Some(true), false, true, joue, 68_000, 0),
+        Enchainer
+    );
 }

@@ -939,7 +939,12 @@ async fn confier_la_suivante_a_la_file(state: &AppState, zone_id: i64) -> bool {
             session.revision,
             next.uri.clone(),
             vec![
-                ligne(&session.uri, &session.title, &session.artist, session.duration_ms),
+                ligne(
+                    &session.uri,
+                    &session.title,
+                    &session.artist,
+                    session.duration_ms,
+                ),
                 ligne(&next.uri, &next.title, &next.artist, next.duration_ms),
             ],
         )
