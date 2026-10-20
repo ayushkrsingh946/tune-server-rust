@@ -159,7 +159,7 @@ pub async fn handle_server_ws(socket: WebSocket, state: Arc<RelayState>) {
         ok: true,
         server_id: register.server_id.clone(),
         jeton_herite: state.sessions.jeton_herite_ouvert(),
-        laissez_passer: true,
+        laissez_passer: state.sessions.actif(),
         capabilities: protocol::CAPACITES,
     };
     let _ = ws_tx

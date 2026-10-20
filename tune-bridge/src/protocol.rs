@@ -70,7 +70,8 @@ pub struct RelayRegistered {
     /// Le serveur l'affiche dans ses Reglages, et cesse de le proposer quand
     /// il ne l'est plus.
     pub jeton_herite: bool,
-    /// Ce relais ouvre des sessions par laissez-passer.
+    /// Ce relais ouvre des sessions par laissez-passer : il tient un jeu de
+    /// cles signe par la racine.
     pub laissez_passer: bool,
 }
 

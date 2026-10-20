@@ -1037,3 +1037,9 @@ async fn aucun_jeton_ni_laissez_passer_dans_les_traces() {
     let signature = lp.rsplit('.').next().unwrap();
     assert!(!ecrit.contains(signature));
 }
+
+#[tokio::test]
+async fn le_relais_n_annonce_le_laissez_passer_qu_avec_un_jeu_de_cles() {
+    assert!(banc(false).await.state.sessions.actif());
+    assert!(!banc_avec(false, "", false).await.state.sessions.actif());
+}

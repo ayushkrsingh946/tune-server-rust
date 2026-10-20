@@ -17,9 +17,11 @@ fn reglages(b: &Arc<dyn DbBackend>) -> SettingsRepo {
     SettingsRepo::with_backend(b.clone())
 }
 
-/// Serveur relié à un compte : `server_id`, session SSO, jeton de liaison.
+/// Serveur relié à un compte (`server_id`, session SSO, jeton de liaison),
+/// derrière un relais qui ouvre des sessions par laissez-passer.
 fn relie(b: &Arc<dyn DbBackend>) {
     let s = reglages(b);
+    s.set(LAISSEZ_PASSER_ACTIF, "true").unwrap();
     s.set("server_id", "srv-1").unwrap();
     s.set("mozaik_access_token", "jeton-du-compte").unwrap();
     s.set(crate::cloud::library_sync::CLE_JETON_DE_LIAISON, "liaison")
@@ -138,4 +140,23 @@ fn le_lien_herite_n_est_coupe_que_si_le_relais_l_a_dit() {
     assert!(!lien_herite_coupe(&s));
     s.set(LIEN_HERITE_ACCEPTE, "false").unwrap();
     assert!(lien_herite_coupe(&s));
+}
+
+#[tokio::test]
+async fn tant_que_le_relais_n_annonce_pas_le_laissez_passer_rien_n_est_inscrit() {
+    let b = base();
+    cle_du_serveur(&b).unwrap();
+    relie(&b);
+    let site = FauxSite::default();
+    for annonce in [None, Some("false")] {
+        match annonce {
+            None => reglages(&b).delete(LAISSEZ_PASSER_ACTIF).unwrap(),
+            Some(v) => reglages(&b).set(LAISSEZ_PASSER_ACTIF, v).unwrap(),
+        }
+        assert_eq!(inscrire_si_besoin(&b, &site).await, Ok(false));
+    }
+    assert!(
+        site.recus.lock().unwrap().is_empty(),
+        "une inscription est partie vers un site qui ne l'attend pas"
+    );
 }

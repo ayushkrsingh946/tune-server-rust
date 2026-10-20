@@ -322,6 +322,14 @@ impl Sessions {
         self.jeton_herite_ouvert
     }
 
+    /// Le relais sait-il vérifier un laissez-passer, c'est-à-dire tient-il un
+    /// jeu de clés signé par la racine ? Annoncé au serveur dans
+    /// `relay.registered` : tant que c'est faux, le serveur garde l'ancien
+    /// parcours tel quel.
+    pub fn actif(&self) -> bool {
+        self.jeu().is_some()
+    }
+
     pub fn site_injoignable(&self) -> bool {
         self.site_injoignable.load(Ordering::Relaxed)
     }

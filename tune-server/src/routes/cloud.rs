@@ -1012,8 +1012,11 @@ async fn bridge_status(State(state): State<AppState>) -> Json<Value> {
         // Écoute à distance par compte (#6603) : l'écran « Accès à distance »
         // explique le parcours ; l'ancien lien est obsolète, et coupé dès que
         // le relais l'a dit.
-        "acces_par_compte": MESSAGE_ACCES_PAR_COMPTE,
-        "lien_obsolete": true,
+        // Tant que le relais n'ouvre pas de sessions par laissez-passer, rien
+        // ne change : le lien n'est pas obsolète et rien n'est à expliquer.
+        "acces_par_compte": tune_core::cloud::cle_serveur::laissez_passer_actif(&settings)
+            .then_some(MESSAGE_ACCES_PAR_COMPTE),
+        "lien_obsolete": tune_core::cloud::cle_serveur::laissez_passer_actif(&settings),
         "lien_herite_coupe": tune_core::cloud::cle_serveur::lien_herite_coupe(&settings),
         "access_url": if enabled {
             Some(format!("https://bridge.mozaiklabs.fr/{server_id}/"))
@@ -1094,14 +1097,15 @@ fn reponse_lien_d_acces(settings: &SettingsRepo, token: &str) -> axum::response:
     let server_id = TelemetryReporter::get_or_create_server_id(settings);
     let access_url = format!("https://bridge.mozaiklabs.fr/{server_id}/");
     let link = format!("{access_url}#token={token}");
+    let obsolete = tune_core::cloud::cle_serveur::laissez_passer_actif(settings);
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(json!({
             "server_id": server_id,
             "access_url": access_url,
             "link": link,
-            "obsolete": true,
-            "message": MESSAGE_ACCES_PAR_COMPTE,
+            "obsolete": obsolete,
+            "message": obsolete.then_some(MESSAGE_ACCES_PAR_COMPTE),
         })),
     )
         .into_response()

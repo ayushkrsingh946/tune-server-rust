@@ -305,13 +305,19 @@ impl RelayClient {
                     .unwrap_or("rejected");
                 return Err(format!("relay rejected: {err}"));
             }
-            if let (Some(accepte), Some(backend)) = (
-                v.get("jeton_herite").and_then(|j| j.as_bool()),
-                self.reglages.as_ref(),
-            ) {
-                let _ = SettingsRepo::with_backend(backend.clone()).set(
-                    crate::cloud::cle_serveur::LIEN_HERITE_ACCEPTE,
-                    if accepte { "true" } else { "false" },
+            if let Some(backend) = self.reglages.as_ref() {
+                let reglages = SettingsRepo::with_backend(backend.clone());
+                if let Some(accepte) = v.get("jeton_herite").and_then(|j| j.as_bool()) {
+                    let _ = reglages.set(
+                        crate::cloud::cle_serveur::LIEN_HERITE_ACCEPTE,
+                        if accepte { "true" } else { "false" },
+                    );
+                }
+                // Un relais antérieur ne dit rien : pas de laissez-passer.
+                let actif = v.get("laissez_passer").and_then(|l| l.as_bool()) == Some(true);
+                let _ = reglages.set(
+                    crate::cloud::cle_serveur::LAISSEZ_PASSER_ACTIF,
+                    if actif { "true" } else { "false" },
                 );
             }
             return Ok(pont_accepte_les_morceaux_binaires(&v));
@@ -2323,7 +2329,8 @@ mod poignee_de_main_6603_tests {
         let mut rx = futures_util::stream::iter(vec![
             texte(serde_json::json!({"type": "relay.challenge", "defi": "d-123"})),
             texte(serde_json::json!({"type": "relay.registered", "ok": true,
-                                     "server_id": "srv-1", "jeton_herite": false})),
+                                     "server_id": "srv-1", "jeton_herite": false,
+                                     "laissez_passer": true})),
         ]);
         c.poignee_de_main("jeton", &mut tx, &mut rx).await.unwrap();
 
@@ -2340,6 +2347,7 @@ mod poignee_de_main_6603_tests {
         // L'accusé a dit que l'ancien lien n'est plus accepté.
         let reglages = SettingsRepo::with_backend(backend.clone());
         assert!(crate::cloud::cle_serveur::lien_herite_coupe(&reglages));
+        assert!(crate::cloud::cle_serveur::laissez_passer_actif(&reglages));
     }
 
     #[tokio::test]
@@ -2355,6 +2363,7 @@ mod poignee_de_main_6603_tests {
         // Un relais antérieur ne dit rien de l'ancien lien : rien n'est coupé.
         let reglages = SettingsRepo::with_backend(backend.clone());
         assert!(!crate::cloud::cle_serveur::lien_herite_coupe(&reglages));
+        assert!(!crate::cloud::cle_serveur::laissez_passer_actif(&reglages));
 
         let mut tx: Vec<Message> = Vec::new();
         let mut rx = futures_util::stream::iter(vec![texte(

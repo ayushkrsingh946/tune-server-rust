@@ -17,8 +17,9 @@
 //!
 //! # Inscription
 //!
-//! Quand le serveur est relié à un compte mozaiklabs (`library_sync`), la clé
-//! publique est inscrite sur ce compte :
+//! Quand le serveur est relié à un compte mozaiklabs (`library_sync`) et que
+//! le relais annonce les sessions par laissez-passer, la clé publique est
+//! inscrite sur ce compte :
 //! `POST /api/v1/remote/servers/{server_id}/key`, jeton OAuth du compte,
 //! corps `{public_key, alg, preuve}`. La preuve est la signature, par la clé
 //! elle-même, de `tune-remote/inscription/v1\n<server_id>\n<public_key>` :
@@ -163,10 +164,16 @@ pub async fn inscrire_si_besoin(
     backend: &Arc<dyn DbBackend>,
     site: &dyn InscriptionDeCle,
 ) -> Result<bool, String> {
+    let reglages = SettingsRepo::with_backend(backend.clone());
+    // Rien tant que le relais n'ouvre pas de sessions par laissez-passer : le
+    // site n'a pas de quoi recevoir la clé, et l'appel échouerait à chaque
+    // battement.
+    if !laissez_passer_actif(&reglages) {
+        return Ok(false);
+    }
     let Some(cle) = cle_existante(backend)? else {
         return Ok(false);
     };
-    let reglages = SettingsRepo::with_backend(backend.clone());
     let lire = |nom: &str| {
         reglages
             .get(nom)
@@ -221,6 +228,22 @@ pub async fn inscrire_depuis_les_reglages(
 /// accepté par le relais ? Écrit à chaque enregistrement, d'après
 /// `relay.registered`.
 pub const LIEN_HERITE_ACCEPTE: &str = "bridge_lien_herite_accepte";
+
+/// Réglage tenu par le client de relais : le relais ouvre-t-il des sessions
+/// par laissez-passer (il tient un jeu de clés signé par la racine) ? Écrit à
+/// chaque enregistrement, d'après `relay.registered`.
+pub const LAISSEZ_PASSER_ACTIF: &str = "bridge_laissez_passer_actif";
+
+/// L'écoute à distance par laissez-passer est-elle en service sur le relais ?
+/// Faux tant qu'il ne l'a pas dit : sans elle, rien ne change pour le
+/// serveur — pas d'inscription de clé, pas de lien marqué obsolète.
+pub fn laissez_passer_actif(reglages: &SettingsRepo) -> bool {
+    reglages
+        .get(LAISSEZ_PASSER_ACTIF)
+        .ok()
+        .flatten()
+        .is_some_and(|v| v.trim() == "true")
+}
 
 /// Le relais a-t-il fait savoir qu'il n'accepte plus l'ancien lien d'accès ?
 /// Faux tant qu'il n'a rien dit : l'absence d'information ne coupe rien.
