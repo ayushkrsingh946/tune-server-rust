@@ -616,7 +616,8 @@ CREATE TABLE IF NOT EXISTS artists (
     bio_lang TEXT,
     bio_fetched_at TEXT,
     image_path TEXT,
-    image_source TEXT
+    image_source TEXT,
+    sort_name_source TEXT
 );
 
 CREATE TABLE IF NOT EXISTS albums (

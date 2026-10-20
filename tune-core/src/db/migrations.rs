@@ -2510,6 +2510,27 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "radio_stations_external_id",
         up: "",
     },
+    // #6474, point 2 — d'où vient le nom de tri d'un artiste :
+    // `artists.sort_name_source`, `'musicbrainz'` quand il a été tiré du
+    // `sort-name` MusicBrainz, NULL sinon (balise ARTISTSORT /
+    // ALBUMARTISTSORT, saisie dans « Modifier l'artiste », ou existant).
+    //
+    // Sans elle, la balise ne pouvait pas garder la priorité : un nom de tri
+    // posé par MusicBrainz AVANT qu'on écrive ARTISTSORT dans les fichiers
+    // aurait été pris pour une saisie, et jamais remplacé.
+    //
+    // Numérotée 127 / PG 091 : la 126 / PG 090 (#6516) est la dernière sur
+    // `batch/bugs-rc7-20261015` le 20/10. ⚠️ #6641 (faux hi-res, ouverte)
+    // tient AUSSI 127 / 091 : la seconde fusionnée se renumérote à sa
+    // jonction avec le lot (règle de la 119).
+    //
+    // Colonne posée dans le bloc de version et dans la passe finale, PAS
+    // dans `up` : même règle qu'à la 119. Jumelle PG : 091.
+    Migration {
+        version: 127,
+        name: "artists_sort_name_source",
+        up: "",
+    },
 ];
 
 /// SQL de la migration 125 (#6179) — voir son entree dans `MIGRATIONS`.
@@ -3842,6 +3863,11 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
             // le rapprochement de départ le remplit au premier relevé.
             lien_des_radios_avec_l_annuaire(db);
         }
+        if migration.version == 127 {
+            // #6474 — la provenance du nom de tri. NULL pour l'existant : un
+            // nom de tri déjà posé vient d'une balise ou d'une saisie.
+            add_column_if_missing(db, "artists", "sort_name_source", "TEXT");
+        }
         if migration.version == 12 {
             upgrade_fts5_tables(db);
         }
@@ -4430,6 +4456,9 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     // Le lien des radios avec l'annuaire (migration 126, #6516) — posé ICI
     // aussi : le rapprochement le NOMME. PG : migration 090.
     lien_des_radios_avec_l_annuaire(db);
+    // La provenance du nom de tri (migration 127, #6474) — posée ICI aussi :
+    // le scan et l'enrichissement la NOMMENT. PG : migration 091.
+    add_column_if_missing(db, "artists", "sort_name_source", "TEXT");
     // Index de `listen_history.album_id` (migration 115, fil 2130) — posé ICI
     // aussi : une base arrivée sans lui reste juste, mais « Reprendre
     // l'écoute » y redevient lent. PG : migration 079.
@@ -5299,6 +5328,13 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         90,
         "radio_stations_external_id",
         include_str!("../../migrations/postgres/090_radio_stations_external_id.sql"),
+    ),
+    // Jumelle de la SQLite 127 (#6474) : `artists.sort_name_source`, la
+    // provenance du nom de tri (`'musicbrainz'` ou NULL).
+    (
+        91,
+        "artists_sort_name_source",
+        include_str!("../../migrations/postgres/091_artists_sort_name_source.sql"),
     ),
 ];
 
@@ -8511,7 +8547,10 @@ mod tests {
         // Pose les colonnes de la ligne introuvable, que `get_entries` NOMME.
         // 90 : `radio_stations_external_id` (#6516), jumelle de la SQLite 126.
         // Pose le lien des radios avec l'annuaire, que le rapprochement NOMME.
-        assert_eq!(pg_latest_version(), 90, "latest PG migration must be 90");
+        // 91 : `artists_sort_name_source` (#6474), jumelle de la SQLite 127.
+        // Pose la provenance du nom de tri, que le scan et l'enrichissement
+        // NOMMENT.
+        assert_eq!(pg_latest_version(), 91, "latest PG migration must be 91");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),

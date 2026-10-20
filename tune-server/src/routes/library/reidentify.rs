@@ -463,6 +463,7 @@ async fn poser_le_pressage(
                     sans_correspondance = b.sans_correspondance,
                     ecartes = b.ecartes,
                     refuses_par_la_base = b.refuses_par_la_base,
+                    noms_de_tri = b.noms_de_tri,
                     "reidentify_artistes"
                 );
                 Some(b)

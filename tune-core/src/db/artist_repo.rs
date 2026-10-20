@@ -16,6 +16,11 @@ pub use sources_des_artistes::{PresenceDansUneSource, SourcesDesArtistes};
 
 pub const UNKNOWN_ARTIST_NAME: &str = "Unknown Artist";
 
+/// La provenance `artists.sort_name_source` d'un nom de tri tiré du
+/// `sort-name` MusicBrainz (#6474, point 2). NULL : balise, saisie, ou
+/// antérieur à la colonne.
+pub const SOURCE_TRI_MUSICBRAINZ: &str = "musicbrainz";
+
 /// tune-server-rust#6474 — le nom de tri à donner à l'ARTISTE D'ALBUM lu
 /// dans un fichier : ALBUMARTISTSORT s'il est écrit ; sinon l'ARTISTSORT de
 /// la piste, mais seulement quand la piste est de ce même artiste (même nom,
@@ -83,15 +88,57 @@ pub mod sql {
         )
     }
 
-    /// #6474 — pose le nom de tri d'un artiste qui n'en a PAS. Un nom de tri
-    /// déjà renseigné (balise lue plus tôt, saisie dans « Modifier
-    /// l'artiste ») n'est jamais remplacé.
+    /// #6474 — pose le nom de tri LU DANS UNE BALISE sur un artiste qui n'en
+    /// a pas, ou dont le nom de tri vient de MusicBrainz : la balise garde la
+    /// priorité. Un nom de tri déjà renseigné par une balise ou saisi dans
+    /// « Modifier l'artiste » n'est jamais remplacé. La provenance repasse à
+    /// NULL (balise).
     pub fn poser_sort_name_si_vide<D: SqlDialect>(d: &D) -> String {
         format!(
-            "UPDATE artists SET sort_name = {} WHERE id = {} \
-             AND (sort_name IS NULL OR TRIM(sort_name) = '')",
+            "UPDATE artists SET sort_name = {}, sort_name_source = NULL WHERE id = {} \
+             AND (sort_name IS NULL OR TRIM(sort_name) = '' \
+                  OR sort_name_source = '{source}')",
             d.placeholder(1),
-            d.placeholder(2)
+            d.placeholder(2),
+            source = super::SOURCE_TRI_MUSICBRAINZ,
+        )
+    }
+
+    /// #6474, point 2 — pose le nom de tri MusicBrainz (`sort-name`) sur un
+    /// artiste qui n'en a pas, ou dont le nom de tri vient déjà de
+    /// MusicBrainz. Une balise ou une saisie n'est jamais remplacée.
+    pub fn poser_sort_name_musicbrainz<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "UPDATE artists SET sort_name = {}, sort_name_source = '{source}' WHERE id = {} \
+             AND (sort_name IS NULL OR TRIM(sort_name) = '' \
+                  OR sort_name_source = '{source}')",
+            d.placeholder(1),
+            d.placeholder(2),
+            source = super::SOURCE_TRI_MUSICBRAINZ,
+        )
+    }
+
+    /// La provenance du nom de tri d'un artiste (#6474).
+    pub fn provenance_du_sort_name<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "SELECT sort_name_source FROM artists WHERE id = {}",
+            d.placeholder(1)
+        )
+    }
+
+    /// #6474 — dans une absorption, la provenance du nom de tri voyage AVEC
+    /// lui : posée sur la cible quand la reprise générique va lui donner le
+    /// nom de tri du doublon. Avant cette reprise, donc.
+    pub fn reprendre_la_provenance_du_sort_name<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "UPDATE artists SET sort_name_source = \
+               (SELECT a.sort_name_source FROM artists a WHERE a.id = {}) \
+             WHERE id = {} AND (sort_name IS NULL OR TRIM(sort_name) = '') \
+               AND EXISTS (SELECT 1 FROM artists a WHERE a.id = {} \
+                           AND a.sort_name IS NOT NULL AND TRIM(a.sort_name) <> '')",
+            d.placeholder(1),
+            d.placeholder(2),
+            d.placeholder(3)
         )
     }
 
@@ -104,9 +151,17 @@ pub mod sql {
         )
     }
 
+    /// #6474 — un nom de tri CHANGÉ par cette écriture (saisie dans
+    /// « Modifier l'artiste ») n'est plus celui de MusicBrainz : sa
+    /// provenance repasse à NULL. Inchangé, il garde la sienne. Le membre
+    /// droit d'un `SET` lit l'ANCIENNE ligne, sur SQLite comme sur
+    /// PostgreSQL.
     pub fn update<D: SqlDialect>(d: &D) -> String {
         format!(
-            "UPDATE artists SET name = {}, sort_name = {}, musicbrainz_id = {}, discogs_id = {}, bio = {}, image_path = {}, image_source = {} WHERE id = {}",
+            "UPDATE artists SET name = {}, sort_name = {}, musicbrainz_id = {}, discogs_id = {}, bio = {}, image_path = {}, image_source = {}, \
+             sort_name_source = CASE WHEN COALESCE(sort_name, '') = COALESCE({}, '') \
+                                     THEN sort_name_source ELSE NULL END \
+             WHERE id = {}",
             d.placeholder(1),
             d.placeholder(2),
             d.placeholder(3),
@@ -114,7 +169,8 @@ pub mod sql {
             d.placeholder(5),
             d.placeholder(6),
             d.placeholder(7),
-            d.placeholder(8)
+            d.placeholder(8),
+            d.placeholder(9)
         )
     }
 
@@ -577,7 +633,8 @@ impl ArtistRepo {
     /// nom de tri, prend celui que le fichier porte. Avant, seul l'artiste
     /// CRÉÉ par cette lecture le recevait : une bibliothèque scannée avant
     /// qu'on ajoute ARTISTSORT à ses fichiers ne l'aurait jamais vu. Un nom de
-    /// tri déjà présent n'est jamais remplacé (`poser_sort_name_si_vide`).
+    /// tri déjà présent n'est jamais remplacé (`poser_sort_name_si_vide`),
+    /// sauf s'il vient de MusicBrainz : la balise garde la priorité (point 2).
     fn completer_sort_name(
         &self,
         mut artiste: Artist,
@@ -586,18 +643,48 @@ impl ArtistRepo {
         let (Some(id), Some(tri)) = (artiste.id, sort_name) else {
             return Ok(artiste);
         };
-        if artiste
+        if let Some(actuel) = artiste
             .sort_name
             .as_deref()
-            .is_some_and(|s| !s.trim().is_empty())
+            .filter(|s| !s.trim().is_empty())
         {
-            return Ok(artiste);
+            // Le cas courant d'un scan : la balise dit ce que la fiche dit
+            // déjà. Aucune lecture de plus.
+            if actuel == tri {
+                return Ok(artiste);
+            }
+            let sql = self.dialect_sql(sql::provenance_du_sort_name, sql::provenance_du_sort_name);
+            let params: [&dyn ToSqlValue; 1] = [&id];
+            let provenance = self
+                .db
+                .query_one_strong(&sql, &params)?
+                .and_then(|l| l.first().and_then(|v| v.as_string()));
+            if provenance.as_deref() != Some(SOURCE_TRI_MUSICBRAINZ) {
+                return Ok(artiste);
+            }
         }
         let sql = self.dialect_sql(sql::poser_sort_name_si_vide, sql::poser_sort_name_si_vide);
         let params: [&dyn ToSqlValue; 2] = [&tri, &id];
-        self.db.execute(&sql, &params)?;
-        artiste.sort_name = Some(tri.to_string());
+        if self.db.execute(&sql, &params)? > 0 {
+            artiste.sort_name = Some(tri.to_string());
+        }
         Ok(artiste)
+    }
+
+    /// #6474, point 2 — pose le nom de tri MusicBrainz d'un artiste, s'il
+    /// n'en a pas ou si le sien vient déjà de MusicBrainz. Une balise ou une
+    /// saisie n'est jamais remplacée. Rend `true` si la fiche a changé.
+    pub fn poser_nom_de_tri_musicbrainz(&self, id: i64, tri: &str) -> Result<bool, TuneError> {
+        let tri = tri.trim();
+        if tri.is_empty() {
+            return Ok(false);
+        }
+        let sql = self.dialect_sql(
+            sql::poser_sort_name_musicbrainz,
+            sql::poser_sort_name_musicbrainz,
+        );
+        let params: [&dyn ToSqlValue; 2] = [&tri, &id];
+        Ok(self.db.execute(&sql, &params)? > 0)
     }
 
     /// BIB-C2 : le même artiste existe-t-il déjà sous une autre graphie ?
@@ -623,7 +710,7 @@ impl ArtistRepo {
         let id = artist.id.ok_or("artist has no id")?;
         let sql = self.dialect_sql(sql::update, sql::update);
         let musicbrainz_id = usable_musicbrainz_id(artist.musicbrainz_id.as_deref());
-        let params: [&dyn ToSqlValue; 8] = [
+        let params: [&dyn ToSqlValue; 9] = [
             &artist.name,
             &artist.sort_name,
             &musicbrainz_id,
@@ -631,6 +718,7 @@ impl ArtistRepo {
             &artist.bio,
             &artist.image_path,
             &artist.image_source,
+            &artist.sort_name,
             &id,
         ];
         self.db.execute(&sql, &params)?;
@@ -674,6 +762,16 @@ impl ArtistRepo {
             return Err(TuneError::from(format!("artiste {doublon} inconnu")));
         };
         let db: &dyn DbBackend = &*self.db;
+        // #6474 — la provenance du nom de tri voyage avec lui, avant la
+        // reprise générique qui va peut-être le recopier.
+        {
+            let sql = self.dialect_sql(
+                sql::reprendre_la_provenance_du_sort_name,
+                sql::reprendre_la_provenance_du_sort_name,
+            );
+            let params: [&dyn ToSqlValue; 3] = [&doublon, &cible, &doublon];
+            self.db.execute(&sql, &params)?;
+        }
         const CHAMPS: [&str; 11] = [
             "musicbrainz_id",
             "sort_name",

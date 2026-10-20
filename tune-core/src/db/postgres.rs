@@ -368,6 +368,10 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     // colonne. L'index JUSTE APRÈS la colonne.
     "ALTER TABLE radio_stations ADD COLUMN IF NOT EXISTS external_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_radio_stations_external_id ON radio_stations(external_id)",
+    // #6474 — la provenance du nom de tri (PG 091). Ici AUSSI : une base de
+    // bascule ne rejoue pas la 091, et le scan comme l'enrichissement NOMMENT
+    // la colonne.
+    "ALTER TABLE artists ADD COLUMN IF NOT EXISTS sort_name_source TEXT",
     // Fil 2121 — référence d'album d'une piste de service (PG 078). Ici AUSSI,
     // même raison : une base de bascule ne rejouera jamais la 078, alors que
     // l'écriture de la file, des favoris et de l'historique nomme la colonne.

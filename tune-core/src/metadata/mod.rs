@@ -3767,6 +3767,8 @@ mod date_de_sortie_tests_2206;
 #[cfg(test)]
 mod interprete_tests_6232;
 #[cfg(test)]
+mod nom_de_tri_musicbrainz_tests_6474;
+#[cfg(test)]
 mod nom_de_tri_tests_6474;
 #[cfg(test)]
 mod section_live_titre_tests_6464;

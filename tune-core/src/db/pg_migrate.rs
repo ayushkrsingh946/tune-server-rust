@@ -1313,6 +1313,8 @@ ALTER TABLE tracks ADD COLUMN IF NOT EXISTS rating TEXT;
 -- PG 090, #6516). TEXT des deux côtés : la copie texte n'a rien à convertir.
 ALTER TABLE radio_stations ADD COLUMN IF NOT EXISTS external_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_radio_stations_external_id ON radio_stations(external_id);
+-- artists: provenance du nom de tri (SQLite migration v127 / PG 091, #6474).
+ALTER TABLE artists ADD COLUMN IF NOT EXISTS sort_name_source TEXT;
 "#;
 
 /// Post-copy normalisation: `tracks.file_mtime` is canonically DOUBLE
