@@ -416,3 +416,284 @@ fn la_decision_du_next() {
         Enchainer
     );
 }
+
+/// Le corps d'un `SetAVTransportURI` seul, sans `Play` (point de contrôle qui
+/// change de contexte et lancera plus tard).
+async fn poser_une_uri_sans_play(b: &Banc, uri: &str) {
+    let hote = b.controleur.host().unwrap().to_string();
+    let corps = format!(
+        "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">\
+         <s:Body><u:SetAVTransportURI xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">\
+         <InstanceID>0</InstanceID><CurrentURI>{uri}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>\
+         </u:SetAVTransportURI></s:Body></s:Envelope>"
+    );
+    let reponse = reqwest::Client::new()
+        .post(format!(
+            "{hote}{}/{}/AVTransport/control",
+            upnp_renderer::RENDERER_MOUNT,
+            b.zone
+        ))
+        .header("Content-Type", "text/xml; charset=\"utf-8\"")
+        .header(
+            "SOAPAction",
+            "\"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\"",
+        )
+        .body(corps)
+        .send()
+        .await
+        .expect("la façade doit répondre");
+    assert!(reponse.status().is_success(), "SetAVTransportURI refusé");
+}
+
+const AUTRE: &str = "http://127.0.0.1:9/stream/autre-6335.wav";
+
+/// #6335 (relecture) — `SetAVTransportURI` d'une NOUVELLE URI, sans `Play` :
+/// la suivante de l'ancien contexte sort de la file, la zone ne l'armera ni
+/// ne l'enchaînera, et rien n'est relancé avant le `Play`.
+#[tokio::test]
+async fn une_nouvelle_uri_retire_la_suivante_confiee() {
+    let b = Banc::new().await;
+    b.courante_puis_suivante().await;
+    let lectures_avant = b.lectures().await;
+    assert_eq!(b.file().len(), 2);
+
+    poser_une_uri_sans_play(&b, AUTRE).await;
+
+    assert!(
+        b.file().is_empty(),
+        "#6335 : après un SetAVTransportURI, la suivante de l'ancien contexte \
+         doit sortir de la file — la zone l'enchaînerait à la fin de la piste"
+    );
+    assert_eq!(b.ligne_que_le_sondeur_armerait().await, None);
+    assert_eq!(
+        b.lectures().await,
+        lectures_avant,
+        "rien n'est lancé avant le Play"
+    );
+    let vue = snapshot(&b.state, b.zone).await;
+    assert_eq!(vue.uri, AUTRE);
+    assert!(vue.next_uri.is_empty());
+}
+
+/// #6335 (relecture) — une suivante REMPLACÉE prend la place de l'ancienne
+/// dans la file : c'est elle que le sondeur arme, et elle que la zone
+/// enchaîne, sans relance.
+#[tokio::test]
+async fn une_suivante_remplacee_prend_la_place_de_l_ancienne() {
+    let b = Banc::new().await;
+    b.courante_puis_suivante().await;
+    let lectures_avant = b.lectures().await;
+
+    b.controleur
+        .set_next_media(&media(AUTRE, "Piste 2 bis"))
+        .await
+        .expect("la façade doit acquitter le remplacement");
+
+    assert_eq!(
+        b.file(),
+        vec![
+            (Some("upnp".into()), Some(COURANTE.into())),
+            (Some("upnp".into()), Some(AUTRE.into())),
+        ],
+        "#6335 : la suivante remplacée doit remplacer l'ancienne dans la file"
+    );
+    assert_eq!(
+        b.ligne_que_le_sondeur_armerait().await.as_deref(),
+        Some(AUTRE),
+        "#6335 : le sondeur doit armer la suivante remplaçante, pas l'ancienne"
+    );
+    b.vers_la_fin(DUREE_MS - 300).await;
+    b.la_zone_enchaine().await;
+    assert_eq!(b.lectures().await, lectures_avant);
+    let vue = snapshot(&b.state, b.zone).await;
+    assert_eq!(vue.uri, AUTRE);
+    assert!(vue.next_uri.is_empty());
+}
+
+/// #6335 (relecture) — une suivante remplacée que la file ne peut plus
+/// prendre (répétition d'une piste activée entre-temps) : l'ancienne ne doit
+/// pas rester dans la file sous son ancienne forme.
+#[tokio::test]
+async fn une_suivante_remplacee_puis_refusee_sort_de_la_file() {
+    let b = Banc::new().await;
+    b.courante_puis_suivante().await;
+    b.state
+        .playback
+        .set_repeat(b.zone, tune_core::playback::RepeatMode::One)
+        .await;
+
+    b.controleur
+        .set_next_media(&media(AUTRE, "Piste 2 bis"))
+        .await
+        .expect("la façade doit acquitter le remplacement");
+
+    assert!(
+        b.file().is_empty(),
+        "#6335 : une suivante remplacée puis refusée doit faire sortir \
+         l'ancienne de la file, sinon la zone l'enchaînerait"
+    );
+    let vue = snapshot(&b.state, b.zone).await;
+    assert_eq!(vue.next_uri, AUTRE, "la suivante reste tenue par la façade");
+}
+
+/// Un faux renderer DLNA : il acquitte tout et retient les actions reçues.
+struct FauxRenderer {
+    hote: String,
+    actions: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    tache: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for FauxRenderer {
+    fn drop(&mut self) {
+        self.tache.abort();
+    }
+}
+
+impl FauxRenderer {
+    async fn new() -> Self {
+        let actions = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let a = actions.clone();
+        let app = axum::Router::new().route(
+            "/av/control",
+            axum::routing::post(move |headers: axum::http::HeaderMap, corps: String| {
+                let actions = a.clone();
+                async move {
+                    let action = headers
+                        .get("SOAPAction")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.rsplit('#').next())
+                        .unwrap_or_default()
+                        .trim_matches('"')
+                        .to_string();
+                    actions.lock().unwrap().push((action.clone(), corps));
+                    format!(
+                        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body>\
+                         <u:{action}Response xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\"/>\
+                         </s:Body></s:Envelope>"
+                    )
+                }
+            }),
+        );
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hote = format!("http://{}", ecoute.local_addr().unwrap());
+        let tache = tokio::spawn(async move { axum::serve(ecoute, app).await.unwrap() });
+        Self {
+            hote,
+            actions,
+            tache,
+        }
+    }
+
+    fn sortie(&self, device: &str) -> DlnaOutput {
+        DlnaOutput::new(
+            "Diretta (faux)".into(),
+            device.into(),
+            self.hote.clone(),
+            format!("{}/av/control", self.hote),
+            format!("{}/rc/control", self.hote),
+            None,
+        )
+    }
+
+    /// Les `SetNextAVTransportURI` vides reçus : l'effacement de la suivante.
+    fn effacements(&self) -> usize {
+        self.actions
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(action, corps)| {
+                action == "SetNextAVTransportURI" && corps.contains("<NextURI></NextURI>")
+            })
+            .count()
+    }
+}
+
+/// Une zone qui joue la courante du contrôleur, sa suivante confiée à la file,
+/// sur une sortie DLNA (le faux renderer). Rien ne passe par
+/// `orchestrator.play` : la lecture est inscrite telle que le `Play` de la
+/// façade la laisse.
+async fn zone_dlna_qui_joue(b: &Banc, renderer: &FauxRenderer) {
+    let device = format!("{}-dlna", b.device);
+    b.state
+        .backend
+        .execute(
+            "UPDATE zones SET output_type = 'dlna', output_device_id = ?1 WHERE id = ?2",
+            &[&device, &b.zone],
+        )
+        .unwrap();
+    b.state
+        .outputs
+        .lock()
+        .await
+        .register(Box::new(renderer.sortie(&device)));
+    b.state
+        .playback
+        .play(
+            b.zone,
+            tune_core::playback::NowPlaying {
+                title: "Piste 1".into(),
+                source: "upnp".into(),
+                source_id: Some(COURANTE.into()),
+                duration_ms: DUREE_MS,
+                ..Default::default()
+            },
+        )
+        .await;
+    let play_seq = b.state.playback.get_state(b.zone).await.play_seq;
+    if let Ok(mut carte) = sessions().lock() {
+        carte.insert(
+            b.zone,
+            RendererSession {
+                uri: COURANTE.into(),
+                duration_ms: Some(DUREE_MS),
+                revision: nouvelle_revision(),
+                play_seq: Some(play_seq),
+                next: Some(NextItem {
+                    uri: ARMEE.into(),
+                    title: None,
+                    artist: None,
+                    duration_ms: Some(DUREE_MS),
+                    metadata: String::new(),
+                    confiee: false,
+                }),
+                ..Default::default()
+            },
+        );
+    }
+    assert!(confier_la_suivante_a_la_file(&b.state, b.zone).await);
+}
+
+/// 🔴 #6335 (relecture) — la suivante que la façade retire a pu être armée
+/// chez le renderer réel, qui l'enchaînerait seul : `SetAVTransportURI` sans
+/// `Play` la fait effacer chez lui (`SetNextAVTransportURI` vide).
+#[tokio::test]
+async fn une_nouvelle_uri_efface_la_suivante_chez_le_renderer_dlna() {
+    let b = Banc::new().await;
+    let renderer = FauxRenderer::new().await;
+    zone_dlna_qui_joue(&b, &renderer).await;
+    assert_eq!(b.file().len(), 2);
+    assert_eq!(renderer.effacements(), 0);
+
+    poser_une_uri_sans_play(&b, AUTRE).await;
+
+    assert!(b.file().is_empty());
+    assert_eq!(
+        renderer.effacements(),
+        1,
+        "#6335 : la suivante retirée de la file doit être effacée chez le \
+         renderer DLNA — armée par le sondeur, il l'enchaînerait seul"
+    );
+}
+
+/// #6335 (relecture) — `Stop` : le renderer est arrêté, rien à effacer.
+#[tokio::test]
+async fn un_stop_n_efface_pas_la_suivante_chez_le_renderer() {
+    let b = Banc::new().await;
+    let renderer = FauxRenderer::new().await;
+    zone_dlna_qui_joue(&b, &renderer).await;
+
+    b.controleur.stop().await.ok();
+
+    assert!(b.file().is_empty());
+    assert_eq!(renderer.effacements(), 0);
+}

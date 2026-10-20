@@ -361,9 +361,10 @@ async fn avtransport_control(
                 .and_then(|ancienne| ancienne.file)
             });
             // #6335 — ni dans la file : la zone l'enchaînerait à la fin de la
-            // nouvelle piste.
+            // nouvelle piste. Ni chez le renderer réel, qui l'a peut-être déjà
+            // armée : la zone joue encore l'ancienne courante jusqu'au Play.
             if let Some(file) = ancienne_file {
-                retirer_notre_file(&state, zone_id, &file).await;
+                retirer_notre_file(&state, zone_id, &file, Desarmer::Oui).await;
             }
             upnp_renderer::empty_response("SetAVTransportURI")
         }
@@ -393,7 +394,7 @@ async fn avtransport_control(
             if !confier_la_suivante_a_la_file(&state, zone_id).await
                 && let Some(file) = ancienne_file
             {
-                retirer_notre_file(&state, zone_id, &file).await;
+                retirer_notre_file(&state, zone_id, &file, Desarmer::Oui).await;
             }
             spawn_gapless_watcher(state.clone(), zone_id);
             upnp_renderer::empty_response("SetNextAVTransportURI")
@@ -513,8 +514,9 @@ async fn avtransport_control(
             }
             // #6335 — la suivante effacée sort aussi de la file de la zone :
             // un Play qui relancerait la courante l'enchaînerait sinon.
+            // Le Stop qui suit arrête le renderer : rien à désarmer.
             if let Some(file) = notre_file {
-                retirer_notre_file(&state, zone_id, &file).await;
+                retirer_notre_file(&state, zone_id, &file, Desarmer::Non).await;
             }
             if reprise {
                 info!(zone_id, "upnp_renderer_stop_ignore_zone_reprise_par_tune");
@@ -863,7 +865,7 @@ fn constater_l_avance_de_la_zone(zone_id: i64, ps: &tune_core::playback::ZoneSta
     let Some(promue) = session.next.take() else {
         return false;
     };
-    info!(zone_id, uri = %promue.uri, "upnp_renderer_avance_par_la_zone");
+    info!(zone_id, "upnp_renderer_avance_par_la_zone");
     installer_la_promue(session, promue);
     session.play_seq = Some(ps.play_seq);
     session.avance_de_la_zone = Some(std::time::Instant::now());
@@ -986,16 +988,27 @@ async fn confier_la_suivante_a_la_file(state: &AppState, zone_id: i64) -> bool {
         })
     });
     if confiee {
-        info!(zone_id, uri = %uri_suivante, "upnp_renderer_suivante_confiee_a_la_file");
+        info!(zone_id, "upnp_renderer_suivante_confiee_a_la_file");
     } else {
-        retirer_notre_file(state, zone_id, &uris).await;
+        // Écrite à l'instant : le sondeur n'a pas pu l'armer.
+        retirer_notre_file(state, zone_id, &uris, Desarmer::Non).await;
     }
     confiee
 }
 
+/// Faut-il aussi effacer la suivante chez le renderer réel ? (#6335)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Desarmer {
+    /// La zone continue de jouer la courante : la suivante retirée a pu être
+    /// armée chez le renderer, qui l'enchaînerait seul.
+    Oui,
+    /// Un arrêt ou une nouvelle lecture suit, ou la file vient d'être écrite.
+    Non,
+}
+
 /// #6335 — retire de la zone la file écrite par la façade, si c'est encore
 /// la sienne (`est_notre_file`).
-async fn retirer_notre_file(state: &AppState, zone_id: i64, uris: &[String]) {
+async fn retirer_notre_file(state: &AppState, zone_id: i64, uris: &[String], desarmer: Desarmer) {
     let repo = tune_core::db::play_queue_repo::PlayQueueRepo::with_backend(state.backend.clone());
     let Ok(lignes) = repo.get_ordered(zone_id) else {
         return;
@@ -1006,6 +1019,44 @@ async fn retirer_notre_file(state: &AppState, zone_id: i64, uris: &[String]) {
     if repo.clear(zone_id).is_ok() {
         state.playback.update_queue_info(zone_id, 0, 0).await;
         info!(zone_id, "upnp_renderer_file_retiree");
+        if desarmer == Desarmer::Oui {
+            desarmer_la_suivante_du_renderer(state, zone_id).await;
+        }
+    }
+}
+
+/// #6335 — la suivante retirée de la file a pu être déjà armée chez le
+/// renderer réel (`prepare_gapless`, dans la fenêtre de fin) : il
+/// l'enchaînerait seul, et le sondeur ne désarme pas une préparation dont la
+/// suivante a quitté la file (`gapless_arm_outdated(Some, None)`, sens voulu
+/// pour le gapless ordinaire). La façade, qui sait l'avoir retirée, la fait
+/// effacer. Seule une sortie DLNA tient une suivante hors de Tune : les autres
+/// n'ont rien à effacer ici.
+async fn desarmer_la_suivante_du_renderer(state: &AppState, zone_id: i64) {
+    if state.playback.get_state(zone_id).await.state == tune_core::playback::PlayState::Stopped {
+        return;
+    }
+    let Some(device_id) = ZoneRepo::with_backend(state.backend.clone())
+        .get(zone_id)
+        .ok()
+        .flatten()
+        .and_then(|z| z.output_device_id)
+    else {
+        return;
+    };
+    let Some(sortie) = state.outputs.lock().await.get(&device_id) else {
+        return;
+    };
+    let sortie = sortie.lock().await;
+    let Some(dlna) = sortie
+        .as_any()
+        .downcast_ref::<tune_core::outputs::dlna::DlnaOutput>()
+    else {
+        return;
+    };
+    match dlna.effacer_la_suivante().await {
+        Ok(()) => info!(zone_id, "upnp_renderer_suivante_desarmee"),
+        Err(e) => warn!(zone_id, error = %e, "upnp_renderer_suivante_non_desarmee"),
     }
 }
 
@@ -1165,8 +1216,10 @@ fn spawn_gapless_watcher(state: AppState, zone_id: i64) {
                     SuiteDuTour::Attendre
                 }
             };
+            // Tune a repris la zone par une nouvelle lecture, qui a reposé
+            // l'URI du renderer réel : rien à y désarmer.
             if let Some(file) = file_perimee {
-                retirer_notre_file(&state, zone_id, &file).await;
+                retirer_notre_file(&state, zone_id, &file, Desarmer::Non).await;
             }
             match suite {
                 SuiteDuTour::Attendre => continue,
