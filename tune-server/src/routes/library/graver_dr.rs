@@ -1026,4 +1026,41 @@ mod tests_attente_bornee_6212 {
             "autorisation retirée : le fichier reporté ne doit pas être écrit"
         );
     }
+
+    /// La piste jouée ne se relit pas en base (ici, table `tracks` rendue
+    /// introuvable après l'inventaire) : on ne sait plus ce qui joue, donc
+    /// le fichier est REPORTÉ, jamais écrit à l'aveugle.
+    #[tokio::test]
+    async fn une_base_illisible_reporte_le_fichier_au_lieu_de_l_ecrire() {
+        let (_dir, chemin, s) = banc();
+        let avant = std::fs::read(&chemin).unwrap();
+        tenir_la_piste(&s).await;
+        let (_, candidates) = inventaire(&s);
+        assert_eq!(candidates.len(), 1);
+        s.backend
+            .execute("ALTER TABLE tracks RENAME TO tracks_hors_d_atteinte", &[])
+            .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            derouler_la_passe(
+                &s.backend,
+                &s.background_tasks,
+                &s.playback,
+                &candidates,
+                Duration::from_millis(300),
+            ),
+        )
+        .await
+        .expect("l'attente d'un fichier reporté doit être bornée");
+
+        assert!(
+            std::fs::read(&chemin).unwrap() == avant,
+            "base illisible : le fichier de la piste tenue a été écrit à l'aveugle ({})",
+            lire_statut(&s)
+        );
+        let statut = lire_statut(&s);
+        assert_eq!(statut["skipped"], 1, "{statut}");
+        assert_eq!(statut["written"], 0, "{statut}");
+    }
 }
