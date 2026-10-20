@@ -235,3 +235,55 @@ async fn sans_genre_dans_le_fichier_le_remplissage_pose_tous_les_genres_6635() {
     );
     assert_eq!(genres_m4a(&m4a), ["Soul"], "le genre déjà présent reste");
 }
+
+/// « Graver tags » n'écrit plus EN PLACE : chaque fichier est remplacé par le
+/// renommage d'une copie de travail écrite à côté de lui (son inode change),
+/// le flux audio est le même octet pour octet, et aucune copie ne traîne.
+/// L'échec simulé, qui laisse l'original intact, est éprouvé dans
+/// `tune_core::metadata::tag_writer` (il faut saboter la copie en vol).
+#[cfg(unix)]
+#[tokio::test]
+async fn graver_tags_remplace_le_fichier_sans_toucher_a_l_audio_6635() {
+    use std::os::unix::fs::MetadataExt;
+    use tune_core::metadata::empreinte_audio::empreinte_audio;
+    let banc = banc();
+    let fichiers: Vec<PathBuf> = ["01.flac", "02.mp3", "03.m4a"]
+        .iter()
+        .map(|n| banc.dir.join(n))
+        .collect();
+    let avant: Vec<_> = fichiers
+        .iter()
+        .map(|p| {
+            (
+                std::fs::metadata(p).unwrap().ino(),
+                empreinte_audio(p).unwrap().unwrap(),
+            )
+        })
+        .collect();
+
+    let statut = graver(&banc.state, false).await;
+    assert_eq!(statut["written"], 3, "{statut}");
+
+    for (p, (inode, audio)) in fichiers.iter().zip(avant) {
+        assert_ne!(
+            std::fs::metadata(p).unwrap().ino(),
+            inode,
+            "#6635 : {} a été réécrit en place ; il doit être remplacé par le \
+             renommage d'une copie vérifiée",
+            p.display()
+        );
+        assert_eq!(
+            empreinte_audio(p).unwrap().unwrap(),
+            audio,
+            "#6635 : le flux audio de {} doit être identique",
+            p.display()
+        );
+    }
+    let restes: Vec<_> = std::fs::read_dir(banc.dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(tune_core::metadata::tag_writer::PREFIXE_COPIE_DE_TRAVAIL))
+        .collect();
+    assert!(restes.is_empty(), "copies de travail laissées : {restes:?}");
+}

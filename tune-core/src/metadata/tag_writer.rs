@@ -1141,6 +1141,18 @@ pub(crate) fn ecrire_atomiquement(
     appliquer: impl FnOnce(&mut lofty::tag::Tag) -> usize,
     verifier: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<usize, String> {
+    ecrire_atomiquement_avec(original, true, appliquer, verifier)
+}
+
+/// [`ecrire_atomiquement`], avec le choix de `promouvoir` (voir
+/// [`ecrire_par_tag`]) : « Écrire dans les fichiers » promeut, « Graver
+/// tags » (#6635) garde le comportement historique de [`write_tags`].
+fn ecrire_atomiquement_avec(
+    original: &Path,
+    promouvoir: bool,
+    appliquer: impl FnOnce(&mut lofty::tag::Tag) -> usize,
+    verifier: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<usize, String> {
     use super::empreinte_audio::empreinte_audio;
 
     let avant = empreinte_audio(original)?
@@ -1170,7 +1182,7 @@ pub(crate) fn ecrire_atomiquement(
         .to_str()
         .ok_or_else(|| "chemin de copie non UTF-8".to_string())?
         .to_string();
-    let n = ecrire_par_tag(&copie_str, true, appliquer)?;
+    let n = ecrire_par_tag(&copie_str, promouvoir, appliquer)?;
     if n == 0 {
         return Ok(0);
     }
@@ -1201,6 +1213,65 @@ pub(crate) fn ecrire_atomiquement(
         let _ = std::fs::File::open(dossier).and_then(|d| d.sync_all());
     }
     Ok(n)
+}
+
+/// #6635 — « Graver tags » (`POST /library/write-tags`) : les champs de
+/// [`TagUpdate`] posés comme [`write_tags`], mais JAMAIS en place. La passe
+/// écrit tout ce que la base tient (titre, interprète, album, numéros,
+/// genres, compositeur, année, commentaire) : elle passe donc par la même
+/// écriture atomique qu'« Écrire dans les fichiers » ([`ecrire_atomiquement`]) :
+/// copie de travail à côté du fichier, écriture dans la copie, empreinte du
+/// FLUX audio comparée à celle de l'original
+/// ([`super::empreinte_audio::empreinte_audio`]), puis renommage atomique sur
+/// l'original. Tout échec laisse l'original intact et ne laisse aucune copie.
+///
+/// Un conteneur dont l'audio ne sait pas être isolé des balises
+/// ([`format_balises_edition`] : DSF, DFF, WMA…) est refusé : sans empreinte,
+/// aucune preuve que l'audio n'a pas bougé.
+pub async fn write_tags_atomique(
+    file_path: &str,
+    update: &TagUpdate,
+) -> Result<WriteResult, String> {
+    if !format_balises_edition(file_path) {
+        return Err("unsupported tag format".into());
+    }
+    let path = graphie_sur_disque(file_path)?;
+    let (update, corrections) = update.sanitized();
+    if !corrections.is_empty() {
+        tracing::warn!(
+            path = file_path,
+            corrections = ?corrections,
+            "tag_writer_unsafe_text_sanitized"
+        );
+    }
+    tokio::task::spawn_blocking(move || {
+        // La copie doit au moins se relire avant de remplacer l'original.
+        write_tags_lofty_atomique(&path, &update, |copie| tag_lu(copie).map(drop))
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+/// Le corps synchrone de [`write_tags_atomique`]. `verifier` reçoit la copie
+/// écrite, AVANT le contrôle de l'empreinte audio.
+fn write_tags_lofty_atomique(
+    file_path: &str,
+    update: &TagUpdate,
+    verifier: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<WriteResult, String> {
+    let count = ecrire_atomiquement_avec(
+        Path::new(file_path),
+        false,
+        |tag| appliquer_update(tag, update),
+        verifier,
+    )?;
+    if count > 0 {
+        info!(file = file_path, fields = count, "tags_written_atomique");
+    }
+    Ok(WriteResult {
+        file_path: file_path.into(),
+        fields_written: count,
+    })
 }
 
 #[cfg(test)]
@@ -1797,6 +1868,87 @@ mod tests {
         assert!(r.is_err());
         assert_eq!(std::fs::read(&cible).unwrap(), avant);
         assert!(copies_de_travail(dir.path()).is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // #6635 — « Graver tags » par l'écriture atomique : le fichier est
+    // remplacé d'un coup, l'audio est prouvé identique ; un échec laisse
+    // l'original octet pour octet et aucune copie de travail.
+    // ------------------------------------------------------------------
+
+    fn update_graver_tags_6635() -> TagUpdate {
+        TagUpdate {
+            title: Some("The River".into()),
+            artist_name: Some("Bruce".into()),
+            genres: vec!["Pop".into(), "Rock".into()],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn graver_tags_ecrit_par_copie_et_garde_l_audio_6635() {
+        use super::super::empreinte_audio::empreinte_audio;
+        let dir = crate::test_scratch::scratch_dir("graver-tags-6635-ok");
+        for nom in ["test.flac", "test.mp3", "test.m4a"] {
+            let cible = dir.join(nom);
+            std::fs::copy(fixture(nom), &cible).unwrap();
+            let audio_avant = empreinte_audio(&cible).unwrap().unwrap();
+            let r = write_tags_atomique(cible.to_str().unwrap(), &update_graver_tags_6635())
+                .await
+                .unwrap();
+            assert!(r.fields_written > 0, "{nom} : rien d'écrit");
+            let t = crate::metadata::read_metadata(&cible).unwrap();
+            assert_eq!(t.title.as_deref(), Some("The River"), "{nom}");
+            assert_eq!(t.genres, ["Pop", "Rock"], "{nom}");
+            assert_eq!(
+                empreinte_audio(&cible).unwrap().unwrap(),
+                audio_avant,
+                "{nom} : le flux audio doit être identique après l'écriture"
+            );
+        }
+        assert!(copies_de_travail(dir.path()).is_empty(), "copie laissée");
+    }
+
+    #[test]
+    fn graver_tags_echec_simule_laisse_l_original_intact_6635() {
+        let dir = crate::test_scratch::scratch_dir("graver-tags-6635-echec");
+        let cible = dir.join("t.flac");
+        std::fs::copy(fixture("test.flac"), &cible).unwrap();
+        let avant = std::fs::read(&cible).unwrap();
+        // Échec simulé : l'écriture « abîme » un octet des trames FLAC de la
+        // COPIE, comme un écrivain qui toucherait au son.
+        let r = write_tags_lofty_atomique(
+            cible.to_str().unwrap(),
+            &update_graver_tags_6635(),
+            |copie| {
+                let mut o = std::fs::read(copie).unwrap();
+                let m = o.len() / 2;
+                o[m] ^= 0x01;
+                std::fs::write(copie, o).unwrap();
+                Ok(())
+            },
+        );
+        let e = r.expect_err(
+            "#6635 : une écriture qui modifie l'audio doit être refusée, \
+             l'original ne doit pas être réécrit en place",
+        );
+        assert!(e.contains("audio"), "{e}");
+        assert_eq!(
+            std::fs::read(&cible).unwrap(),
+            avant,
+            "#6635 : après un échec, le fichier d'origine doit être intact"
+        );
+        assert!(copies_de_travail(dir.path()).is_empty(), "copie laissée");
+    }
+
+    #[tokio::test]
+    async fn graver_tags_refuse_un_format_sans_empreinte_audio_6635() {
+        let dir = crate::test_scratch::scratch_dir("graver-tags-6635-dsf");
+        let cible = dir.join("t.dsf");
+        std::fs::write(&cible, b"DSD ").unwrap();
+        let r = write_tags_atomique(cible.to_str().unwrap(), &update_graver_tags_6635()).await;
+        assert!(r.is_err());
+        assert_eq!(std::fs::read(&cible).unwrap(), b"DSD ");
     }
 
     #[test]

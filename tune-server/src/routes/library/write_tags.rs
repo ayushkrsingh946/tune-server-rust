@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 use tune_http_types::panne_sql::OuDefautJournalise;
 
 use tune_core::db::backend::ToSqlValue;
-use tune_core::metadata::tag_writer::{TagUpdate, write_tags};
+use tune_core::metadata::tag_writer::{TagUpdate, write_tags_atomique};
 
 use crate::state::AppState;
 
@@ -305,7 +305,7 @@ pub(crate) async fn write_tags_to_files(
                     continue;
                 }
 
-                match write_tags(&file_path, &update).await {
+                match write_tags_atomique(&file_path, &update).await {
                     Ok(result) => {
                         written += 1;
                         debug!(
@@ -339,7 +339,7 @@ pub(crate) async fn write_tags_to_files(
                     lyrics: None,
                 };
 
-                match write_tags(&file_path, &update).await {
+                match write_tags_atomique(&file_path, &update).await {
                     Ok(result) => {
                         written += 1;
                         debug!(
