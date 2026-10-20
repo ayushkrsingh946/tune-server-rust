@@ -32,6 +32,15 @@ pub struct TagUpdate {
     pub track_number: Option<i32>,
     pub disc_number: Option<i32>,
     pub genre: Option<String>,
+    /// TOUS les genres de la piste, dans l'ordre (#6635) — le premier reste
+    /// le genre principal. Non vide, il l'emporte sur [`Self::genre`] et
+    /// chaque genre devient une VALEUR SÉPARÉE, comme pour « Écrire dans les
+    /// fichiers » ([`BalisesEdition::genres`], #5314) : champ `GENRE` répété
+    /// en Vorbis, `TCON` multivalué en ID3v2.4, atome `©gen` répété en MP4.
+    /// Sans lui, « Graver tags » n'écrivait que `tracks.genre`, le premier
+    /// genre seul : « Pop/Rock » devenait « Pop » dans le fichier.
+    #[serde(default)]
+    pub genres: Vec<String>,
     pub composer: Option<String>,
     pub year: Option<i32>,
     pub comment: Option<String>,
@@ -65,6 +74,14 @@ impl TagUpdate {
         clean("artist_name", &mut update.artist_name, &mut corrections);
         clean("album_title", &mut update.album_title, &mut corrections);
         clean("genre", &mut update.genre, &mut corrections);
+        update.genres = std::mem::take(&mut update.genres)
+            .into_iter()
+            .filter_map(|g| {
+                let mut g = Some(g);
+                clean("genre", &mut g, &mut corrections);
+                g.map(|g| g.trim().to_string()).filter(|g| !g.is_empty())
+            })
+            .collect();
         clean("composer", &mut update.composer, &mut corrections);
         clean("isrc", &mut update.isrc, &mut corrections);
         clean("label", &mut update.label, &mut corrections);
@@ -355,7 +372,17 @@ fn appliquer_update(tag: &mut lofty::tag::Tag, update: &TagUpdate) -> usize {
         tag.set_disk(v as u32);
         count += 1;
     }
-    if let Some(ref v) = update.genre {
+    if !update.genres.is_empty() {
+        // Une valeur par genre (#6635), même pose que `poser` (#5314).
+        tag.remove_key(ItemKey::Genre);
+        for g in &update.genres {
+            tag.push(lofty::tag::TagItem::new(
+                ItemKey::Genre,
+                lofty::tag::ItemValue::Text(g.clone()),
+            ));
+        }
+        count += 1;
+    } else if let Some(ref v) = update.genre {
         tag.set_genre(v.clone());
         count += 1;
     }
