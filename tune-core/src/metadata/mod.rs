@@ -3670,6 +3670,8 @@ mod interprete_tests_6232;
 #[cfg(test)]
 mod nom_de_tri_tests_6474;
 #[cfg(test)]
+mod section_live_titre_tests_6464;
+#[cfg(test)]
 mod type_de_sortie_tests_5616;
 
 /// Les balises d'un fichier, lues par lofty sans charger les images.
