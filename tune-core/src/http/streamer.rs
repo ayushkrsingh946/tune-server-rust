@@ -3294,4 +3294,37 @@ mod tests {
             "le canal négocié doit mourir avec la session"
         );
     }
+
+    /// #6334 — un AAC relayé tel quel ne porte plus de profondeur
+    /// (`bit_depth: 0`, et non les 16 bits d'un CD). Sa retenue n'est plus
+    /// calculée sur un débit PCM fictif (31,8 Mo) : elle tombe au plancher de
+    /// 8 Mio. Ce plancher couvre encore plus de [`RETENUE_SECONDES`] d'un AAC
+    /// 320 kbit/s (Tidal `HIGH`), le plus haut débit avec perte que livrent
+    /// les services. La reprise d'un navigateur ou d'un renderer garde donc
+    /// toute sa marge.
+    #[test]
+    fn la_retenue_d_un_aac_320_sans_profondeur_couvre_sa_fenetre_6334() {
+        let aac = StreamInfo {
+            format: "aac".into(),
+            mime_type: "audio/mp4".into(),
+            sample_rate: 44_100,
+            bit_depth: 0,
+            channels: 2,
+            ..Default::default()
+        };
+        let octets_par_seconde = 320_000 / 8;
+        assert!(
+            aac.fenetre_de_retenue() >= octets_par_seconde * RETENUE_SECONDES,
+            "retenue de {} octets : moins de {RETENUE_SECONDES} s d'un AAC 320",
+            aac.fenetre_de_retenue()
+        );
+        // Le débit nominal d'un flux compressé ne lit pas la profondeur : il
+        // vient de la taille et de la durée, comme avant.
+        let avec_taille = StreamInfo {
+            file_size: Some(14_400_000),
+            duration_ms: Some(360_000),
+            ..aac
+        };
+        assert_eq!(avec_taille.debit_nominal_octets_par_seconde(), Some(40_000));
+    }
 }
