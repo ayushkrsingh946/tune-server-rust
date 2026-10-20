@@ -27,6 +27,19 @@
 //!   (`hors_format`) pour que l'écran puisse le dire ;
 //! * le DR d'album : la demande porte sur les pistes, et `ALBUM DYNAMIC RANGE`
 //!   est une moyenne que l'écran sait déjà déduire (`DR ~12`).
+//!
+//! ## Pendant une lecture (#6212, #6634)
+//!
+//! La passe tournait sans frein en pleine écoute (fil 2347 : 25 fichiers
+//! réécrits par minute pendant que la zone jouait). Elle suit désormais la
+//! politique des passes freinées (#4681) : avant chaque fichier,
+//! `priorite::ceder_a_la_lecture` — la pause de la politique tant qu'une zone
+//! joue, la passe nommée au relevé (`graver_dr`) et au journal
+//! (`tache_de_fond_ralentie_pour_la_lecture`). Et elle n'écrit JAMAIS dans le
+//! fichier d'une piste qu'une zone tient, en lecture ou en pause : ce fichier
+//! est reporté (`dr_gravure_reportee_fichier_en_lecture`) et gravé après les
+//! autres, une fois libéré (`dr_gravure_reprise_apres_la_lecture`). Sans
+//! lecture, rien ne change.
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -35,6 +48,7 @@ use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 use tune_core::db::track_metadata_repo::TrackMetadataRepo;
 use tune_core::metadata::tag_writer::{GravureDr, format_dr_relu, graver_dr};
+use tune_core::taches_de_fond::priorite;
 use tune_http_types::panne_sql::OuDefautJournalise;
 
 use crate::state::AppState;
@@ -243,6 +257,108 @@ fn remettre_la_ligne_en_phase(pistes: &tune_core::db::track_repo::TrackRepo, che
     }
 }
 
+/// Les compteurs de la passe, tels que le statut les publie.
+#[derive(Debug, Default)]
+struct Compteurs {
+    written: i32,
+    already: i32,
+    skipped: i32,
+    errors: i32,
+}
+
+impl Compteurs {
+    fn traitees(&self) -> i32 {
+        self.written + self.already + self.skipped + self.errors
+    }
+
+    fn statut(&self, status: &str, total: usize) -> Value {
+        json!({"status": status, "total": total, "written": self.written,
+               "already": self.already, "skipped": self.skipped, "errors": self.errors})
+    }
+}
+
+/// #6212 — le fichier est-il celui d'une piste qu'une zone tient, en lecture
+/// ou en pause ? Une piste en pause reprend dans le même flux : la réécrire
+/// entre-temps casserait la reprise tout autant.
+///
+/// Compare des CHEMINS, pas des identifiants : les pistes d'une feuille CUE
+/// partagent le fichier image. Aucune zone ne tient de piste — le cas sans
+/// lecture — : aucune requête, rien n'est écarté.
+async fn fichier_en_lecture(
+    playback: &tune_core::playback::PlaybackManager,
+    pistes: &tune_core::db::track_repo::TrackRepo,
+    chemin: &str,
+) -> bool {
+    for zone in playback.all_states().await {
+        if zone.state == tune_core::playback::PlayState::Stopped {
+            continue;
+        }
+        let Some(track_id) = zone.now_playing.and_then(|np| np.track_id) else {
+            continue;
+        };
+        if let Ok(Some(piste)) = pistes.get(track_id)
+            && piste.file_path.as_deref() == Some(chemin)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Entre deux relectures des fichiers reportés : la pause de la politique de
+/// lecture, au moins une seconde — même freins coupés, la boucle ne tourne
+/// pas à vide pendant qu'un morceau joue.
+fn attente_du_fichier_en_lecture() -> std::time::Duration {
+    priorite::politique::politique()
+        .pause_entre_elements()
+        .max(std::time::Duration::from_secs(1))
+}
+
+/// Graver UNE piste et la compter.
+async fn graver_une(
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    repo: &TrackMetadataRepo,
+    pistes: &tune_core::db::track_repo::TrackRepo,
+    (track_id, chemin, dr): &(i64, String, String),
+    c: &mut Compteurs,
+) {
+    let track_id = *track_id;
+    // Fil 2134 — la ligne était-elle d'accord avec le disque AVANT
+    // la gravure ? Seulement alors, elle peut être remise d'accord
+    // après : sinon un changement venu d'ailleurs, pas encore relu,
+    // passerait pour l'écriture de Tune.
+    let en_phase = crate::auto_scan::fichier_conforme_a_la_base(backend, chemin);
+    match graver_dr(chemin, dr).await {
+        Ok(GravureDr::Ecrite) => {
+            c.written += 1;
+            // Le fichier porte la valeur : c'est désormais le tag qui
+            // fait foi, et c'est ce que le prochain scan dira aussi.
+            let _ = repo.set(track_id, "dr_source", "tag");
+            if en_phase {
+                remettre_la_ligne_en_phase(pistes, chemin);
+            }
+            debug!(track_id, chemin = %chemin, dr = %dr, "dr_grave");
+        }
+        Ok(GravureDr::DejaPresente(du_fichier)) => {
+            c.already += 1;
+            // La base s'aligne sur le disque, jamais l'inverse.
+            if du_fichier.chars().all(|ch| ch.is_ascii_digit()) && du_fichier != *dr {
+                let _ = repo.set(track_id, "dr_track", &du_fichier);
+            }
+            let _ = repo.set(track_id, "dr_source", "tag");
+            debug!(track_id, chemin = %chemin, du_fichier = %du_fichier, "dr_deja_present");
+        }
+        Err(e) if e == "file not found" => {
+            c.skipped += 1;
+            debug!(track_id, chemin = %chemin, "dr_fichier_introuvable");
+        }
+        Err(e) => {
+            c.errors += 1;
+            warn!(track_id, chemin = %chemin, error = %e, "dr_gravure_echouee");
+        }
+    }
+}
+
 /// POST /library/dr/gravure
 ///
 /// Lance la passe en tâche de fond. 202 avec l'inventaire ; 409 si elle tourne
@@ -272,20 +388,21 @@ pub(crate) async fn lancer(State(state): State<AppState>) -> axum::response::Res
     );
     let taches = state.background_tasks.clone();
     let backend = state.backend.clone();
-    ecrire_statut(
-        &backend,
-        &json!({"status": "running", "total": total, "written": 0, "already": 0, "skipped": 0, "errors": 0}),
-    );
+    ecrire_statut(&backend, &Compteurs::default().statut("running", total));
 
+    let playback = state.playback.clone();
     tokio::spawn(async move {
         let _garde = garde;
         let repo = TrackMetadataRepo::with_backend(backend.clone());
         let pistes = tune_core::db::track_repo::TrackRepo::with_backend(backend.clone());
-        let (mut written, mut already, mut skipped, mut errors) = (0i32, 0i32, 0i32, 0i32);
+        let mut c = Compteurs::default();
         taches.update_progress(TACHE_GRAVER_DR, 0, total as u64, "Dynamic Range");
 
-        for (track_id, chemin, dr) in &candidates {
-            let traitees = written + already + skipped + errors;
+        // #6212 — les pistes dont le fichier jouait à leur tour : reprises
+        // après les autres, une fois que plus aucune zone ne les tient.
+        let mut reportees: Vec<&(i64, String, String)> = Vec::new();
+        for candidate in &candidates {
+            let traitees = c.traitees();
             if traitees % JALON_AVANCEMENT == 0 {
                 taches.update_progress(
                     TACHE_GRAVER_DR,
@@ -293,54 +410,51 @@ pub(crate) async fn lancer(State(state): State<AppState>) -> axum::response::Res
                     total as u64,
                     "Dynamic Range",
                 );
-                ecrire_statut(
-                    &backend,
-                    &json!({"status": "running", "total": total, "written": written,
-                            "already": already, "skipped": skipped, "errors": errors}),
+                ecrire_statut(&backend, &c.statut("running", total));
+            }
+            // #6212 / #6634 — la même politique que les autres passes
+            // freinées (#4681) : pendant qu'une zone joue, une pause entre
+            // deux fichiers, et la passe nommée au relevé.
+            priorite::ceder_a_la_lecture(priorite::ID_GRAVER_DR).await;
+            if fichier_en_lecture(&playback, &pistes, &candidate.1).await {
+                info!(
+                    track_id = candidate.0,
+                    chemin = %candidate.1,
+                    "dr_gravure_reportee_fichier_en_lecture"
                 );
+                reportees.push(candidate);
+                continue;
             }
-            // Fil 2134 — la ligne était-elle d'accord avec le disque AVANT
-            // la gravure ? Seulement alors, elle peut être remise d'accord
-            // après : sinon un changement venu d'ailleurs, pas encore relu,
-            // passerait pour l'écriture de Tune.
-            let en_phase = crate::auto_scan::fichier_conforme_a_la_base(&backend, chemin);
-            match graver_dr(chemin, dr).await {
-                Ok(GravureDr::Ecrite) => {
-                    written += 1;
-                    // Le fichier porte la valeur : c'est désormais le tag qui
-                    // fait foi, et c'est ce que le prochain scan dira aussi.
-                    let _ = repo.set(*track_id, "dr_source", "tag");
-                    if en_phase {
-                        remettre_la_ligne_en_phase(&pistes, chemin);
-                    }
-                    debug!(track_id, chemin = %chemin, dr = %dr, "dr_grave");
+            graver_une(&backend, &repo, &pistes, candidate, &mut c).await;
+        }
+
+        while !reportees.is_empty() {
+            tokio::time::sleep(attente_du_fichier_en_lecture()).await;
+            let mut encore = Vec::with_capacity(reportees.len());
+            for candidate in reportees {
+                priorite::ceder_a_la_lecture(priorite::ID_GRAVER_DR).await;
+                if fichier_en_lecture(&playback, &pistes, &candidate.1).await {
+                    encore.push(candidate);
+                    continue;
                 }
-                Ok(GravureDr::DejaPresente(du_fichier)) => {
-                    already += 1;
-                    // La base s'aligne sur le disque, jamais l'inverse.
-                    if du_fichier.chars().all(|c| c.is_ascii_digit()) && du_fichier != *dr {
-                        let _ = repo.set(*track_id, "dr_track", &du_fichier);
-                    }
-                    let _ = repo.set(*track_id, "dr_source", "tag");
-                    debug!(track_id, chemin = %chemin, du_fichier = %du_fichier, "dr_deja_present");
-                }
-                Err(e) if e == "file not found" => {
-                    skipped += 1;
-                    debug!(track_id, chemin = %chemin, "dr_fichier_introuvable");
-                }
-                Err(e) => {
-                    errors += 1;
-                    warn!(track_id, chemin = %chemin, error = %e, "dr_gravure_echouee");
-                }
+                info!(
+                    track_id = candidate.0,
+                    chemin = %candidate.1,
+                    "dr_gravure_reprise_apres_la_lecture"
+                );
+                graver_une(&backend, &repo, &pistes, candidate, &mut c).await;
             }
+            reportees = encore;
         }
 
         taches.update_progress(TACHE_GRAVER_DR, total as u64, total as u64, "Dynamic Range");
-        ecrire_statut(
-            &backend,
-            &json!({"status": "done", "total": total, "written": written,
-                    "already": already, "skipped": skipped, "errors": errors}),
-        );
+        ecrire_statut(&backend, &c.statut("done", total));
+        let Compteurs {
+            written,
+            already,
+            skipped,
+            errors,
+        } = c;
         info!(
             total,
             written, already, skipped, errors, "graver_dr_termine"

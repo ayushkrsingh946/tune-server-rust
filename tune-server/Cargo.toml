@@ -1719,3 +1719,11 @@ required-features = ["postgres"]
 [[test]]
 name = "services_remplacables_6336"
 path = "tests/services_remplacables_6336.rs"
+
+# #6212 / #6634 — la gravure du Dynamic Range cède à la lecture et n'écrit pas
+# dans le fichier joué, par la route montée. Binaire à lui seul : le témoin de
+# lecture et la politique des freins sont des états de PROCESSUS. `autotests =
+# false` plus haut : sans cette cible, le fichier ne serait JAMAIS compilé.
+[[test]]
+name = "gravure_dr_cede_a_la_lecture_6212"
+path = "tests/gravure_dr_cede_a_la_lecture_6212.rs"
