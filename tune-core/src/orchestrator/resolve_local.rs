@@ -830,6 +830,7 @@ impl PlaybackOrchestrator {
             channels: resolved_ch,
             origin_url: None,
             bitrate_kbps: None,
+            format_source: None,
         })
     }
 
@@ -1850,6 +1851,7 @@ impl PlaybackOrchestrator {
             channels: Some(canaux),
             origin_url: None,
             bitrate_kbps: None,
+            format_source: None,
             cover_url: self.resolve_cover_url(track.cover_path.as_deref()),
             file_size: None,
         }))
@@ -2055,6 +2057,7 @@ impl PlaybackOrchestrator {
                 channels: Some(dop_channels as u32),
                 origin_url: None,
                 bitrate_kbps: None,
+                format_source: None,
                 cover_url: self.resolve_cover_url(track.cover_path.as_deref()),
                 file_size: None,
             }));

@@ -4650,6 +4650,22 @@ mod pagination_recherche_i4803 {
     }
 }
 
+/// Témoins seulement : un service pointé sur un faux Tidal en boucle locale,
+/// armé d'un jeton d'essai. Aucun identifiant ni jeton réel.
+#[cfg(test)]
+impl TidalService {
+    pub(crate) fn pour_un_faux_tidal(base: String) -> Self {
+        let mut svc = Self::new();
+        svc.base_forcee = Some(base);
+        svc.tokens = Mutex::new(TokenState {
+            access_token: Some("jeton-essai".into()),
+            refresh_token: None,
+            token_expires: None,
+        });
+        svc
+    }
+}
+
 #[cfg(test)]
 #[path = "tidal_qualite_livree_6334_tests.rs"]
 mod qualite_livree_6334_tests;

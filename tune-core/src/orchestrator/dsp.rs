@@ -552,6 +552,7 @@ impl PlaybackOrchestrator {
             // captured through the proxy — and filed under `Stream/`.
             origin_url: prefetched.upstream_url,
             bitrate_kbps: None,
+            format_source: None,
             cover_url: cover_url.clone(),
             file_size: Some(file_size),
         })
@@ -668,6 +669,7 @@ impl PlaybackOrchestrator {
             // needs the service's own URL, not ours.
             origin_url: prefetched.upstream_url,
             bitrate_kbps: None,
+            format_source: None,
         })
     }
 

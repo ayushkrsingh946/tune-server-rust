@@ -10176,6 +10176,7 @@ async fn une_session_abandonnee_avant_l_envoi_arrete_la_zone_au_lieu_de_jouer_un
         channels: Some(2),
         origin_url: None,
         bitrate_kbps: None,
+        format_source: None,
     };
     let habillage = super::transport::Habillage {
         album: None,

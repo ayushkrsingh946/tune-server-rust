@@ -63,6 +63,40 @@ pub(crate) fn format_nomme_par_la_source(source: &str, source_id: Option<&str>) 
     }
 }
 
+/// #6334 — le codec que le service a LIVRÉ, en minuscules (`aac`, `flac`),
+/// tel que `StreamQuality::codec` le nomme. C'est ce qu'il faut annoncer, et
+/// non le conteneur servi : un AAC décodé en WAV pour la sortie restait sinon
+/// annoncé « WAV · 16 bits », c'est-à-dire comme un CD.
+pub(crate) fn format_livre_par_le_service(
+    qualite: &crate::streaming::StreamQuality,
+) -> Option<String> {
+    let codec = qualite.codec.trim().to_lowercase();
+    (!codec.is_empty()).then_some(codec)
+}
+
+/// #6334 — la profondeur à ANNONCER pour un flux de service : aucune pour un
+/// codec avec perte (un AAC n'a pas de « 16 bits »), aucune quand le service
+/// n'en a pas donné (0). Jamais la profondeur du conteneur de sortie.
+pub(crate) fn profondeur_annoncee_par_le_service(
+    qualite: &crate::streaming::StreamQuality,
+    profondeur: u16,
+) -> Option<u32> {
+    (!qualite.avec_perte() && profondeur > 0).then_some(u32::from(profondeur))
+}
+
+/// #6334 — le débit à annoncer, en kbit/s : celui que le service nomme pour
+/// un codec avec perte (l'AAC 320 de Tidal `HIGH`). Rien pour un sans-perte :
+/// le chemin du signal ne l'afficherait pas, et un chiffre calculé n'est pas
+/// un débit nommé.
+pub(crate) fn debit_annonce_par_le_service(
+    qualite: &crate::streaming::StreamQuality,
+) -> Option<u32> {
+    qualite
+        .bitrate
+        .filter(|b| *b > 0 && qualite.avec_perte())
+        .map(|b| b / 1000)
+}
+
 /// Le dernier repli du format : le type MIME du flux, `audio/` et `x-` ôtés.
 pub(crate) fn format_du_mime(mime: &str) -> String {
     mime.strip_prefix("audio/")
@@ -84,6 +118,7 @@ impl QualitePreArmee {
         Some(Self {
             stream_id,
             format: format_nomme_par_la_source(source, source_id)
+                .or_else(|| resolved.format_source.clone())
                 .or_else(|| Some(format_du_mime(&resolved.mime_type))),
             // `resolution_annoncee(None, resolu, false)` = `resolu` : une
             // source non locale n'a pas de ligne, la valeur résolue fait foi.

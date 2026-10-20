@@ -1226,6 +1226,10 @@ impl PlaybackOrchestrator {
                 // codec de l'URL, #2074). Règle partagée avec l'armement
                 // gapless (#3365), pour que la piste 2 dise la même chose.
                 .or_else(|| format_nomme_par_la_source(&resolved.source, req.source_id.as_deref()))
+                // #6334 — le codec que le service a livré, et non le
+                // conteneur servi : un AAC Tidal décodé en WAV pour la sortie
+                // s'annonçait « WAV », donc sans perte, donc « CD ».
+                .or_else(|| resolved.format_source.clone())
                 // A media-server (UPnP/NAS) item has no local track row, so the
                 // codec the client read from the DIDL res@protocolInfo is the only
                 // authoritative source: audio/mp4 is ambiguous ALAC-vs-AAC, so

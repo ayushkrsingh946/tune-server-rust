@@ -1446,6 +1446,12 @@ pub struct ResolvedStream {
     /// et la règle écrite dans `tune-bandcamp` veut que ce débit soit
     /// « annoncé comme tel partout où il apparaît ».
     pub bitrate_kbps: Option<u32>,
+    /// #6334 — le codec que le SERVICE a livré (`aac`, `flac`…), en
+    /// minuscules, quand il le nomme. Distinct de `mime_type`, qui décrit le
+    /// CONTENEUR servi : un AAC décodé pour une sortie qui exige du WAV part
+    /// en `audio/wav`, et l'annonce ne doit pas en faire un WAV « CD ».
+    /// `None` hors services de streaming : la source y est nommée ailleurs.
+    pub format_source: Option<String>,
 }
 
 pub struct ResolvedQueueItem {
@@ -1880,7 +1886,10 @@ pub use bandcamp::*;
 mod bandcamp_resignature;
 
 mod qualite_pre_armee;
-pub(crate) use qualite_pre_armee::{QualitePreArmee, format_du_mime, format_nomme_par_la_source};
+pub(crate) use qualite_pre_armee::{
+    QualitePreArmee, debit_annonce_par_le_service, format_du_mime, format_livre_par_le_service,
+    format_nomme_par_la_source, profondeur_annoncee_par_le_service,
+};
 
 /// Ce qu'on ANNONCE au renderer pour une piste de serveur média : le MIME ne
 /// se devine plus dans la seule URL, qui pour un `<res>` de Tune ne porte
@@ -2034,6 +2043,8 @@ mod mesure_saut_cd_5079;
 /// FLAC (ou le catalogue) ; inconnue, elle est refusée par une erreur nommée.
 #[cfg(test)]
 mod qobuz_cadence_nulle_5283_tests;
+#[cfg(test)]
+mod tidal_aac_annonce_6334_tests;
 
 /// #6401 — le préchargement sans blanc et la sonde de niveaux après une
 /// avance sans blanc passent par le même repli Qobuz en 16/44,1 que la

@@ -321,6 +321,7 @@ impl PlaybackOrchestrator {
             channels: Some(channels as u32),
             origin_url: None,
             bitrate_kbps: None,
+            format_source: None,
             cover_url: None,
             file_size,
         })
@@ -969,6 +970,7 @@ impl PlaybackOrchestrator {
             // renderer réseau : les trois portent le MÊME flux source, et
             // c'est LUI que le chemin du signal doit annoncer (#2074).
             bitrate_kbps: bc_quality.as_ref().and_then(|q| q.bitrate_kbps),
+            format_source: None,
         })
     }
 
@@ -1364,6 +1366,7 @@ impl PlaybackOrchestrator {
             channels: out_ch,
             origin_url: Some(audio_url.to_string()),
             bitrate_kbps: None,
+            format_source: None,
         })
     }
 

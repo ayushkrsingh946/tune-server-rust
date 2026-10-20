@@ -118,14 +118,10 @@ async fn faux_tidal(
         let _ = axum::serve(ecoute, app).await;
     });
 
-    let mut svc = TidalService::new();
-    svc.base_forcee = Some(format!("http://{adresse}"));
-    svc.tokens = Mutex::new(TokenState {
-        access_token: Some("jeton-essai".into()),
-        refresh_token: None,
-        token_expires: None,
-    });
-    (svc, journal)
+    (
+        TidalService::pour_un_faux_tidal(format!("http://{adresse}")),
+        journal,
+    )
 }
 
 /// Défaut 1 : la cascade gardait le PREMIER repli dégradé. `HI_RES_LOSSLESS`

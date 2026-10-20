@@ -2749,6 +2749,10 @@ fn decrire_la_source<'w>(
         .unwrap_or_default();
     let source_format = AudioFormat::from_extension(&fmt_str);
     let is_dsd = matches!(fmt_str.as_str(), "dsd" | "dsf" | "dff");
+    let source_avec_perte = matches!(
+        source_format,
+        Some(AudioFormat::Aac | AudioFormat::Mp3 | AudioFormat::Ogg | AudioFormat::Opus)
+    );
     // For DSD files, prefer the track's original sample rate and bit depth
     // from the database (which represent the SOURCE format: e.g. 2822400 Hz
     // / 1-bit for DSD64) over the NowPlaying values, which may contain the
@@ -2783,7 +2787,14 @@ fn decrire_la_source<'w>(
         radio_wire_bit_depth
             .or_else(|| np.bit_depth.map(|v| v as i32))
             .or_else(|| track.as_ref().and_then(|t| t.bit_depth))
-            .or_else(|| wire_bit_depth.map(|v| v as i32))
+            // #6334 — pas pour une source avec perte : le fil d'un AAC décodé
+            // en WAV porte 16 bits, la source n'en a aucun. Les lui prêter
+            // affichait « AAC 44kHz/16bit », la profondeur d'un CD.
+            .or_else(|| {
+                wire_bit_depth
+                    .filter(|_| !source_avec_perte)
+                    .map(|v| v as i32)
+            })
             // Fil 2119 — 0 veut dire « inconnu », jamais 16.
             .unwrap_or(0)
     };
