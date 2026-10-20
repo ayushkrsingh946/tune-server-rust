@@ -3991,12 +3991,62 @@ fn disposition_deplace_une_voie(
 /// puis adaptation des canaux, puis volume — et n'est plus bit-perfect. Jamais
 /// sur un porteur DoP, ni en PURE pour la matrice, comme l'étage de
 /// conversion (`adaptation_retenue`).
-#[cfg(any(target_os = "windows", test))]
+// #6230 — la production passe par `prepare_windows_native_pcm_vers` (l'étage
+// natif, voies ouvertes comprises) ; cette forme à voies égales reste celle
+// des témoins d'empreinte.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn prepare_windows_native_pcm(
     bytes: &[u8],
     bit_depth: u16,
     channels: u16,
+    must_classify_24_bit: bool,
+    dop_latched: bool,
+    volume_units: u32,
+    eq: &std::sync::Mutex<Option<crate::audio::eq::EqProcessor>>,
+    convolver: &std::sync::Mutex<Option<crate::audio::convolver::Convolver>>,
+    crossfeed: &std::sync::Mutex<Option<crate::audio::crossfeed::CrossfeedProcessor>>,
+    pure_bypass: &AtomicBool,
+    mono_downmix: &AtomicBool,
+    adaptation: Option<AdaptationNative<'_>>,
+) -> Option<PreparedNativePcm> {
+    prepare_windows_native_pcm_vers(
+        bytes,
+        bit_depth,
+        channels,
+        channels,
+        must_classify_24_bit,
+        dop_latched,
+        volume_units,
+        eq,
+        convolver,
+        crossfeed,
+        pure_bypass,
+        mono_downmix,
+        adaptation,
+    )
+}
+
+/// #6230 — `prepare_windows_native_pcm` vers un transport ouvert sur
+/// `sortie` voies, qui peut différer des `channels` de la source quand la
+/// grille de réaffectation pilote l'ouverture (une grille 6 → 2 ouvre 2
+/// voies). À `sortie == channels`, le rendu est exactement celui d'avant.
+///
+/// Quand les voies diffèrent, aucun mot ne peut partir brut : le bloc prend
+/// la branche flottante et la matrice (ou, à défaut, l'adaptation par défaut
+/// ou la disposition déclarée) le porte de `channels` à `sortie` voies. Un
+/// porteur DoP ne se laisse pas adapter (#3233) : s'il en survient un, le
+/// bloc part en SILENCE sur les `sortie` voies plutôt qu'en bruit plein
+/// échelle. L'ouverture ne pilote jamais un flux dont l'amorce est un DoP
+/// (`CreneauReaffectation::voies_a_demander`) : ce cas ne se produit pas en
+/// lecture ordinaire.
+#[cfg(any(target_os = "windows", test))]
+#[allow(clippy::too_many_arguments)]
+fn prepare_windows_native_pcm_vers(
+    bytes: &[u8],
+    bit_depth: u16,
+    channels: u16,
+    sortie: u16,
     must_classify_24_bit: bool,
     dop_latched: bool,
     volume_units: u32,
@@ -4013,25 +4063,33 @@ fn prepare_windows_native_pcm(
     }
 
     let dop = dop_latched || (bit_depth == 24 && is_dop_pcm(bytes, bit_depth, channels));
+    if dop && sortie != channels {
+        let trames = bytes.len() / (usize::from(channels.max(1)) * usize::from(bit_depth / 8));
+        warn!(
+            channels,
+            sortie, "native_dop_carrier_refused_on_piloted_channels"
+        );
+        return Some(PreparedNativePcm {
+            samples: vec![0; trames * usize::from(sortie)],
+            dop: false,
+            bit_perfect: false,
+        });
+    }
+    let pure = pure_bypass.load(Ordering::Relaxed);
     let (matrice, declaree) = match adaptation {
         Some((reaffectation, disposition)) => {
-            let (matrice, declaree) = adaptation_retenue_pour(
-                reaffectation,
-                disposition,
-                channels,
-                channels,
-                dop,
-                pure_bypass.load(Ordering::Relaxed),
-            );
+            let (matrice, declaree) =
+                adaptation_retenue_pour(reaffectation, disposition, channels, sortie, dop, pure);
             reaffectation.noter(matrice.is_some());
             (
                 matrice,
-                declaree.filter(|d| disposition_deplace_une_voie(d, channels)),
+                declaree
+                    .filter(|d| sortie != channels || disposition_deplace_une_voie(d, channels)),
             )
         }
         None => (None, None),
     };
-    let canaux_adaptes = matrice.is_some() || declaree.is_some();
+    let canaux_adaptes = matrice.is_some() || declaree.is_some() || sortie != channels;
     let bit_perfect = dop
         || (volume_units == 1000
             && local_dsp_is_identity(eq, convolver, crossfeed, pure_bypass, mono_downmix)
@@ -4051,18 +4109,13 @@ fn prepare_windows_native_pcm(
             false,
         );
         if canaux_adaptes {
-            match crate::audio::carte_des_canaux::adapter_vers_la_sortie(
-                &float,
+            float = adapter_les_voies_natives(
+                float,
                 channels,
-                channels,
+                sortie,
                 matrice.as_deref(),
                 declaree.as_deref(),
-            ) {
-                Ok(adapte) => float = adapte,
-                Err(error) => {
-                    warn!(channels, error = %error, "native_channel_adaptation_rejected");
-                }
-            }
+            );
         }
         let volume = volume_units as f32 / 1000.0;
         if volume != 1.0 {
@@ -4078,6 +4131,36 @@ fn prepare_windows_native_pcm(
         dop,
         bit_perfect,
     })
+}
+
+/// #6230 — porter des échantillons flottants de `channels` à `sortie` voies
+/// sur un transport natif : la matrice, sinon la disposition déclarée, sinon
+/// l'adaptation par défaut. Un refus (aucune règle connue pour ces tailles)
+/// est dit au journal ; à nombre égal le bloc part alors tel quel, sinon il
+/// part en silence plutôt qu'avec un nombre de voies faux, qui décalerait
+/// toutes les trames de l'anneau.
+#[cfg(any(target_os = "windows", test))]
+fn adapter_les_voies_natives(
+    float: Vec<f32>,
+    channels: u16,
+    sortie: u16,
+    matrice: Option<&crate::audio::reaffectation_canaux::Matrice>,
+    declaree: Option<&crate::audio::disposition_canaux::Disposition>,
+) -> Vec<f32> {
+    match crate::audio::carte_des_canaux::adapter_vers_la_sortie(
+        &float, channels, sortie, matrice, declaree,
+    ) {
+        Ok(adapte) => adapte,
+        Err(error) => {
+            warn!(channels, sortie, error = %error, "native_channel_adaptation_rejected");
+            if sortie == channels {
+                float
+            } else {
+                let trames = float.len() / usize::from(channels.max(1));
+                vec![0.0; trames * usize::from(sortie)]
+            }
+        }
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -8222,3 +8305,5 @@ mod transformations_reelles_de_l_etage_ref6b;
 /// #6057 — l'étage route par la disposition déclarée par le fichier.
 #[cfg(test)]
 mod disposition_declaree_tests;
+#[cfg(test)]
+mod voies_exclusives_6230;
