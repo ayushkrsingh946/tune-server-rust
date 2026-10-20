@@ -427,7 +427,7 @@ async fn poser_une_uri_sans_play(b: &Banc, uri: &str) {
          <InstanceID>0</InstanceID><CurrentURI>{uri}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>\
          </u:SetAVTransportURI></s:Body></s:Envelope>"
     );
-    let reponse = reqwest::Client::new()
+    let reponse = tune_core::http::client::shared()
         .post(format!(
             "{hote}{}/{}/AVTransport/control",
             upnp_renderer::RENDERER_MOUNT,
