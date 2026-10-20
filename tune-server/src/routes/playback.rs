@@ -12,6 +12,12 @@ mod seek_en_double_193_tests;
 mod session_locale_tests;
 #[path = "playback/session_message.rs"]
 mod session_message;
+// #6467 — « Lire » un artiste : jusqu'à 50 de ses titres, au hasard.
+#[path = "playback/lire_artiste_6467.rs"]
+mod lire_artiste_6467;
+#[cfg(test)]
+#[path = "playback/lire_artiste_6467_tests.rs"]
+mod lire_artiste_6467_tests;
 #[cfg(test)]
 #[path = "playback/titre_seul_album_5372_tests.rs"]
 mod titre_seul_album_5372_tests;
@@ -1087,6 +1093,13 @@ struct PlayRequest {
     // le client l'ENONCER ; ils priment sur toute deduction.
     context_type: Option<String>,
     context_id: Option<String>,
+    /// #6467 — « Lire » un artiste de la BIBLIOTHÈQUE : le serveur tire au
+    /// hasard jusqu'à 50 de ses titres (bannis écartés) et les joue, contexte
+    /// `artist`. Voir `lire_artiste_6467`.
+    artist_id: Option<i64>,
+    /// #6467 — moins que 50 titres pour `artist_id`, si le client le veut.
+    /// Jamais plus : la borne est celle du fil 2302.
+    artist_limit: Option<usize>,
     /// Web#1923, web#1924 : la page de l'album d'un titre Bandcamp lancé SEUL
     /// (`source` + `source_id`), quand le client la connaît (recherche, page
     /// d'artiste, genres). Rangée avec la ligne de file si elle est sûre
@@ -1187,6 +1200,14 @@ fn contexte_de_lecture(body: &PlayRequest) -> (Option<String>, Option<String>, O
             "playlist".to_string().into(),
             Some(id.clone()),
             Some(service.clone()),
+        );
+    }
+    // #6467 — « Lire » un artiste de la bibliothèque.
+    if let Some(id) = body.artist_id {
+        return (
+            "artist".to_string().into(),
+            Some(id.to_string()),
+            Some(LOCAL.to_string()),
         );
     }
     if let Some(id) = body.album_id {
@@ -2981,6 +3002,7 @@ async fn play(
     // le démarrage a restaurée. Relevé AVANT la résolution : la chaîne
     // ci-dessous consomme `body`.
     let demande_nue = body.album_id.is_none()
+        && body.artist_id.is_none()
         && body.playlist_id.is_none()
         && body.track_ids.is_none()
         && body.start_index.is_none();
@@ -3055,6 +3077,16 @@ async fn play(
             },
             Err(r) => return r,
         }
+    } else if let Some(artist_id) = body.artist_id {
+        // #6467 — jusqu'à 50 titres de l'artiste, au hasard. Un `start_index`
+        // n'a pas de sens sur un tirage : la lecture part du premier tiré.
+        body.start_index = None;
+        lire_artiste_6467::pistes_d_artiste_au_hasard(
+            &state,
+            artist_id,
+            profile.id(),
+            body.artist_limit,
+        )
     } else if let Some(ids) = body.track_ids {
         ids
     } else if let Some(id) = body.track_id {
