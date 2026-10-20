@@ -1566,6 +1566,89 @@ pub mod sql {
     }
 }
 
+/// #6222 (fil 2247, rc4 Windows) — un album d'UN seul disque dont au moins
+/// deux pistes portent le même numéro se lit dans l'ordre de ses FICHIERS.
+///
+/// Décision de Bertrand du 20/10/2026 : « Si un album d'un seul disque a des
+/// numéros de piste en double, Tune trie par chemin de fichier, en ordre
+/// naturel (insensible à la casse, comme l'explorateur) ; sinon, rien ne
+/// change (disque, puis numéro, puis titre). »
+///
+/// Le cas du testeur : une « compilation personnelle », un dossier de fichiers
+/// venus d'albums différents. Chacun garde le numéro de son album d'origine
+/// (balises d'origine, confirmé le 13/10) : l'ordre « disque, numéro, titre »
+/// de [`sql::ORDRE_DANS_L_ALBUM`] donnait « 1, 1, 1, 2, 2… », illisible, là où
+/// l'explorateur montre l'ordre des noms de fichier.
+///
+/// Les entrées sont `(disque, numéro, titre)` ; un disque NULL ou 0 est le
+/// disque 1, comme dans [`sql::ORDRE_DANS_L_ALBUM`]. Il faut :
+///
+/// - un seul disque : un coffret garde son ordre par disque, ses numéros qui
+///   se répètent d'un CD à l'autre sont attendus (#4471) ;
+/// - deux pistes de même numéro (> 0) et de titres DIFFÉRENTS (sans casse ni
+///   blancs de bord, la clé de [`dedup_display_tracks`]). Deux pistes de même
+///   numéro et de même titre sont deux copies d'un même morceau — le rip AIFF
+///   et la copie AAC de #1362 — que l'écran replie déjà : elles ne font pas
+///   d'un album normal une compilation, et ne bouleversent donc pas son ordre.
+pub fn album_en_ordre_de_fichiers<'a>(
+    pistes: impl IntoIterator<Item = (i32, i32, &'a str)>,
+) -> bool {
+    let mut disque_vu: Option<i32> = None;
+    let mut titre_par_numero: HashMap<i32, String> = HashMap::new();
+    let mut doublon = false;
+    for (disque, numero, titre) in pistes {
+        let disque = if disque <= 0 { 1 } else { disque };
+        match disque_vu {
+            Some(d) if d != disque => return false,
+            _ => disque_vu = Some(disque),
+        }
+        if numero <= 0 || doublon {
+            continue;
+        }
+        let titre = titre.trim().to_lowercase();
+        match titre_par_numero.get(&numero) {
+            Some(premier) => doublon |= *premier != titre,
+            None => {
+                titre_par_numero.insert(numero, titre);
+            }
+        }
+    }
+    doublon
+}
+
+/// Trie `pistes` par chemin de fichier en ordre naturel
+/// ([`crate::upnp_server::comparer_naturel`] : sans casse ni accents, « 2 »
+/// avant « 10 », l'ordre des dossiers de la vue Répertoires et du serveur
+/// média). Le tri est STABLE : les tranches d'une même feuille CUE, qui
+/// partagent un fichier, gardent l'ordre reçu. Une piste sans chemin passe
+/// en dernier.
+fn trier_par_chemin<T>(pistes: &mut [T], chemin: impl Fn(&T) -> Option<&str>) {
+    pistes.sort_by(|a, b| match (chemin(a), chemin(b)) {
+        (Some(x), Some(y)) => crate::upnp_server::comparer_naturel(x, y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+}
+
+/// Le chemin qui ordonne une piste : son fichier, ou celui de sa feuille CUE.
+fn chemin_d_ordre(t: &Track) -> Option<&str> {
+    t.file_path.as_deref().or(t.cue_media_path.as_deref())
+}
+
+/// Applique [`album_en_ordre_de_fichiers`] aux pistes d'UN album déjà rangées
+/// dans l'ordre de [`sql::ORDRE_DANS_L_ALBUM`] (#6222). Sans numéro en double,
+/// rien ne bouge. Aucune requête : la décision se prend sur la liste chargée.
+pub fn ordonner_pistes_d_un_album(pistes: &mut [Track]) {
+    if album_en_ordre_de_fichiers(
+        pistes
+            .iter()
+            .map(|t| (t.disc_number, t.track_number, t.title.as_str())),
+    ) {
+        trier_par_chemin(pistes, chemin_d_ordre);
+    }
+}
+
 /// Collapse content-duplicate tracks for DISPLAY, preserving order.
 ///
 /// When a user keeps real duplicate files on disk (e.g. a track copied from a
@@ -1599,9 +1682,32 @@ pub fn dedup_display_tracks(tracks: Vec<Track>) -> Vec<Track> {
             t.bit_depth.map(i64::from),
         )
     }
+    // #6222 — dans un album en ordre de fichiers (un disque, numéros en
+    // double), le numéro ne désigne plus une place de l'album mais celle
+    // d'un album d'ORIGINE : deux versions d'un même morceau reprises de
+    // deux albums (« Yesterday » des Beatles et sa reprise, toutes deux
+    // n° 13) partagent alors disque, numéro et titre sans être des copies.
+    // Leurs fichiers diffèrent : aucune ne se replie.
+    let mut par_album: HashMap<Option<i64>, Vec<(i32, i32, &str)>> = HashMap::new();
+    for t in &tracks {
+        par_album.entry(t.album_id).or_default().push((
+            t.disc_number,
+            t.track_number,
+            t.title.as_str(),
+        ));
+    }
+    let sans_repli: HashSet<Option<i64>> = par_album
+        .into_iter()
+        .filter(|(_, pistes)| album_en_ordre_de_fichiers(pistes.iter().copied()))
+        .map(|(album, _)| album)
+        .collect();
     let mut place: HashMap<(Option<i64>, String), usize> = HashMap::new();
     let mut out: Vec<Track> = Vec::with_capacity(tracks.len());
     for t in tracks {
+        if sans_repli.contains(&t.album_id) {
+            out.push(t);
+            continue;
+        }
         let key = (
             t.album_id,
             format!(
@@ -2497,13 +2603,19 @@ impl TrackRepo {
         self.db.write_tx(&mut |tx| {
             let _ = tx.execute(&figer, &[]);
             *count_ref = tx.execute(sql::delete_all(), &[])? as u64;
-            let _ = tx.execute("DELETE FROM albums", &[]);
-            let _ = tx.execute("DELETE FROM artists", &[]);
-            let _ = tx.execute("DELETE FROM track_credits", &[]);
+            // #5974 — chaque DELETE propage son erreur. Avalés (`let _ =`),
+            // un `DELETE FROM albums` en échec (index `albums_fts` de la rc2,
+            // #5919) laissait les albums en base, titre et dossier compris,
+            // et la route répondait `ok: true` : le scan suivant rattachait
+            // les fichiers de ces dossiers aux anciens titres. Une erreur
+            // annule maintenant toute la transaction, pistes comprises.
+            tx.execute("DELETE FROM albums", &[])?;
+            tx.execute("DELETE FROM artists", &[])?;
+            tx.execute("DELETE FROM track_credits", &[])?;
             // Clear local (track-backed) queue entries too — CASCADE is missing
             // on migrated DBs, so wiping the library must not leave a queue
             // pointing at deleted tracks (JP Borderies).
-            let _ = tx.execute("DELETE FROM queue_items WHERE track_id IS NOT NULL", &[]);
+            tx.execute("DELETE FROM queue_items WHERE track_id IS NOT NULL", &[])?;
             Ok(())
         })?;
         Ok(count)
@@ -3036,11 +3148,50 @@ impl TrackRepo {
         Ok(())
     }
 
+    /// Les pistes d'un album dans l'ordre de la fiche : [`sql::ORDRE_DANS_L_ALBUM`],
+    /// ou l'ordre des fichiers quand l'album a des numéros en double (#6222,
+    /// [`ordonner_pistes_d_un_album`]). La fiche, « jouer l'album », la file,
+    /// l'ajout à une playlist et le serveur média passent tous par ici : ce qui
+    /// s'affiche est ce qui se joue.
     pub fn list_by_album(&self, album_id: i64) -> Result<Vec<Track>, TuneError> {
         let sql = self.dialect_sql(sql::list_by_album, sql::list_by_album);
         let params: [&dyn ToSqlValue; 1] = [&album_id];
         let rows = self.db.query_many_strong(&sql, &params)?;
-        Ok(rows.iter().map(row_to_track).collect())
+        let mut pistes: Vec<Track> = rows.iter().map(row_to_track).collect();
+        ordonner_pistes_d_un_album(&mut pistes);
+        Ok(pistes)
+    }
+
+    /// #6222 — l'album entier est-il en ordre de fichiers
+    /// ([`album_en_ordre_de_fichiers`]) ? Une requête par ALBUM, trois
+    /// colonnes : la fiche filtrée par qualité en a besoin, parce que les
+    /// seules pistes retenues par le filtre ne disent pas si l'album a des
+    /// numéros en double, et la fiche filtrée doit garder l'ordre relatif de
+    /// la fiche entière.
+    fn album_entier_en_ordre_de_fichiers(&self, album_id: i64) -> Result<bool, TuneError> {
+        let p1 = match self.db.engine() {
+            Engine::Postgres => "$1",
+            Engine::Sqlite => "?1",
+        };
+        let sql = format!(
+            "SELECT CAST(disc_number AS INTEGER), CAST(track_number AS INTEGER), title \
+             FROM tracks WHERE album_id = {p1}"
+        );
+        let params: [&dyn ToSqlValue; 1] = [&album_id];
+        let rows = self.db.query_many_strong(&sql, &params)?;
+        let cles: Vec<(i32, i32, String)> = rows
+            .iter()
+            .map(|cols| {
+                (
+                    cols.first().and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                    cols.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    cols.get(2).and_then(|v| v.as_string()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        Ok(album_en_ordre_de_fichiers(
+            cles.iter().map(|(d, n, t)| (*d, *n, t.as_str())),
+        ))
     }
 
     /// Hydrate tracks for a set of ids in ONE query. Order is not preserved
@@ -3077,7 +3228,8 @@ impl TrackRepo {
     }
 
     /// `(piste, album)` pour les pistes des albums donnés, chaque album dans
-    /// l'ordre de [`Self::list_by_album`] (disque, numéro, titre) — en UNE
+    /// l'ordre de [`Self::list_by_album`] (disque, numéro, titre, ou les
+    /// fichiers si numéros en double, #6222) — en UNE
     /// requête, là où un genre de mille albums en coûterait mille. L'ordre
     /// ENTRE albums est celui de l'appelant, qui regroupe. Mêmes identifiants
     /// en ligne que [`Self::list_by_ids`], pour la même raison.
@@ -3090,20 +3242,61 @@ impl TrackRepo {
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        // #6222 — disque, numéro, titre et chemin suivent l'identifiant, pour
+        // que chaque album passe par la même règle que [`Self::list_by_album`]
+        // (ordre des fichiers si numéros en double), sans requête de plus.
         let sql = format!(
-            "SELECT t.id, t.album_id FROM tracks t WHERE t.album_id IN ({id_list}) \
+            "SELECT t.id, t.album_id, CAST(t.disc_number AS INTEGER), \
+             CAST(t.track_number AS INTEGER), t.title, \
+             COALESCE(t.file_path, t.cue_media_path) \
+             FROM tracks t WHERE t.album_id IN ({id_list}) \
              ORDER BY {}, t.id",
             sql::ORDRE_DANS_L_ALBUM
         );
         let rows = self.db.query_many(&sql, &[])?;
-        Ok(rows
-            .iter()
-            .filter_map(|cols| {
-                let piste = cols.first().and_then(|v| v.as_i64())?;
-                let album = cols.get(1).and_then(|v| v.as_i64())?;
-                Some((piste, album))
-            })
-            .collect())
+        struct Ligne {
+            piste: i64,
+            disque: i32,
+            numero: i32,
+            titre: String,
+            chemin: Option<String>,
+        }
+        let mut ordre_des_albums: Vec<i64> = Vec::new();
+        let mut par_album: HashMap<i64, Vec<Ligne>> = HashMap::new();
+        for cols in &rows {
+            let (Some(piste), Some(album)) = (
+                cols.first().and_then(|v| v.as_i64()),
+                cols.get(1).and_then(|v| v.as_i64()),
+            ) else {
+                continue;
+            };
+            let lignes = par_album.entry(album).or_insert_with(|| {
+                ordre_des_albums.push(album);
+                Vec::new()
+            });
+            lignes.push(Ligne {
+                piste,
+                disque: cols.get(2).and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                numero: cols.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                titre: cols.get(4).and_then(|v| v.as_string()).unwrap_or_default(),
+                chemin: cols.get(5).and_then(|v| v.as_string()),
+            });
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        for album in ordre_des_albums {
+            let Some(mut lignes) = par_album.remove(&album) else {
+                continue;
+            };
+            if album_en_ordre_de_fichiers(
+                lignes
+                    .iter()
+                    .map(|l| (l.disque, l.numero, l.titre.as_str())),
+            ) {
+                trier_par_chemin(&mut lignes, |l| l.chemin.as_deref());
+            }
+            out.extend(lignes.into_iter().map(|l| (l.piste, album)));
+        }
+        Ok(out)
     }
 
     /// Like `list_by_album` but restricted to tracks matching an active
@@ -3147,7 +3340,13 @@ impl TrackRepo {
         let sql = base.replacen(" ORDER BY", &format!("{extra} ORDER BY"), 1);
         let params: [&dyn ToSqlValue; 1] = [&album_id];
         let rows = self.db.query_many_strong(&sql, &params)?;
-        Ok(rows.iter().map(row_to_track).collect())
+        let mut pistes: Vec<Track> = rows.iter().map(row_to_track).collect();
+        // #6222 — la décision se prend sur l'album ENTIER : la fiche filtrée
+        // est une sous-suite de la fiche, dans le même ordre.
+        if pistes.len() > 1 && self.album_entier_en_ordre_de_fichiers(album_id)? {
+            trier_par_chemin(&mut pistes, chemin_d_ordre);
+        }
+        Ok(pistes)
     }
 
     pub fn list_by_artist(&self, artist_id: i64) -> Result<Vec<Track>, TuneError> {
@@ -7177,3 +7376,7 @@ mod tests_facettes_en_et_2108 {
 #[cfg(test)]
 #[path = "track_repo_repertoires_5998_tests.rs"]
 mod repertoires_5998_tests;
+
+#[cfg(test)]
+#[path = "track_repo_ordre_fichiers_6222_tests.rs"]
+mod ordre_fichiers_6222_tests;

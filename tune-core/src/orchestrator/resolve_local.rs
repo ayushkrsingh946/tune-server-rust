@@ -215,7 +215,12 @@ fn reconnaitre_les_sorties(
     // prepends a simple 44-byte PCM header that the local parser handles
     // correctly.  The overhead is negligible (memcpy, no re-encoding).
     let is_local_output = est_sortie_locale(req.output_device_id.as_deref());
-    let local_needs_wav = is_local_output && source_format.is_some();
+    // #6370 — la sortie d'un agent Tune est une sortie locale, de l'autre côté
+    // du réseau : relancée à une position, elle reçoit le même WAV décodé à
+    // partir de `seek_ms` (voir [`agent_relance_a_la_position`]).
+    let local_needs_wav = (is_local_output
+        || agent_relance_a_la_position(req.output_device_id.as_deref(), req.seek_ms))
+        && source_format.is_some();
 
     // Calculé ici, et non plus après la branche DoP : celle-ci en a besoin
     // pour servir du DoP à un renderer réseau (#1772). Ne dépend que de

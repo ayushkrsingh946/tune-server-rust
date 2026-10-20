@@ -511,10 +511,14 @@ impl PlaybackOrchestrator {
             .output_device_id
             .as_deref()
             .is_some_and(|id| id.starts_with("oaat:") || id.starts_with("oaat-group:"));
+        // #6370 — une sortie d'agent relancée à une position reçoit, comme
+        // une sortie locale, le WAV décodé à partir de `seek_ms` : le
+        // mandataire du CDN, lui, la servirait depuis l'octet 0.
         let is_local_stream = req
             .output_device_id
             .as_deref()
-            .is_some_and(|id| id.starts_with("local:"));
+            .is_some_and(|id| id.starts_with("local:"))
+            || agent_relance_a_la_position(req.output_device_id.as_deref(), req.seek_ms);
 
         // Local and OAAT outputs expect raw PCM in a WAV container.
         // Streaming services deliver compressed audio (FLAC, AAC, etc.)

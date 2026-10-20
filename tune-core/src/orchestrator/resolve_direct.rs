@@ -640,6 +640,36 @@ impl PlaybackOrchestrator {
         let cover_url = req.cover_url.clone();
         let duration_ms = req.duration_ms;
         let source = source_apparente;
+        // #6471 (FabienM, fil 2302 point 17) — une PAGE de piste Bandcamp au
+        // lieu d'une URL de flux : c'est ce que nomme une version Bandcamp des
+        // « Autres versions ». On lit la page pour en tirer le flux du jour, et
+        // la page devient la référence qui permettra de le resigner. Si la
+        // page ne donne rien, on refuse en le disant : l'envoyer à la sortie
+        // lui ferait lire du HTML.
+        let flux_de_page: Option<(String, String)> = if source == "bandcamp"
+            && super::bandcamp_resignature::est_une_page_de_piste_bandcamp(audio_url)
+        {
+            match super::bandcamp_resignature::flux_de_la_page_de_piste(&self.services, audio_url)
+                .await
+            {
+                Ok(flux) => {
+                    info!(zone_id = req.zone_id, page = %audio_url, "bandcamp_page_de_piste_resolue");
+                    Some((flux, audio_url.to_string()))
+                }
+                Err(e) => {
+                    warn!(zone_id = req.zone_id, page = %audio_url, error = %e, "bandcamp_page_de_piste_illisible");
+                    return Err(format!(
+                        "Lecture impossible : la page Bandcamp {audio_url} ne donne pas de flux jouable ({e})"
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let audio_url: &str = flux_de_page
+            .as_ref()
+            .map(|(flux, _)| flux.as_str())
+            .unwrap_or(audio_url);
         // La qualité Bandcamp est LUE DANS L'URL, jamais déduite du nom du
         // service. L'écoute libre est du `mp3-128` ; un fichier ACHETÉ entre
         // par la même porte en `flac`, `alac` ou `mp3-320`, et l'étiqueter
@@ -687,6 +717,7 @@ impl PlaybackOrchestrator {
             req.album_ref
                 .clone()
                 .filter(|r| !r.trim().is_empty())
+                .or_else(|| flux_de_page.as_ref().map(|(_, page)| page.clone()))
                 .or_else(|| {
                     crate::db::reference_d_album::reference_d_album_bandcamp(&self.db, audio_url)
                 })
