@@ -2034,7 +2034,6 @@ impl StreamingService for TidalService {
         };
 
         let audio_quality = data["audioQuality"].as_str().unwrap_or("LOSSLESS");
-        let (sample_rate, bit_depth) = Self::parse_quality_metadata(&data, audio_quality);
 
         // Determine codec: prefer the manifest's own codec (DASH or BTS), then
         // fall back to audio quality level.
@@ -2062,6 +2061,23 @@ impl StreamingService for TidalService {
                 "HI_RES_LOSSLESS" | "HI_RES" | "LOSSLESS" => "FLAC",
                 _ => "AAC",
             }
+        };
+
+        // #6334 — un AAC n'a pas de profondeur de bits : 0, jamais le 16 d'un
+        // FLAC CD (`parse_quality_metadata` retombait sur `(44100, 16)` faute
+        // de `bitDepth`). La cadence reste celle que Tidal annonce, sinon
+        // 44,1 kHz, celle de ses AAC.
+        let (sample_rate, bit_depth) = if codec == "AAC" {
+            (
+                data["sampleRate"]
+                    .as_u64()
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| *v > 0)
+                    .unwrap_or(44_100),
+                0,
+            )
+        } else {
+            Self::parse_quality_metadata(&data, audio_quality)
         };
 
         // Determine MIME type: prefer the manifest (DASH or BTS), then derive
@@ -2099,7 +2115,7 @@ impl StreamingService for TidalService {
                 .as_u64()
                 .map(|_| sample_rate * (bit_depth as u32) * 2)
         } else {
-            Some(320_000) // AAC HIGH = 320kbps
+            debit_aac_de_tidal(audio_quality)
         };
 
         // Cache all URLs including file:// from DASH — prevents double-download
@@ -2636,6 +2652,17 @@ impl StreamingService for TidalService {
 }
 
 /// Rank audio quality levels for comparison. Higher = better.
+/// #6334 — le débit d'un AAC Tidal, tel que l'API le définit pour sa
+/// qualité : `HIGH` = 320 kbit/s, `LOW` = 96 kbit/s. Rien pour un AAC rendu
+/// sous une autre étiquette : un chiffre inventé n'est pas un débit nommé.
+fn debit_aac_de_tidal(audio_quality: &str) -> Option<u32> {
+    match audio_quality {
+        "HIGH" => Some(320_000),
+        "LOW" => Some(96_000),
+        _ => None,
+    }
+}
+
 /// #6334 — `codecs` et `mimeType` d'un manifeste BTS déjà décodé.
 fn codec_et_mime_du_manifeste_bts(
     manifeste: &serde_json::Value,

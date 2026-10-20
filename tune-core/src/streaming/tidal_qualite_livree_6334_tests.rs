@@ -264,3 +264,51 @@ fn le_codec_annonce_est_celui_du_manifeste() {
         Some("flac")
     );
 }
+
+/// Défaut 3 : un AAC était étiqueté 16 bits / 44,1 kHz, comme un FLAC CD
+/// (`parse_quality_metadata` retombait sur `(44100, 16)` sans `bitDepth`).
+/// Un AAC n'a pas de profondeur : 0 ; son débit est celui que nomme `HIGH`.
+#[tokio::test]
+async fn un_aac_n_a_pas_de_profondeur_de_bits_et_porte_son_debit() {
+    let scenario = HashMap::from([(
+        "HIGH",
+        lecture_bts("HIGH", "audio/mp4", "mp4a.40.2", URL_AAC),
+    )]);
+    let (svc, _) = faux_tidal(scenario).await;
+    let flux = svc
+        .get_track_url("29113109", Some("HIGH"))
+        .await
+        .expect("un flux");
+    assert_eq!(flux.quality.codec, "AAC");
+    assert_eq!(
+        flux.quality.bit_depth, 0,
+        "un AAC n'a pas de profondeur : 16 bits est celle d'un FLAC CD"
+    );
+    assert_eq!(flux.quality.sample_rate, 44_100);
+    assert_eq!(flux.quality.bitrate, Some(320_000));
+    assert!(flux.quality.avec_perte());
+}
+
+/// Un FLAC CD garde ses 16 bits / 44,1 kHz : seul l'AAC perd sa profondeur.
+#[tokio::test]
+async fn un_flac_cd_garde_ses_16_bits() {
+    let scenario = HashMap::from([(
+        "LOSSLESS",
+        lecture_bts("LOSSLESS", "audio/flac", "flac", URL_FLAC),
+    )]);
+    let (svc, _) = faux_tidal(scenario).await;
+    let flux = svc
+        .get_track_url("29113109", Some("LOSSLESS"))
+        .await
+        .expect("un flux");
+    assert_eq!(flux.quality.codec, "FLAC");
+    assert_eq!((flux.quality.sample_rate, flux.quality.bit_depth), (44_100, 16));
+}
+
+/// Un AAC livré sous une étiquette sans perte n'hérite d'aucun débit inventé.
+#[test]
+fn le_debit_aac_n_est_nomme_que_par_high_et_low() {
+    assert_eq!(debit_aac_de_tidal("HIGH"), Some(320_000));
+    assert_eq!(debit_aac_de_tidal("LOW"), Some(96_000));
+    assert_eq!(debit_aac_de_tidal("LOSSLESS"), None);
+}

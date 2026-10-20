@@ -180,6 +180,20 @@ fn default_channels() -> u16 {
     2
 }
 
+impl StreamQuality {
+    /// #6334 — le codec livré est-il avec perte (AAC, MP3, Ogg, Opus) ? Sa
+    /// profondeur de bits n'existe pas alors : un AAC n'a pas « 16 bits »,
+    /// et `bit_depth` vaut 0 sans que la qualité soit pour autant incomplète.
+    /// Faux pour un codec inconnu ou ambigu (M4A) : on ne conclut rien.
+    pub fn avec_perte(&self) -> bool {
+        use crate::audio::formats::AudioFormat;
+        matches!(
+            AudioFormat::from_extension(&self.codec),
+            Some(AudioFormat::Aac | AudioFormat::Mp3 | AudioFormat::Ogg | AudioFormat::Opus)
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamUrl {
     pub url: String,
