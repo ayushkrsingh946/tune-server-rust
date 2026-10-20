@@ -1719,3 +1719,10 @@ required-features = ["postgres"]
 [[test]]
 name = "services_remplacables_6336"
 path = "tests/services_remplacables_6336.rs"
+
+# #6336 (suite) — le battement de la licence et la liaison SSO du serveur au
+# compte, contre un faux mozaiklabs déclaré par `services_factices`
+# (`substituer_base`). Binaire à lui seul pour la même raison.
+[[test]]
+name = "licence_sso_remplacables_6336"
+path = "tests/licence_sso_remplacables_6336.rs"
