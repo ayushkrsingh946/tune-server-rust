@@ -2035,6 +2035,12 @@ mod mesure_saut_cd_5079;
 #[cfg(test)]
 mod qobuz_cadence_nulle_5283_tests;
 
+/// #6401 — le préchargement sans blanc et la sonde de niveaux après une
+/// avance sans blanc passent par le même repli Qobuz en 16/44,1 que la
+/// lecture.
+#[cfg(test)]
+mod qobuz_repli_prechargement_6401_tests;
+
 /// #4384 — la crête d'une zone locale se lit après son DSP.
 #[cfg(test)]
 mod crete_apres_dsp_4384;
@@ -2147,6 +2153,8 @@ mod curseur_intact_4283;
 /// reprise rétablit à la position au lieu de reprendre « sur place ».
 #[cfg(test)]
 mod pause_rend_le_peripherique_4177;
+#[cfg(test)]
+mod reprise_nouveau_flux_6264_tests;
 
 /// Fil 2095 — le rétablissement d'une session morte ramène le renderer
 /// réseau à la position de la pause.

@@ -2171,6 +2171,9 @@ impl PlaybackOrchestrator {
                     // Built at the resolved stream's rate/channel count so the
                     // biquads match the DAC clock, mirroring the crossfeed.
                     let eq_ch = media.channels.unwrap_or(2).clamp(1, 8) as u16;
+                    // #6211 — une radio n'a pas de piste suivante : le
+                    // préampli gardé d'un égaliseur coupé s'y éteint en fondu.
+                    local_output.set_flux_sans_fin(media.live_stream);
                     local_output.set_eq(self.load_eq_processor(zone_id, cf_sr, eq_ch));
                     // Repli mono (#2362) — sortie LOCALE uniquement, comme le
                     // crossfeed juste au-dessus. `zone_mono_downmix` rend
@@ -3070,6 +3073,25 @@ impl PlaybackOrchestrator {
                     position_ms, "resume_after_exclusive_device_released"
                 );
             }
+            // #6264 — un lecteur qui relit mal sa mémoire après une longue
+            // pause (Eversolo DMP-A8, bruit blanc) : la zone qui l'arme reprend
+            // par un NOUVEAU flux, à la position, comme après une session
+            // morte. Le `Play` sur place lui faisait rejouer sa mémoire.
+            let pause = state.paused_at.map(|t| t.elapsed());
+            let memoire_du_lecteur_douteuse =
+                crate::audio::reprise_nouveau_flux::relancer_par_nouveau_flux(
+                    crate::audio::reprise_nouveau_flux::seuil_de_la_zone(&self.db, zone_id),
+                    pause,
+                );
+            if memoire_du_lecteur_douteuse {
+                info!(
+                    zone_id,
+                    position_ms,
+                    pause_s = pause.map(|p| p.as_secs()),
+                    "reprise_par_nouveau_flux_apres_longue_pause"
+                );
+            }
+            let peripherique_rendu = peripherique_rendu || memoire_du_lecteur_douteuse;
             let decision = reprise_de_session(
                 est_radio,
                 rejouable,

@@ -53,14 +53,43 @@ impl PlaybackOrchestrator {
         {
             return Ok(());
         }
-        match self.play_from_queue(zone_id, queue_position).await {
-            Ok(_) => {
+        // #6470 (FabienM, fil 2302 point 16) — une RADIO ou un épisode de
+        // PODCAST ne vit pas dans la file : `play_from_queue` lançait sur la
+        // cible la file qu'elle avait déjà, et la cible jouait (ou affichait)
+        // son dernier morceau au lieu du flux transféré. Le flux est relancé
+        // tel quel sur l'appareil cible.
+        let flux = np.source_id.as_deref().filter(|s| !s.is_empty());
+        let direct = matches!(np.source.as_str(), "radio" | "podcast") && flux.is_some();
+        let lancement = if direct {
+            self.play(super::PlayRequest {
+                zone_id,
+                output_device_id: Some(did.to_string()),
+                source: Some(np.source.clone()),
+                source_id: flux.map(str::to_string),
+                title: Some(np.title.clone()),
+                artist_name: np.artist_name.clone(),
+                album_title: np.album_title.clone(),
+                cover_url: np.cover_path.clone(),
+                duration_ms: Some(np.duration_ms).filter(|d| *d > 0),
+                ..Default::default()
+            })
+            .await
+            .map(|_| ())
+        } else {
+            self.play_from_queue(zone_id, queue_position)
+                .await
+                .map(|_| ())
+        };
+        match lancement {
+            Ok(()) => {
                 // Reprendre à la position de la source. Sous 3 s on repart du
                 // début (même seuil que la route seek) — inutile de chercher
                 // dans un flux qui vient de démarrer.
                 // #4442 — pas un `seek` nu dans la foulée du `Play` : voir
-                // `reprendre_la_position_transferee`.
+                // `reprendre_la_position_transferee`. Une radio en direct n'a
+                // pas de position à reprendre.
                 if source_position_ms > 3000
+                    && np.source != "radio"
                     && let Err(error) = self
                         .reprendre_la_position_transferee(
                             zone_id,
@@ -284,6 +313,37 @@ mod tests {
             !orch.prendre_le_transfert_en_pause(zone_id),
             "le constat ne sert qu'une fois"
         );
+    }
+
+    /// #6470 (fil 2302 point 16) — une RADIO transférée joue sur la cible,
+    /// et non la file que la cible avait déjà. Avant : « le transfert ne se
+    /// fait pas et Tune affiche juste le dernier morceau joué ».
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn une_radio_transferee_joue_le_flux_et_pas_la_file_de_la_cible_6470() {
+        let (orch, zone_id, _) = banc().await;
+        let radio = NowPlaying {
+            title: "Radio Grenouille".into(),
+            source: "radio".into(),
+            source_id: Some("http://127.0.0.1:9/grenouille.mp3".into()),
+            stream_id: Some("session-de-la-source".into()),
+            ..Default::default()
+        };
+        orch.transferer_sur_l_appareil(zone_id, APPAREIL, 0, &radio, 0, false)
+            .await
+            .expect("le transfert aboutit");
+        let titres = {
+            let arc = { orch.outputs.lock().await.get(APPAREIL) }.unwrap();
+            let guard = arc.lock().await;
+            let mock = guard.as_any().downcast_ref::<MockOutput>().unwrap();
+            mock.play_titles().await
+        };
+        assert_eq!(
+            titres,
+            vec!["Radio Grenouille".to_string()],
+            "la cible a lancé sa propre file au lieu de la radio transférée"
+        );
+        let joue = orch.playback.get_state(zone_id).await.now_playing.unwrap();
+        assert_eq!(joue.source, "radio");
     }
 
     /// Une source qui JOUE garde l'ancienne conduite : la cible est lancée.

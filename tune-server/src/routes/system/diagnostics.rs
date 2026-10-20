@@ -2131,6 +2131,44 @@ fn ligne_albums_masques(compte: Option<i64>) -> String {
     }
 }
 
+/// #6378 — les zones masquées, avec leur appareil, leur motif et leur date de
+/// masquage. Le titre `## Zones (N)` ne compte que les zones visibles : un
+/// testeur dont la seule zone était masquée envoyait un « Zones (0) » qui ne
+/// disait rien de la zone qu'il utilisait. Un motif NUL est un masquage
+/// d'avant la migration 112, que la réparation automatique ne touche pas.
+fn lignes_zones_masquees(
+    masquees: &Result<Vec<tune_core::db::zone_repo::ZoneMasquee>, String>,
+) -> String {
+    let liste = match masquees {
+        Ok(liste) => liste,
+        Err(e) => return format!("- Zones masquées : illisibles ({e})\n"),
+    };
+    let mut md = format!("- Zones masquées : {}\n", liste.len());
+    for z in liste {
+        let protocole = if z.protocole.is_empty() {
+            "?"
+        } else {
+            z.protocole.as_str()
+        };
+        let appareil = if z.device_id.is_empty() {
+            "?"
+        } else {
+            z.device_id.as_str()
+        };
+        let motif = z
+            .motif
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or("inconnu (masquage d'avant la migration 112)");
+        let date = z.masquee_le.as_deref().unwrap_or("date inconnue");
+        md.push_str(&format!(
+            "  - zone {} « {} » ({protocole}) — appareil {appareil} — motif : {motif} — masquée le {date}\n",
+            z.id, z.name
+        ));
+    }
+    md
+}
+
 /// Generate a bug report with comprehensive diagnostic data.
 /// Returns JSON that can also be rendered as markdown by the client.
 pub(super) async fn generate_bug_report(State(state): State<AppState>) -> Json<Value> {
@@ -2173,6 +2211,10 @@ pub(super) async fn generate_bug_report(State(state): State<AppState>) -> Json<V
         .iter()
         .map(|z| json!({ "id": z.id, "name": z.name, "output_type": z.output_type }))
         .collect();
+    // #6378 — `count()` et `list()` ignorent les zones masquées : sans cette
+    // lecture, « Zones (0) » ne distingue pas « aucune zone » de « la seule
+    // zone utilisée est masquée ».
+    let zones_masquees = zone_repo.zones_masquees();
 
     // Streaming services status
     let registry = state.services.lock().await;
@@ -2363,6 +2405,7 @@ pub(super) async fn generate_bug_report(State(state): State<AppState>) -> Json<V
             z["output_type"].as_str().unwrap_or("?")
         ));
     }
+    md.push_str(&lignes_zones_masquees(&zones_masquees));
     md.push_str(&format!(
         "- Zone settings not persisted: {zone_settings_ignored}\n"
     ));
@@ -2727,6 +2770,18 @@ jamais par bloc. Les echantillons ne sont pas modifies par le comptage)\n\n",
         "zones": {
             "count": zone_count,
             "items": zones,
+            // #6378 — `null` si la table n'a pas pu être lue.
+            "hidden": zones_masquees.as_ref().ok().map(|liste| liste
+                .iter()
+                .map(|z| json!({
+                    "id": z.id,
+                    "name": z.name,
+                    "output_type": z.protocole,
+                    "device_id": z.device_id,
+                    "motif": z.motif,
+                    "masquee_le": z.masquee_le,
+                }))
+                .collect::<Vec<_>>()),
         },
         "zone_settings_ignored": zone_settings_ignored,
         "asio_warm_scan": asio_warm_scan,
@@ -4970,5 +5025,58 @@ mod tests_refus_du_rapport_5590 {
             "{ligne}"
         );
         assert!(!ligne.contains("retry_after"), "{ligne}");
+    }
+}
+
+#[cfg(test)]
+mod zones_masquees_au_rapport_6378 {
+    use super::lignes_zones_masquees;
+    use tune_core::db::zone_repo::ZoneMasquee;
+
+    fn masquee(id: i64, nom: &str, motif: Option<&str>, le: Option<&str>) -> ZoneMasquee {
+        ZoneMasquee {
+            id,
+            name: nom.into(),
+            device_id: format!("uuid:{id}"),
+            protocole: "dlna".into(),
+            host: "10.0.0.3".into(),
+            mac: None,
+            motif: motif.map(Into::into),
+            masquee_le: le.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn chaque_zone_masquee_porte_son_appareil_son_motif_et_sa_date() {
+        let md = lignes_zones_masquees(&Ok(vec![
+            masquee(1, "Diretta Renderer", None, None),
+            masquee(
+                4,
+                "Garage",
+                Some("suppression_utilisateur"),
+                Some("2026-10-12 10:00:00"),
+            ),
+        ]));
+        assert!(md.starts_with("- Zones masquées : 2\n"), "{md}");
+        assert!(
+            md.contains(
+                "zone 1 « Diretta Renderer » (dlna) — appareil uuid:1 — motif : inconnu (masquage d'avant la migration 112) — masquée le date inconnue"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains("zone 4 « Garage » (dlna) — appareil uuid:4 — motif : suppression_utilisateur — masquée le 2026-10-12 10:00:00"),
+            "{md}"
+        );
+        assert!(!md.contains("10.0.0.3"), "l'hôte n'est pas recopié : {md}");
+    }
+
+    #[test]
+    fn aucune_zone_masquee_se_dit_et_une_lecture_ratee_aussi() {
+        assert_eq!(lignes_zones_masquees(&Ok(vec![])), "- Zones masquées : 0\n");
+        assert_eq!(
+            lignes_zones_masquees(&Err("no such column".into())),
+            "- Zones masquées : illisibles (no such column)\n"
+        );
     }
 }

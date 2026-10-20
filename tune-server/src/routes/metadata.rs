@@ -2329,8 +2329,10 @@ async fn fix_genres(State(state): State<AppState>) -> impl IntoResponse {
         .get_credential("lastfm", "api_key")
         .or_else(|| settings.get("lastfm_api_key").ok().flatten())
         .filter(|s| !s.is_empty());
-    let discogs_token = svc_mgr
-        .get_credential("discogs", "token")
+    // #4805 lot 1 : le jeton PERSONNEL d'abord ; le gestionnaire de services
+    // et la configuration ensuite.
+    let discogs_token = crate::routes::discogs::discogs_token(&state)
+        .or_else(|| svc_mgr.get_credential("discogs", "token"))
         .or_else(|| state.config.discogs_token.clone())
         .filter(|s| !s.is_empty());
 
@@ -2557,6 +2559,46 @@ async fn fix_genres(State(state): State<AppState>) -> impl IntoResponse {
     .into_response()
 }
 
+/// #4805 lot 2 (d'après MetaRust, de Xavier Joly) — la pochette en place
+/// est-elle GARDÉE face à `candidate` ? Oui quand c'est le même visuel
+/// (empreinte dHash) sans gain d'au moins 1,4 fois en pixels : la remplacer
+/// ferait perdre de la définition, ou ne changerait rien. Une autre image, ou
+/// la même nettement plus nette, remplace comme avant : cette route est une
+/// demande explicite de nouvelle pochette.
+///
+/// Rend la réponse à servir quand la pochette est gardée.
+fn pochette_en_place_gardee(
+    cover_path: Option<&str>,
+    candidate: &[u8],
+    cache_dir: &std::path::Path,
+    source: &str,
+) -> Option<axum::response::Response> {
+    use tune_core::library::pochette_visuelle::{self, Decision};
+    let en_place = cover_path?;
+    let existante = pochette_visuelle::octets_en_cache(cache_dir, en_place);
+    let decision = pochette_visuelle::decider(existante.as_deref(), candidate);
+    tracing::info!(
+        cover_path = en_place,
+        source,
+        decision = decision.code(),
+        "pochette_decision_visuelle"
+    );
+    match decision {
+        Decision::Garder { distance } => Some(
+            Json(json!({
+                "ok": true,
+                "kept": true,
+                "cover_path": en_place,
+                "source": source,
+                "decision": "meme_visuel",
+                "distance": distance,
+            }))
+            .into_response(),
+        ),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // POST /covers/album/{id} — web client compatibility endpoint
 // ---------------------------------------------------------------------------
@@ -2621,6 +2663,16 @@ async fn fetch_album_cover(
         && let Some(data) = tune_core::library::artwork::fetch_cover_art(mbid_val).await
     {
         let cache_dir = super::library::artwork_cache_dir();
+        // #4805 lot 2 — la même pochette, pas plus nette, ne remplace pas
+        // celle en place (empreinte visuelle, d'après MetaRust).
+        if let Some(gardee) = pochette_en_place_gardee(
+            album.cover_path.as_deref(),
+            &data,
+            &cache_dir,
+            "coverartarchive",
+        ) {
+            return gardee;
+        }
         // Adressage par le CONTENU (#1444). Route de RE-téléchargement
         // (`force_update_cover_path`) : écrire sous `artwork_hash(mbid)`
         // gardait l'adresse déjà distribuée, servie `immutable,
@@ -2645,13 +2697,9 @@ async fn fetch_album_cover(
     }
 
     // Step 3: Try Discogs fallback
-    let discogs_token = state
-        .config
-        .discogs_token
-        .clone()
-        .or_else(|| std::env::var("TUNE_DISCOGS_TOKEN").ok())
-        .or_else(|| std::env::var("DISCOGS_TOKEN").ok())
-        .unwrap_or_default();
+    // #4805 lot 1 : le jeton PERSONNEL d'abord, puis le réglage, la
+    // configuration et l'environnement (`routes::discogs::discogs_token`).
+    let discogs_token = crate::routes::discogs::discogs_token(&state).unwrap_or_default();
 
     if !discogs_token.is_empty() && !album.title.is_empty() {
         let cache_dir = super::library::artwork_cache_dir();
@@ -2684,6 +2732,14 @@ async fn fetch_album_cover(
                     .into_response();
             };
             let cache_dir = super::library::artwork_cache_dir();
+            if let Some(gardee) = pochette_en_place_gardee(
+                album.cover_path.as_deref(),
+                &octets,
+                &cache_dir,
+                "discogs",
+            ) {
+                return gardee;
+            }
             let Some(hash) =
                 tune_core::library::artwork::cache_fetched_image(&octets, &cache_dir, "jpg")
             else {
@@ -2723,13 +2779,9 @@ async fn search_covers(
     State(state): State<AppState>,
     Query(params): Query<CoverSearchParams>,
 ) -> impl IntoResponse {
-    let discogs_token = state
-        .config
-        .discogs_token
-        .clone()
-        .or_else(|| std::env::var("TUNE_DISCOGS_TOKEN").ok())
-        .or_else(|| std::env::var("DISCOGS_TOKEN").ok())
-        .unwrap_or_default();
+    // #4805 lot 1 : le jeton PERSONNEL d'abord, puis le réglage, la
+    // configuration et l'environnement (`routes::discogs::discogs_token`).
+    let discogs_token = crate::routes::discogs::discogs_token(&state).unwrap_or_default();
 
     let cache_dir = super::library::artwork_cache_dir();
     let cache_str = cache_dir.to_string_lossy().to_string();
@@ -3852,6 +3904,55 @@ mod tests_genre_repare_5314 {
             ),
             (Some("Jazz"), Some(r#"["Jazz"]"#)),
             "#5314 : le genre réparé de l'album doit descendre sur sa piste"
+        );
+    }
+}
+
+/// #4805 lot 2 — le re-téléchargement d'une pochette ne remplace pas la même
+/// image par une version moins définie.
+#[cfg(test)]
+mod pochette_visuelle_4805 {
+    use super::pochette_en_place_gardee;
+    use std::io::Cursor;
+
+    fn png(cote: u32, inverse: bool) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(cote, cote, |x, y| {
+            let clair = (x < cote / 2) ^ inverse;
+            let t = (y * 60 / cote) as u8;
+            let v = if clair { 200u8 } else { 20u8 };
+            image::Rgb([v + t / 2, v + t / 2, v + t / 2])
+        });
+        let mut out = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn la_meme_pochette_moins_definie_est_gardee_une_autre_remplace() {
+        let cache = tempfile::tempdir().unwrap();
+        let en_place = png(600, false);
+        let h = tune_core::library::artwork::cache_fetched_image(&en_place, cache.path(), "png")
+            .unwrap();
+        // Même visuel, quatre fois moins de pixels : gardée.
+        assert!(
+            pochette_en_place_gardee(Some(&h), &png(300, false), cache.path(), "coverartarchive")
+                .is_some(),
+            "la même pochette, moins définie, ne doit pas remplacer celle en place"
+        );
+        // Même visuel, quatre fois plus de pixels : remplace.
+        assert!(
+            pochette_en_place_gardee(Some(&h), &png(1200, false), cache.path(), "coverartarchive")
+                .is_none()
+        );
+        // Un autre visuel : remplace (demande explicite).
+        assert!(
+            pochette_en_place_gardee(Some(&h), &png(600, true), cache.path(), "discogs").is_none()
+        );
+        // Pas de pochette en place : remplace.
+        assert!(
+            pochette_en_place_gardee(None, &png(300, false), cache.path(), "discogs").is_none()
         );
     }
 }

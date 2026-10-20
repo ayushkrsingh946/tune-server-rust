@@ -7,7 +7,8 @@ use axum::response::{IntoResponse, Response};
 use tokio::sync::oneshot;
 use tracing::warn;
 
-use crate::state::{PendingResponse, RelayState};
+use crate::state::{Attente, PendingResponse, RelayState};
+use crate::trafic::{Categorie, Erreur};
 
 pub async fn proxy_api(
     State(state): State<Arc<RelayState>>,
@@ -17,10 +18,14 @@ pub async fn proxy_api(
     uri: Uri,
     body: axum::body::Bytes,
 ) -> Response {
+    let debut = std::time::Instant::now();
     // Validate server exists
     let conn = match state.servers.get(&server_id) {
         Some(c) => c,
-        None => return StatusCode::NOT_FOUND.into_response(),
+        None => {
+            state.trafic.erreur(Erreur::ServeurAbsent);
+            return StatusCode::NOT_FOUND.into_response();
+        }
     };
 
     // Auth : jeton de pont, sur son PROPRE en-tete.
@@ -79,20 +84,44 @@ pub async fn proxy_api(
 
     // Register pending response
     let (tx, rx) = oneshot::channel::<PendingResponse>();
-    conn.pending.lock().await.insert(request_id.clone(), tx);
+    conn.pending
+        .lock()
+        .await
+        .insert(request_id.clone(), Attente::nouvelle(tx, Categorie::Api));
+
+    // Ce qui entre : le corps de la requete du navigateur. Ce qui sort : le
+    // message vers le serveur (#6512).
+    let compteurs = conn.trafic.clone();
+    state.trafic.entree(&compteurs, Categorie::Api, body.len());
+    let message = request_msg.to_string();
 
     // Send to server
-    if conn.ws_tx.send(request_msg.to_string()).await.is_err() {
+    if conn.ws_tx.send(message.clone()).await.is_err() {
         conn.pending.lock().await.remove(&request_id);
+        state.trafic.erreur(Erreur::ServeurAbsent);
         return StatusCode::BAD_GATEWAY.into_response();
     }
+    state
+        .trafic
+        .sortie(&compteurs, Categorie::Api, message.len());
 
     drop(conn);
 
     // Wait for response with timeout
     match tokio::time::timeout(Duration::from_secs(30), rx).await {
-        Ok(Ok(resp)) => crate::stream_proxy::reponse_relayee(resp),
+        Ok(Ok(resp)) => crate::stream_proxy::reponse_relayee_comptee(
+            resp,
+            Some(crate::stream_proxy::Comptage {
+                trafic: state.trafic.clone(),
+                serveur: compteurs,
+                categorie: Categorie::Api,
+                cle: path,
+                range: None,
+                debut,
+            }),
+        ),
         Ok(Err(_)) => {
+            state.trafic.erreur(Erreur::CanalRompu);
             warn!(request_id = %request_id, "response channel dropped");
             StatusCode::BAD_GATEWAY.into_response()
         }
@@ -100,6 +129,7 @@ pub async fn proxy_api(
             if let Some(conn) = state.servers.get(&server_id) {
                 conn.pending.lock().await.remove(&request_id);
             }
+            state.trafic.erreur(Erreur::Delai);
             warn!(request_id = %request_id, "relay request timeout (30s)");
             StatusCode::GATEWAY_TIMEOUT.into_response()
         }

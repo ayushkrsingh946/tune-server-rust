@@ -6,6 +6,8 @@ mod admin;
 // et un test qui recopierait la fusion la répliquerait au lieu de la garder.
 pub use admin::peers_payload;
 mod backup;
+// Réglages ▸ Clés d'API (#4805, lot 1 MetaRust).
+pub(crate) mod cles_api;
 mod config;
 // Fil 2145 : « Oublier ce partage » retire ses racines par le MEME chemin.
 pub(crate) use config::{pistes_qui_partiraient, retirer_un_dossier};
@@ -89,6 +91,14 @@ pub fn router() -> Router<AppState> {
             get(config::get_config).patch(config::update_config),
         )
         .route("/settings", get(config::get_settings))
+        // Clés d'API PERSONNELLES (#4805, lot 1 MetaRust) : AcoustID et
+        // Discogs, scellées au repos, jamais rendues en clair.
+        .route("/api-keys", get(cles_api::lister))
+        .route(
+            "/api-keys/{service}",
+            axum::routing::put(cles_api::poser).delete(cles_api::retirer),
+        )
+        .route("/api-keys/{service}/test", post(cles_api::tester))
         .route(
             "/settings/theme",
             axum::routing::put(config::set_theme).get(config::get_theme),

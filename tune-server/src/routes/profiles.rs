@@ -614,21 +614,9 @@ pub(crate) async fn rafraichir_les_miroirs(
 }
 
 /// L'en-tête `X-Tune-Favoris-Miroir` : `aucun`, `echec`, `en_attente` ou `ok`.
+/// La règle vit avec les états (`favorites_mirror::statut_global`, #6369).
 fn statut_des_miroirs(noms: &[String]) -> &'static str {
-    if noms.is_empty() {
-        return "aucun";
-    }
-    let etats: Vec<_> = noms
-        .iter()
-        .map(|n| tune_core::streaming::favorites_mirror::etat(n))
-        .collect();
-    if etats.iter().any(|e| e.statut == "echec") {
-        "echec"
-    } else if etats.iter().any(|e| e.en_attente > 0) {
-        "en_attente"
-    } else {
-        "ok"
-    }
+    tune_core::streaming::favorites_mirror::statut_global(noms)
 }
 
 /// `GET /profiles/{id}/favorites/streaming/miroir` — l'état du miroir de

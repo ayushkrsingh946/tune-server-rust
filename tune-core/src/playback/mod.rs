@@ -1628,6 +1628,16 @@ impl PlaybackManager {
         flux_remplace
     }
 
+    /// Banc seulement : fait remonter la pause de `de` dans le passé.
+    /// `paused_at` est un `Instant` que `tokio::time::pause()` n'atteint pas.
+    #[cfg(test)]
+    pub(crate) async fn vieillir_la_pause_pour_test(&self, zone_id: i64, de: std::time::Duration) {
+        let mut zones = self.zones.lock().await;
+        if let Some(state) = zones.get_mut(&zone_id) {
+            state.paused_at = state.paused_at.and_then(|t| t.checked_sub(de));
+        }
+    }
+
     pub async fn pause(&self, zone_id: i64) {
         let mut zones = self.zones.lock().await;
         if let Some(state) = zones.get_mut(&zone_id) {
@@ -1999,6 +2009,21 @@ impl PlaybackManager {
         // celle d'avant — exactement la vignette étrangère qu'on répare.
         z.session_context_title = context_title;
         z.session_context_cover = context_cover;
+    }
+
+    /// Un nouveau geste de lecture qui ne désigne aucun conteneur — une
+    /// station, un épisode de podcast, une radio d'artiste, un préréglage —
+    /// efface le contexte de session laissé par le geste précédent (#6465).
+    ///
+    /// Seul `POST /zones/{id}/play` posait ce contexte, et les autres routes
+    /// de lecture n'y touchaient pas : l'album joué avant restait la session
+    /// de la zone. L'Historique rangeait alors la radio ou le podcast DANS cet
+    /// album, les titres d'une radio d'artiste s'écrivaient sous lui, et la
+    /// vignette « en cours » renvoyait à lui (`/zones/{id}/album-en-cours`
+    /// lit d'abord le contexte de session). Fil 2302, points 7, 8 et 9.
+    pub async fn effacer_contexte_de_session(&self, zone_id: i64) {
+        self.set_session_context(zone_id, None, None, None, None, None)
+            .await;
     }
 
     /// Observe actual work independently of the displayed media position.

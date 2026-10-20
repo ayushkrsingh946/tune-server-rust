@@ -4415,6 +4415,19 @@ mod tests {
     fn test_db() -> SqliteDb {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
+        // #4319 — le texte libre lit le chef d'orchestre dans ces trois
+        // magasins, qui naissent des migrations et non de `CORE_SCHEMA`.
+        // Le schéma minimal de leurs colonnes lues suffit ici.
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS track_metadata (track_id INTEGER NOT NULL, \
+                 key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (track_id, key)); \
+             CREATE TABLE IF NOT EXISTS album_metadata (album_id INTEGER NOT NULL, \
+                 key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (album_id, key)); \
+             CREATE TABLE IF NOT EXISTS track_credits (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                 track_id INTEGER NOT NULL, artist_id INTEGER, artist_name TEXT NOT NULL, \
+                 role TEXT DEFAULT 'performer', instrument TEXT, position INTEGER DEFAULT 0);",
+        )
+        .unwrap();
         db
     }
 

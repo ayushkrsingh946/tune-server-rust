@@ -302,7 +302,7 @@ pub fn curseur_et_plancher(
     (curseur, plancher)
 }
 
-fn motif(corps: &str) -> Option<String> {
+pub(crate) fn motif(corps: &str) -> Option<String> {
     serde_json::from_str::<Value>(corps)
         .ok()?
         .get("error")?
@@ -451,7 +451,7 @@ fn fin(lots: usize, ecoutes: usize, doublons: i64, raison: &str) -> Issue {
 
 /// Relie le serveur au compte par la route de la copie de bibliothèque, et
 /// relit le jeton. Rend `true` quand un jeton est là.
-async fn relier(
+pub(crate) async fn relier(
     backend: &Arc<dyn DbBackend>,
     http: &reqwest::Client,
     settings: &SettingsRepo,

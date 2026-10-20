@@ -23,6 +23,32 @@ impl Enjambee {
     }
 }
 
+/// Le flux que vise la sonde de niveaux d'une piste de service devenue
+/// courante par avance sans blanc : la qualité de la zone, puis — #6401 — le
+/// même repli Qobuz en 16/44,1 que la lecture. Sans lui, la piste que la
+/// lecture avait repliée au format 6 voyait sa sonde viser le flux HR que le
+/// CDN refuse : aiguilles figées sur toute la piste.
+pub(super) async fn flux_de_la_sonde_de_niveaux(
+    svc: &dyn StreamingService,
+    source: &str,
+    source_id: &str,
+    provider_quality: Option<&str>,
+) -> Option<StreamUrl> {
+    let flux = svc.get_track_url(source_id, provider_quality).await.ok()?;
+    Some(
+        crate::streaming::qobuz_repli_qualite::retenir_le_flux_du_service(
+            source,
+            svc,
+            crate::http::client::shared(),
+            source_id,
+            provider_quality,
+            flux,
+        )
+        .await
+        .flux,
+    )
+}
+
 /// #5143 — LE cœur de « la prochaine piste jouable » : depuis `position`,
 /// les lignes de file bannies pour le profil des sélections automatiques
 /// (locales par `track_id`, de service par `source` + `source_id`), et où
@@ -1116,7 +1142,8 @@ impl PlaybackOrchestrator {
                         let svc = svc.clone();
                         drop(registry);
                         let svc = svc.read().await;
-                        svc.get_track_url(&source_id, provider_quality).await.ok()
+                        flux_de_la_sonde_de_niveaux(&**svc, &source, &source_id, provider_quality)
+                            .await
                     };
                     let Some(data) = resolved else {
                         debug!(zone_id, source = %source, "gapless_streaming_levels_url_unresolved");

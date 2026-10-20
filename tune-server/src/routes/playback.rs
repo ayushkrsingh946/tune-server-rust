@@ -32,7 +32,7 @@ use tune_http_types::panne_sql::OuDefautJournalise;
 use tune_core::db::play_queue_repo::{PlayQueueRepo, QueueInput};
 use tune_core::db::playlist_repo::PlaylistRepo;
 use tune_core::db::track_repo::TrackRepo;
-use tune_core::orchestrator::PlayResult;
+use tune_core::orchestrator::{Enjambee, PlayResult};
 use tune_core::outputs::OutputCommandError;
 use tune_core::streaming::quality::StreamingQualityPreference;
 
@@ -483,7 +483,17 @@ async fn jouer_playlist_mixte(
     if longueur == 0 {
         return (StatusCode::BAD_REQUEST, "no tracks to play").into_response();
     }
-    let depart = start_index.unwrap_or(0).clamp(0, longueur - 1);
+    let mut depart = start_index.unwrap_or(0).clamp(0, longueur - 1);
+    // #6368 — sans `start_index`, la playlist part de sa première ligne NON
+    // bannie ; une ligne désignée se joue même bannie.
+    if start_index.is_none()
+        && let Enjambee::Reprise(p) = state
+            .orchestrator
+            .enjamber_les_pistes_bannies(zone_id, depart)
+            .await
+    {
+        depart = p;
+    }
     // #6526 — sous l'aléatoire, la file neuve part de la ligne lancée.
     let depart = tune_core::playback::melange::sur_file_neuve(
         &state.backend,
@@ -514,6 +524,43 @@ async fn jouer_playlist_mixte(
             persist_queue_async(state, zone_id);
             warn!(zone_id, depart, error = %e, "play_playlist_mixte_echec");
             play_error_response(e, lang)
+        }
+    }
+}
+
+/// #6368 — la première ligne NON bannie de la file à partir de `position`,
+/// pour un départ que l'utilisateur n'a pas choisi (« Lire l'album »). Rend la
+/// position et l'id local de la piste à jouer, ou `None` pour garder le départ :
+/// ligne non bannie, ou tout ce qui reste est banni (on joue alors comme avant,
+/// plutôt que de ne rien jouer sans le dire).
+async fn depart_hors_bannis(
+    state: &AppState,
+    queue_repo: &PlayQueueRepo,
+    zone_id: i64,
+    position: i64,
+) -> Option<(i64, i64)> {
+    match state
+        .orchestrator
+        .enjamber_les_pistes_bannies(zone_id, position)
+        .await
+    {
+        Enjambee::Reprise(p) => {
+            let track_id = queue_repo.get_at(zone_id, p).ok().flatten()?.track_id?;
+            info!(
+                zone_id,
+                depart_demande = position,
+                depart = p,
+                "lecture_part_de_la_premiere_piste_non_bannie"
+            );
+            Some((p, track_id))
+        }
+        Enjambee::Rien => None,
+        Enjambee::FileEpuisee => {
+            info!(
+                zone_id,
+                position, "lecture_contenant_tout_banni_depart_garde"
+            );
+            None
         }
     }
 }
@@ -1059,6 +1106,15 @@ struct PlayRequest {
     /// demande au service une fois la lecture partie.
     album_id_service: Option<String>,
     artist_id_service: Option<String>,
+    /// #6469 — `true` quand ce titre de service est la TÊTE d'une liste dont
+    /// le client enfile lui-même la suite (« Écouter le best of », « Tout
+    /// lire » d'une playlist ou de favoris de service). Le titre ne joue alors
+    /// PAS son album (#5372) : sans cela, le best of d'ABBA jouait la
+    /// compilation d'où venait son premier titre, artistes variés et pochette
+    /// de la compilation sur toute la file (FabienM, fil 2302 point 14).
+    /// Absent ou `false` : le titre lancé seul garde le comportement de #5372.
+    #[serde(default)]
+    queue_follows: bool,
 }
 
 /// Les cinq natures d'objet que l'auditeur peut demander, telles que FabienM
@@ -1584,9 +1640,13 @@ async fn zone_status(State(state): State<AppState>, Path(zone_id): Path<i64>) ->
 #[cfg(test)]
 mod refus_entier_negatif_3966;
 
-/// #4283 — `queue/jump` valide la position avant que le curseur ne bouge.
+#[cfg(test)]
+mod depart_hors_bannis_6368;
 #[cfg(test)]
 mod saut_hors_file_4283;
+/// #4283 — `queue/jump` valide la position avant que le curseur ne bouge.
+#[cfg(test)]
+mod sortie_de_pure_recompose_le_trim_6213;
 
 /// #6526 — l'aléatoire mélange réellement la file.
 #[cfg(test)]
@@ -1939,6 +1999,9 @@ mod refus_de_format_3234 {
             assert_eq!(corps["code"], "spotify_playback_disabled");
             let message = corps["message"].as_str().unwrap_or_default();
             assert!(message.contains(phrase), "{lang} : {message}");
+            // #6396 — la phrase dit OÙ se trouve l'option : « dans les
+            // Réglages » laissait chercher (Lulu, fil 2288).
+            assert!(message.contains("> Spotify"), "{lang} : {message}");
         }
     }
 
@@ -2332,6 +2395,7 @@ async fn play(
         && body.track_ids.is_none()
         && body.streaming_album_id.is_none()
         && body.streaming_playlist_id.is_none()
+        && !body.queue_follows
     {
         let deja = file_deja_chargee(
             queue_repo
@@ -2920,6 +2984,12 @@ async fn play(
         && body.playlist_id.is_none()
         && body.track_ids.is_none()
         && body.start_index.is_none();
+    // #6368 — la ligne de départ a-t-elle été CHOISIE ? Un `start_index`, ou
+    // un `track_id` posé à côté du contenant, désigne une piste précise : elle
+    // se joue même bannie (« un titre banni reste jouable si on le choisit
+    // exprès »). « Lire l'album » ne désigne rien : la lecture part de la
+    // première ligne non bannie, comme l'avance de la file.
+    let depart_choisi = body.start_index.is_some() || body.track_id.is_some();
 
     // #3733 — ce que la demande DÉSIGNAIT, relevé ici parce que la chaîne de
     // résolution ci-dessous consomme `body.track_ids`.
@@ -3178,6 +3248,16 @@ async fn play(
             .orchestrator
             .enjamber_les_serveurs_absents(zone_id, queue_position)
             .await
+    {
+        queue_repo.set_current(zone_id, position).ok();
+        queue_position = position;
+        target_id = track_id;
+    }
+    if !demande_nue
+        && file_conservee.is_none()
+        && !depart_choisi
+        && let Some((position, track_id)) =
+            depart_hors_bannis(&state, &queue_repo, zone_id, queue_position).await
     {
         queue_repo.set_current(zone_id, position).ok();
         queue_position = position;
@@ -6410,6 +6490,9 @@ async fn invoke_zone_pin(
     let Some(pin) = pins.iter().find(|p| p.index == index) else {
         return (StatusCode::NOT_FOUND, "pin not found").into_response();
     };
+    // #6465 — un préréglage est un nouveau geste : il ne garde pas le
+    // contexte (album, playlist) de la lecture précédente.
+    state.playback.effacer_contexte_de_session(zone_id).await;
 
     // Build a play request from the pin
     let output_device_id = get_zone_device_id(&state, zone_id);
@@ -6604,6 +6687,34 @@ async fn set_audiophile(
             })),
         )
             .into_response();
+    }
+
+    // #6213 (GgB, fil 1797) — la sortie du verrou PURE renvoie la consigne de
+    // la zone, trim compris. L'entrée commande 100 % sans trim
+    // (`set_volume_pure_force`) ; à la sortie, rien ne recomposait le trim :
+    // l'appareil gardait ces 100 % jusqu'au prochain mouvement du curseur ou
+    // du trim. Après l'écriture du réglage, pour que `set_volume` ne voie plus
+    // le verrou. Un refus de l'appareil n'annule pas la bascule, déjà écrite :
+    // il est journalisé, et le prochain geste de volume le retentera.
+    if was_full_volume && !will_be_full_volume {
+        let device_id = get_zone_device_id(&state, zone_id);
+        let consigne = state.playback.get_state(zone_id).await.volume;
+        match state
+            .orchestrator
+            .set_volume(zone_id, consigne, device_id.as_deref())
+            .await
+        {
+            Ok(()) => info!(
+                zone_id,
+                consigne, "audiophile_sortie_du_verrou_volume_recompose"
+            ),
+            Err(error) => warn!(
+                zone_id,
+                consigne,
+                error = %error,
+                "audiophile_sortie_du_verrou_volume_non_recompose"
+            ),
+        }
     }
 
     // Repousser l'état vers la sortie qui joue. Sans cet appel, la clé était

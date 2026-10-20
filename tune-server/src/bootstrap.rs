@@ -400,6 +400,11 @@ pub async fn run_with(opts: RunOptions) {
     crate::dossiers_inscriptibles::verifier_ou_sortir(&config);
 
     crate::boot_status::set_phase("base de données");
+    // Le coffre des clés d'API personnelles (#4805, lot 1) : sa clé maîtresse
+    // vit à côté de la base. Posé AVANT tout service qui lirait une clé.
+    tune_core::coffre::installer_le_dossier_du_serveur(tune_core::coffre::dossier_de_la_base(
+        &config.db_path,
+    ));
     let state = AppState::new(&config.db_path, config.port, config.clone())
         .expect("failed to init app state");
 

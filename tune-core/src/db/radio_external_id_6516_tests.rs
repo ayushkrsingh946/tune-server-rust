@@ -115,7 +115,9 @@ fn le_lien_se_pose_se_relit_et_se_retire() {
         repo.get(id).unwrap().unwrap().url,
         "https://icecast.radiofrance.fr/fip-hifi.aac?essai"
     );
+    assert_eq!(repo.lien_annuaire(id).unwrap().as_deref(), Some("S000973"));
     repo.lier_a_l_annuaire(id, None).unwrap();
+    assert_eq!(repo.lien_annuaire(id).unwrap(), None);
     assert!(!repo.liens_annuaire().unwrap().contains_key(&id));
 }
 

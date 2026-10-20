@@ -158,6 +158,89 @@ pub(super) fn telecharger_amont(
     Ok(())
 }
 
+/// Ce que le producteur du canal AAC → WAV reçoit du bras qui l'a monté.
+struct CanalAac {
+    streamer: Arc<AudioStreamer>,
+    session_id: String,
+    /// Le fichier AAC téléchargé, supprimé une fois décodé.
+    fichier: String,
+    cadence: u32,
+    profondeur: u16,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    data_ready: Arc<tokio::sync::Notify>,
+    levels_tx: tokio::sync::mpsc::UnboundedSender<crate::audio::tap::RawWindow>,
+    err_bus: Option<Arc<EventBus>>,
+    zone_id: i64,
+}
+
+/// Décode le fichier AAC dans le canal WAV de la session, puis FERME l'entrée
+/// de la session.
+///
+/// #6298 (pissa7, fil 2261, Tidal sur WiiM) — la fermeture manquait. La
+/// session garde un émetteur de réserve (`_keep_alive_tx`) que seul
+/// `close_sender` lâche : le canal ne finissait donc jamais, `fin_du_canal()`
+/// restait `None`, et le renderer qui rouvre `bytes=0-` en fin de piste
+/// recevait l'en-tête puis attendait 15 s un direct qui ne viendrait plus, au
+/// lieu du 404 de #6050 qui le fait passer à la suivante. Le bras de
+/// streaming principal le faisait déjà (`end_session_input`) ; celui-ci est
+/// aligné, quelle que soit l'issue du décodage. Les octets déjà dans le canal
+/// restent lus jusqu'au bout : seule la FIN est notée.
+async fn produire_le_canal_aac(c: CanalAac) {
+    let CanalAac {
+        streamer,
+        session_id,
+        fichier,
+        cadence,
+        profondeur,
+        tx,
+        data_ready,
+        levels_tx,
+        err_bus,
+        zone_id,
+    } = c;
+    let fp_clone = fichier.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::audio::decode::decode_to_pcm_streaming_seeked(
+            &fp_clone,
+            Some(cadence),
+            Some(2),
+            Some(profondeur),
+            tx,
+            32768,
+            data_ready,
+            levels_tx,
+            0.0,
+        )
+    })
+    .await;
+    let _ = std::fs::remove_file(&fichier);
+    match result {
+        Ok(Ok(_)) => {
+            debug!("streaming_aac_channel_complete");
+        }
+        Ok(Err(e)) => {
+            warn!(error = %e, "streaming_aac_channel_decode_failed");
+            if let Some(ref bus) = err_bus {
+                bus.emit(
+                    "zone.playback_error",
+                    serde_json::json!({
+                        "zone_id": zone_id,
+                        "error": format!("Impossible de décoder la piste : {e}"),
+                    }),
+                );
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "streaming_aac_channel_task_panic");
+        }
+    }
+    streamer.end_session_input(&session_id).await;
+}
+
+#[cfg(test)]
+#[path = "canal_aac_fin_notee_6298_tests.rs"]
+mod canal_aac_fin_notee_6298_tests;
+
 impl PlaybackOrchestrator {
     /// Crée le flux WAV éphémère demandé par un renderer qui parcourt les
     /// radios du MediaServer.
@@ -355,19 +438,17 @@ impl PlaybackOrchestrator {
         // fois au format 6, pour cette piste seulement. Toute re-résolution
         // ultérieure de la piste (URL expirée en cours d'écoute) garde alors
         // le format 6 : la seconde moitié ne repart pas en HR.
-        let mut qualite_de_reresolution = provider_quality.map(str::to_string);
-        if service_name == "qobuz" {
-            let retenu = crate::streaming::qobuz_repli_qualite::retenir_le_flux(
-                &**svc,
-                crate::http::client::shared(),
-                source_id,
-                provider_quality,
-                stream_data,
-            )
-            .await;
-            stream_data = retenu.flux;
-            qualite_de_reresolution = retenu.jeton;
-        }
+        let retenu = crate::streaming::qobuz_repli_qualite::retenir_le_flux_du_service(
+            service_name,
+            &**svc,
+            crate::http::client::shared(),
+            source_id,
+            provider_quality,
+            stream_data,
+        )
+        .await;
+        stream_data = retenu.flux;
+        let qualite_de_reresolution = retenu.jeton;
         // #5283 — une cadence annoncée NULLE (Qobuz `sampling_rate: 0`) est
         // remplacée par l'en-tête du flux, ou le catalogue, avant que quoi
         // que ce soit ne la lise. Sans effet si la qualité annoncée est
@@ -2052,6 +2133,8 @@ impl PlaybackOrchestrator {
             let zone_id = req.zone_id;
             let attach_levels = self.levels_attach_allowed(zone_id);
             let fp = tmp_dl.clone();
+            let streamer = self.streamer.clone();
+            let canal = session_id.clone();
             tokio::spawn(async move {
                 let err_bus = ev_bus.clone();
                 let levels_tx = match ev_bus.filter(|_| attach_levels) {
@@ -2063,44 +2146,19 @@ impl PlaybackOrchestrator {
                         tokio::sync::mpsc::unbounded_channel::<crate::audio::tap::RawWindow>().0
                     }
                 };
-                let fp_clone = fp.clone();
-                let tx_clone = tx.clone();
-                drop(tx);
-                let result = tokio::task::spawn_blocking(move || {
-                    crate::audio::decode::decode_to_pcm_streaming_seeked(
-                        &fp_clone,
-                        Some(sr),
-                        Some(2),
-                        Some(bd),
-                        tx_clone,
-                        32768,
-                        data_ready,
-                        levels_tx,
-                        0.0,
-                    )
+                produire_le_canal_aac(CanalAac {
+                    streamer,
+                    session_id: canal,
+                    fichier: fp,
+                    cadence: sr,
+                    profondeur: bd,
+                    tx,
+                    data_ready,
+                    levels_tx,
+                    err_bus,
+                    zone_id,
                 })
                 .await;
-                let _ = std::fs::remove_file(&fp);
-                match result {
-                    Ok(Ok(_)) => {
-                        debug!("streaming_aac_channel_complete");
-                    }
-                    Ok(Err(e)) => {
-                        warn!(error = %e, "streaming_aac_channel_decode_failed");
-                        if let Some(ref bus) = err_bus {
-                            bus.emit(
-                                "zone.playback_error",
-                                serde_json::json!({
-                                    "zone_id": zone_id,
-                                    "error": format!("Impossible de décoder la piste : {e}"),
-                                }),
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "streaming_aac_channel_task_panic");
-                    }
-                }
             });
 
             let server_ip = self.server_ip();

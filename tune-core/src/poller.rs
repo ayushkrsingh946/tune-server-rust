@@ -434,6 +434,24 @@ const VOLUME_GRACE_SECS: u64 = 5;
 /// fois « personne ne reçoit ce son » et « en lecture ».
 pub const DELAI_SILENCE_ETABLI: Duration = Duration::from_secs(12);
 
+/// #6066 — au-delà de ce volume, des octets tirés d'un flux disent qu'un
+/// lecteur le consomme ; en deçà, ce n'est qu'une SONDE. AVPlayer tire
+/// `bytes=0-1` (deux octets) avant de refuser un flux, un analyseur lit
+/// quelques Kio d'en-tête : rien ne joue pour autant. 16 Kio, c'est 4 s d'une
+/// radio à 32 kb/s, bien moins que ce qu'un lecteur qui joue a tiré au bout de
+/// [`DELAI_SILENCE_ETABLI`].
+///
+/// Partagé, comme le délai, par le poller (abandon d'une lecture sans
+/// destination) et la vue des zones (`browser_unattended`) : ils doivent dire
+/// la même chose au même instant.
+pub const TAILLE_MAXIMALE_D_UNE_SONDE: u64 = 16 * 1024;
+
+/// Ces octets servis prouvent-ils qu'un lecteur consomme le flux ? Jamais
+/// « un octet » (#6066) : une sonde de plage n'est pas une écoute.
+pub fn octets_d_une_ecoute(octets: u64) -> bool {
+    octets > TAILLE_MAXIMALE_D_UNE_SONDE
+}
+
 /// Pure decision predicates extracted **verbatim** from the poller `tick`
 /// loop. They contain no I/O and no state mutation, so they can be unit-tested
 /// against the *real* code path.

@@ -693,6 +693,11 @@ pub struct LocalOutput {
     /// sous PURE la chaîne dit toujours « rien d'armé ». Seuls les réglages
     /// disent ce que PURE contourne. Lu par `signal_path_status`.
     pure_contourne_un_reglage: Arc<AtomicBool>,
+    /// #6211 — la lecture en cours est-elle un flux SANS FIN (radio) ? Posé
+    /// par l'orchestrateur à chaque lecture, d'après `live_stream`. Armé, le
+    /// préampli gardé d'un égaliseur coupé s'éteint en fondu au lieu de
+    /// valoir jusqu'à une piste suivante qui ne viendra pas.
+    flux_sans_fin: AtomicBool,
     /// #3973 — « bit-perfect strict » de la zone qui joue sur cette sortie.
     /// Armé, une conversion de fréquence (ouverture cpal ou changement de
     /// cadence en cours de flux) est REFUSÉE au lieu d'être jouée. Posé par
@@ -1243,6 +1248,7 @@ impl LocalOutput {
             convolver_config: Arc::new(std::sync::Mutex::new(None)),
             convolver: Arc::new(std::sync::Mutex::new(None)),
             pure_bypass: Arc::new(AtomicBool::new(false)),
+            flux_sans_fin: AtomicBool::new(false),
             pure_contourne_un_reglage: Arc::new(AtomicBool::new(false)),
             strict_bitperfect: Arc::new(AtomicBool::new(false)),
             mono_downmix: Arc::new(AtomicBool::new(false)),
@@ -1291,6 +1297,7 @@ impl LocalOutput {
                     .as_ref()
                     .and_then(|p| p.reporter_le_preampli_garde());
             }
+            self.eteindre_si_flux_sans_fin(&mut eq);
             *emplacement = eq;
         }
         self.recalculer_la_compensation();
@@ -1393,11 +1400,31 @@ impl LocalOutput {
                 // #5215 — héritage des filtres ET, si le niveau bouge
                 // (coupure, activation, préampli déplacé), fondu enchaîné de
                 // `RAMPE_DE_BASCULE_MS` au lieu d'une marche instantanée.
-                super::super::audio::eq::EqProcessor::prendre_la_releve(eq, precedent)
+                let mut releve =
+                    super::super::audio::eq::EqProcessor::prendre_la_releve(eq, precedent);
+                self.eteindre_si_flux_sans_fin(&mut releve);
+                releve
             };
         }
         // Verrou relâché : la compensation relit l'égaliseur ET le crossfeed.
         self.recalculer_la_compensation();
+    }
+
+    /// #6211 — dire à la sortie si la lecture qui commence est un flux sans
+    /// fin (radio). Posé AVANT `set_eq` par l'orchestrateur.
+    pub fn set_flux_sans_fin(&self, sans_fin: bool) {
+        self.flux_sans_fin.store(sans_fin, Ordering::Relaxed);
+    }
+
+    /// #6211 (décision du 19/10) — sur un flux sans fin, le préampli gardé
+    /// par un égaliseur coupé s'éteint en fondu ; sur une piste, la règle
+    /// #5215 reste entière (rien ne change).
+    fn eteindre_si_flux_sans_fin(&self, eq: &mut Option<super::super::audio::eq::EqProcessor>) {
+        if self.flux_sans_fin.load(Ordering::Relaxed)
+            && let Some(eq) = eq.as_mut()
+        {
+            eq.eteindre_le_preampli_garde();
+        }
     }
 
     pub fn has_eq(&self) -> bool {

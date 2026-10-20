@@ -622,6 +622,8 @@ mod fusion_tests;
 #[cfg(test)]
 mod identite_appareil_tests;
 #[cfg(test)]
+mod oubli_du_dlna_decouvert_6299;
+#[cfg(test)]
 mod page_d_album_bandcamp_tests;
 #[cfg(test)]
 mod plages_mac_6546_tests;
@@ -1415,7 +1417,8 @@ pub(crate) async fn output_reach(state: &AppState, zone: &Zone, ps: &ZoneState) 
                 .streamer
                 .stream_bytes_sent(sid)
                 .await
-                .is_some_and(|n| n > 0),
+                // #6066 — une sonde de plage n'est pas un onglet qui joue.
+                .is_some_and(tune_core::poller::octets_d_une_ecoute),
             None => false,
         }
     } else {
@@ -1615,6 +1618,8 @@ mod signal_path_reaffectation_6044_tests;
 mod signal_path_pure_replaygain_5633_tests;
 
 // #4384 — ReplayGain sans gain tagué, et où le gain s'applique.
+#[cfg(test)]
+mod signal_path_decodeur_sortie_pull_6178_tests;
 #[cfg(test)]
 mod signal_path_gain_sortie_4384_tests;
 // #6166 — le WAV 32 bits interne d'une sortie locale n'est pas une conversion.

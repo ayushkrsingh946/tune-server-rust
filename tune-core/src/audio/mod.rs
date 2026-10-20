@@ -5,6 +5,8 @@ pub mod analyzer;
 pub mod ape;
 pub mod audiophile;
 pub mod autoeq;
+/// #6388 — la base AutoEq en ligne : index, recherche, copie locale.
+pub mod autoeq_base;
 pub mod canaux_declares;
 pub mod canaux_reseau_4573;
 
@@ -113,6 +115,7 @@ pub mod pipeline;
 pub mod reaffectation_canaux;
 pub mod replaygain;
 pub mod repli_dsd_4354;
+pub mod reprise_nouveau_flux;
 pub mod resample;
 /// Runtime provisioning of the onnxruntime shared lib (`load-dynamic`).
 #[cfg(feature = "audio-embedding")]
@@ -127,6 +130,7 @@ pub mod soft_mute;
 pub mod staged_growth;
 pub mod support;
 pub mod tap;
+pub mod tempo;
 /// CLAP text tower for natural-language acoustic search (Phase 3).
 #[cfg(feature = "audio-embedding")]
 pub mod text_embedding;
