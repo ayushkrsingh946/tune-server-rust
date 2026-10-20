@@ -403,6 +403,8 @@ pub(super) fn jouer_via_wasapi(entrees: EntreesWasapi) {
     let device_gone = Arc::new(AtomicBool::new(false));
     let demande = DemandeDOuverture {
         spec,
+        // #6230 — un transport exclusif ouvre au format de la source.
+        voies_de_la_matrice: None,
         device_name: &device_name,
         endpoint_id: endpoint_id.as_deref(),
         origin_host: None,
