@@ -3183,6 +3183,12 @@ impl StreamingService for QobuzService {
         true
     }
 
+    /// #6461 — `/playlist/getUserPlaylists` rend les playlists possédées ET
+    /// suivies ; `map_user_playlists` les distingue par le propriétaire.
+    fn playlists_suivies_relues(&self) -> bool {
+        true
+    }
+
     async fn add_favorite(&mut self, fav_type: &str, item_id: &str) -> Result<(), TuneError> {
         if fav_type == TYPE_FAVORI_PLAYLISTS {
             return self
@@ -7558,6 +7564,19 @@ mod tests_playlists_proprietaire_2097 {
         assert_eq!(v[0]["editable"], json!(true));
         assert_eq!(v[1]["editable"], json!(false));
         assert!(v[2].get("editable").is_none());
+    }
+
+    /// #6461 — le miroir des favoris relit les playlists suivies de Qobuz :
+    /// sans ce drapeau, une playlist éditoriale suivie n'aurait jamais son
+    /// cœur dans Tune, et la retirer de la bibliothèque Qobuz serait
+    /// impossible depuis Tune.
+    #[test]
+    fn qobuz_annonce_ses_playlists_suivies_au_miroir_6461() {
+        let svc = QobuzService::new(String::from("app"), String::from("secret"));
+        assert!(
+            svc.playlists_suivies_relues(),
+            "Qobuz doit annoncer que getUserPlaylists distingue les playlists suivies"
+        );
     }
 }
 

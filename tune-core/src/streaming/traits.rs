@@ -941,6 +941,19 @@ pub trait StreamingService: Send + Sync {
         false
     }
 
+    /// `get_user_playlists` distingue-t-il les playlists que le compte SUIT
+    /// (`editable == Some(false)`) de celles qu'il possède ?
+    ///
+    /// #6461 (FabienM, fil 2302, point 1) : chez Qobuz, une playlist
+    /// éditoriale n'entre dans la bibliothèque que si on la met en favori, et
+    /// en sort quand on retire le cœur. Le miroir ([`crate::streaming::favorites_mirror`])
+    /// relit donc ces playlists suivies comme des favoris — mais seulement
+    /// chez un service qui le dit ici. `false` par défaut : les playlists
+    /// restent poussées sans jamais être relues, comme avant.
+    fn playlists_suivies_relues(&self) -> bool {
+        false
+    }
+
     async fn add_favorite(&mut self, fav_type: &str, item_id: &str) -> Result<(), TuneError> {
         let _ = (fav_type, item_id);
         Err(TuneError::Unsupported("not supported".into()))
