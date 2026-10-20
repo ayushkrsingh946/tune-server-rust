@@ -320,6 +320,10 @@ pub async fn ensemencer_le_volume_local(
             && crate::audio::audiophile::volume_lock_enabled(db, id)
     });
     let stored = volume_de_graine(zone.volume, zone.fixed_volume || pure_force, trim_db);
+    // #6541 — la graine ne naît pas au-dessus de la limite de sécurité.
+    let stored = zone.id.map_or(stored, |id| {
+        crate::audio::volume_limites::lire(db, id).borner_appareil(stored)
+    });
     if let Err(e) = crate::outputs::OutputTarget::set_volume(sortie, stored).await {
         warn!(device_id = %device_id, error = %e, "local_output_volume_seed_failed");
     } else {

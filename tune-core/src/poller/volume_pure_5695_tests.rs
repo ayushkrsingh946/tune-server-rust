@@ -131,7 +131,7 @@ impl Banc {
         .await
     }
 
-    async fn commandes_depuis(&self, deja: usize) -> Vec<f64> {
+    pub(super) async fn commandes_depuis(&self, deja: usize) -> Vec<f64> {
         self.avec_mock(async |m| m.volume_calls().await[deja..].to_vec())
             .await
     }
@@ -160,6 +160,13 @@ impl Banc {
             .playback
             .set_volume(self.zone_id, pour_cent / 100.0)
             .await;
+    }
+
+    /// Pose un réglage clé/valeur (#6541 : les limites de volume).
+    pub(super) fn poser_reglage(&self, cle: &str, valeur: &str) {
+        SettingsRepo::with_backend(self.db.clone())
+            .set(cle, valeur)
+            .unwrap();
     }
 
     pub(super) fn volume_en_base(&self) -> f64 {
