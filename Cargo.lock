@@ -5505,6 +5505,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tune-laissez-passer"
+version = "1.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake2",
+ "minisign-verify",
+ "ring",
+ "serde",
+ "serde_json",
+ "tune-laissez-passer",
+]
+
+[[package]]
 name = "tune-output-api"
 version = "1.0.0"
 dependencies = [
