@@ -245,6 +245,18 @@ impl DeezerService {
         }
     }
 
+    /// #6336 — un service dont la passerelle et l'API publique sont `gw` et
+    /// `api`, pour éprouver la connexion par ARL à travers le vrai routeur sans
+    /// joindre Deezer. Réservé aux bancs d'essai : aucun binaire publié ne le
+    /// compile.
+    #[cfg(any(test, feature = "services-factices"))]
+    pub fn avec_bases_de_test(gw: String, api: String) -> Self {
+        let mut svc = Self::new();
+        svc.gw_url = gw;
+        svc.api_url = api;
+        svc
+    }
+
     pub fn set_proxy_base_url(&mut self, url: Option<String>) {
         self.proxy_base_url = url;
     }
