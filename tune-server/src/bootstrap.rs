@@ -408,6 +408,11 @@ pub async fn run_with(opts: RunOptions) {
     let state = AppState::new(&config.db_path, config.port, config.clone())
         .expect("failed to init app state");
 
+    // #5320 — la sonde du processeur est relevée en tâche de fond, une fois
+    // par seconde : l'écran et la garde thermique lisent une médiane, pas la
+    // pointe que provoque la requête qui les interroge.
+    tune_core::audio::thermal::demarrer_l_echantillonnage();
+
     crate::boot_status::set_phase("configuration");
     state.restore_tokens().await;
     // #5427 — anciennes copies de l'ARL, et `TUNE_DEEZER_ARL`. En tâche de
