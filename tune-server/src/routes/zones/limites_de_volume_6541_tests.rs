@@ -155,10 +155,14 @@ async fn une_securite_sous_le_volume_courant_ramene_la_zone_6541() {
     // GET de la zone : les limites sont publiées.
     let (_, zone) = appeler(&app, "GET", &format!("/api/v1/zones/{id}"), Value::Null).await;
     assert!(
-        proche(zone["volume_limit_safety"].as_f64().unwrap(), 0.5),
+        proche(zone["volume_limit_safety"].as_f64().unwrap(), 0.3),
         "{zone}"
     );
-    assert!(zone["volume_limit_comfort"].is_null());
+    assert!(
+        proche(zone["volume_limit_comfort"].as_f64().unwrap(), 0.1),
+        "{zone}"
+    );
+    assert!(zone["volume_limits_refusal"].is_null(), "{zone}");
 }
 
 #[tokio::test]

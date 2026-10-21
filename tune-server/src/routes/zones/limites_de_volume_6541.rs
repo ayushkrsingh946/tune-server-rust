@@ -129,19 +129,19 @@ pub(super) async fn regler_les_limites(
     };
     // Décision du 21/10 : pas de limite sur une zone PURE ou à volume fixe.
     // Effacer (les deux seuils absents) reste permis : cela n'envoie rien.
-    if securite.is_some() || confort.is_some() {
-        if let Some(mode) = volume_limites::mode_sans_limite(&state.backend, id) {
-            info!(
-                zone_id = id,
-                code = mode.code(),
-                "zone_volume_limits_refused"
-            );
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": mode.code(), "message": mode.message() })),
-            )
-                .into_response();
-        }
+    if (securite.is_some() || confort.is_some())
+        && let Some(mode) = volume_limites::mode_sans_limite(&state.backend, id)
+    {
+        info!(
+            zone_id = id,
+            code = mode.code(),
+            "zone_volume_limits_refused"
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": mode.code(), "message": mode.message() })),
+        )
+            .into_response();
     }
     // Lue AVANT l'écriture : seule une sécurité qui BAISSE peut commander
     // l'appareil.
