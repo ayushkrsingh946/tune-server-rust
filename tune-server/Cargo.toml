@@ -1355,6 +1355,12 @@ path = "tests/exemplaires_par_repertoire_4907.rs"
 name = "suppression_playlist_de_service"
 path = "tests/suppression_playlist_de_service.rs"
 
+# #6688 — le badge « Partagée avec un cercle » (`cercles` dans la liste et la
+# fiche des playlists). `autotests = false` : sans cette cible, jamais compilé.
+[[test]]
+name = "playlists_badge_cercle_6688"
+path = "tests/playlists_badge_cercle_6688.rs"
+
 # Le cloisonnement par profil du gestionnaire de playlists — dont la FUSION.
 # Le fichier existait depuis #3073, mais `autotests = false` plus haut le
 # laissait hors compilation : la garde qui interdit de fusionner la playlist

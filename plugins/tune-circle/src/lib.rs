@@ -39,6 +39,7 @@ pub mod references;
 pub mod relais;
 pub mod resolution;
 pub mod routes;
+pub mod suivi;
 pub mod vignettes;
 
 use std::sync::Arc;
@@ -91,6 +92,8 @@ pub struct CirclePlugin {
     ecoute: Option<Arc<ecoute::Ecoute>>,
     /// #6521 : la boucle des vignettes de pochettes.
     vignettes: Option<tokio::task::JoinHandle<()>>,
+    /// #6688 : la boucle du suivi des playlists partagées.
+    suivi: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl CirclePlugin {
@@ -101,6 +104,7 @@ impl CirclePlugin {
             tache: None,
             ecoute: None,
             vignettes: None,
+            suivi: None,
         }
     }
 }
@@ -173,17 +177,21 @@ impl TunePlugin for CirclePlugin {
             self.services.artwork_dir.clone(),
             tune_core::cloud::library_sync::CLOUD_LIBRARY_API,
         ));
+        // #6688 : le suivi des playlists locales partagées avec un cercle.
+        let suivi = Arc::new(suivi::Suivi::new(relais.clone(), ctx.event_bus.clone()));
         ctx.register_router(
             routes::router(relais.clone(), self.services.license.clone())
                 .merge(routes::router_des_vignettes(relais, vignettes.clone()))
                 .merge(rayons::router(pousseur.clone()))
                 .merge(playlists::router(collaboratif))
+                .merge(suivi::router(suivi.clone()))
                 .merge(ecoute::router(ecoute)),
         );
         // T3 (#5326) : tenir à jour les rayons cochés.
         self.tache = Some(tokio::spawn(pousseur.clone().tourner()));
         self.pousseur = Some(pousseur);
         self.vignettes = Some(tokio::spawn(vignettes.tourner()));
+        self.suivi = Some(tokio::spawn(suivi.tourner()));
         Ok(())
     }
 
@@ -192,6 +200,9 @@ impl TunePlugin for CirclePlugin {
             t.abort();
         }
         if let Some(t) = self.vignettes.take() {
+            t.abort();
+        }
+        if let Some(t) = self.suivi.take() {
             t.abort();
         }
         self.pousseur = None;

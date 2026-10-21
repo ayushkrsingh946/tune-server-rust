@@ -2241,6 +2241,14 @@ async fn refresh_account_premium(
             .await
             .ok();
         }
+        // Clé du serveur (#6603) : inscrite sur le compte si elle ne l'est
+        // pas encore — un serveur relié avant la version qui l'inscrit.
+        tune_core::cloud::cle_serveur::inscrire_depuis_les_reglages(
+            backend,
+            tune_core::http::client::shared(),
+        )
+        .await
+        .ok();
 
         // 🔴 C'est ICI que le défaut devenait permanent.
         //

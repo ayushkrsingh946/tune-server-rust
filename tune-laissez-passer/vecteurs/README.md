@@ -122,5 +122,12 @@ Le serveur, pour s'enregistrer sur le relais, signe avec sa clé Ed25519 :
 tune-remote/serveur/v1\n<server_id>\n<défi>
 ```
 
-Les deux domaines sont distincts : une signature faite pour l'un ne vaut pas
+Pour inscrire sa clé sur le compte (`POST /api/v1/remote/servers/{server_id}/key`,
+corps `{"public_key", "alg": "Ed25519", "preuve"}`), le serveur signe :
+
+```
+tune-remote/inscription/v1\n<server_id>\n<clé publique base64url>
+```
+
+Les trois domaines sont distincts : une signature faite pour l'un ne vaut pas
 pour l'autre.

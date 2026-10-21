@@ -5262,6 +5262,7 @@ dependencies = [
 name = "tune-bridge"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -5278,6 +5279,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "tune-laissez-passer",
  "uuid",
 ]
 
@@ -5421,6 +5423,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tracing",
  "tracing-subscriber",
+ "tune-laissez-passer",
  "tune-output-api",
  "tune-plugin-audio-support",
  "tune-plugin-channel-remap",
