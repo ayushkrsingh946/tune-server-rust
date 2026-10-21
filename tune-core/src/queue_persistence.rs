@@ -71,7 +71,7 @@ pub struct QueueSnapshotItem {
     /// antérieurs, d'où le défaut.
     #[serde(default)]
     pub artist_ref: Option<String>,
-    /// Le conteneur de la ligne (#6466, migration 127) : sans lui, une file
+    /// Le conteneur de la ligne (#6466, migration 128) : sans lui, une file
     /// restaurée rangerait ses titres sous le seul contexte de session.
     /// Absent des instantanés antérieurs, d'où le défaut.
     #[serde(default, skip_serializing_if = "Option::is_none")]

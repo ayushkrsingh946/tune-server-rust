@@ -1,5 +1,5 @@
 //! Le CONTENEUR de chaque élément de file (#6466, FabienM, fil 2302 points
-//! 10, 11, 15 ; migration SQLite 127 / PG 091).
+//! 10, 11, 15 ; migration SQLite 128 / PG 092).
 //!
 //! Jusqu'ici, l'historique écrivait le contexte de SESSION de la zone : celui
 //! du dernier « Lire ». Tout ce qui entrait dans la file autrement — « Lire

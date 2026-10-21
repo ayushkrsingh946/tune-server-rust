@@ -895,7 +895,7 @@ CREATE TABLE IF NOT EXISTS zones (
 -- SQLite 123 et de la PG 087.
 -- `context_*` : le conteneur (album, playlist, artiste, ou `track` pour un
 -- titre ajouté seul) dont l'élément a été enfilé (#6466). NULL = le contexte
--- de session de la zone. Jumelle de la migration SQLite 127 et de la PG 091.
+-- de session de la zone. Jumelle de la migration SQLite 128 et de la PG 092.
 CREATE TABLE IF NOT EXISTS queue_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     zone_id INTEGER NOT NULL REFERENCES zones(id) ON DELETE CASCADE,

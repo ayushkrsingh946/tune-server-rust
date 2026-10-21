@@ -827,7 +827,7 @@ ALTER TABLE listen_history ADD COLUMN IF NOT EXISTS album_ref TEXT;
 -- L'artiste d'une piste de service chez son service (#6079, PG 087 / SQLite
 -- 122). En ALTER pour la même raison que juste au-dessus.
 ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS artist_ref TEXT;
--- Le conteneur de chaque élément de file (#6466, PG 091 / SQLite 127).
+-- Le conteneur de chaque élément de file (#6466, PG 092 / SQLite 128).
 ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_type TEXT;
 ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_id TEXT;
 ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_source TEXT;

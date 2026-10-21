@@ -1061,7 +1061,7 @@ async fn pg_6079_la_file_garde_l_artiste_de_service() {
 }
 
 /// #6466 — le conteneur de chaque élément de file sur PostgreSQL : la
-/// jumelle 091 se rejoue (idempotence), `poser_apres` ne touche que les
+/// jumelle 092 se rejoue (idempotence), `poser_apres` ne touche que les
 /// lignes ajoutées, la lecture à la position vérifie la piste, et la copie
 /// du transfert apparie les lignes.
 #[tokio::test(flavor = "multi_thread")]
@@ -1076,11 +1076,11 @@ async fn pg_6466_le_conteneur_des_elements_de_file() {
     let url = std::env::var("TUNE_TEST_PG_URL").expect("posée : pg_or_skip l'a vérifié");
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     sqlx::raw_sql(include_str!(
-        "../../migrations/postgres/091_queue_items_contexte.sql"
+        "../../migrations/postgres/092_queue_items_contexte.sql"
     ))
     .execute(&pool)
     .await
-    .expect("la migration 091 doit se rejouer");
+    .expect("la migration 092 doit se rejouer");
     let zones = ZoneRepo::with_backend(db.clone());
     let salon = zones
         .create("Salon", Some("dlna"), Some("uuid:6466-a"))
