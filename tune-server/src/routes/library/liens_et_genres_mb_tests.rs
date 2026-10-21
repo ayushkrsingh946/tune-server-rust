@@ -164,3 +164,40 @@ async fn l_arbre_musicbrainz_rapproche_les_genres_de_la_bibliotheque_6001() {
                 "parents": ["rock"], "sous_genres": ["2 tone"]}])
     );
 }
+
+/// Une tâche de fond qui panique laisse l'indicateur à faux : la lecture
+/// suivante peut partir. Avant, l'indicateur n'était baissé qu'à la dernière
+/// ligne de la tâche, que la panique n'atteint jamais.
+#[tokio::test]
+async fn une_tache_qui_panique_laisse_l_indicateur_a_faux_6001() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static INDICATEUR: AtomicBool = AtomicBool::new(false);
+
+    let tache = super::lancer_seule(&INDICATEUR, async {
+        panic!("panique simulée de la lecture des genres");
+    })
+    .expect("indicateur baissé : la tâche part");
+    assert!(
+        tache.await.unwrap_err().is_panic(),
+        "la tâche a bien paniqué"
+    );
+    assert!(
+        !INDICATEUR.load(Ordering::SeqCst),
+        "après une panique, l'indicateur doit être retombé à faux, sinon plus \
+         aucune lecture ne part jusqu'au redémarrage"
+    );
+
+    // La lecture suivante part, et l'indicateur tient pendant qu'elle vit.
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let suivante = super::lancer_seule(&INDICATEUR, async move {
+        let _ = rx.await;
+    })
+    .expect("indicateur retombé : la lecture suivante part");
+    assert!(
+        super::lancer_seule(&INDICATEUR, async {}).is_none(),
+        "une seule lecture à la fois"
+    );
+    tx.send(()).unwrap();
+    suivante.await.unwrap();
+    assert!(!INDICATEUR.load(Ordering::SeqCst), "fin normale : baissé");
+}

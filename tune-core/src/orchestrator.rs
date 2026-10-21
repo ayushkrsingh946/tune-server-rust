@@ -2164,6 +2164,10 @@ mod reprise_nouveau_flux_6264_tests;
 /// #6612 — une plage hors du fichier à la reprise : nouveau flux, à la position.
 pub(crate) mod plage_hors_fichier_6612;
 
+/// #6380 — la Lecture qui suit un redémarrage ramène le renderer réseau à la
+/// position restaurée (piste Qobuz ; sortie locale inchangée).
+#[cfg(test)]
+mod reprise_au_redemarrage_6380;
 /// Fil 2095 — le rétablissement d'une session morte ramène le renderer
 /// réseau à la position de la pause.
 #[cfg(test)]
