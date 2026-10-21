@@ -1609,6 +1609,13 @@ required-features = ["postgres"]
 name = "playlists_pistes_de_service"
 path = "tests/playlists_pistes_de_service.rs"
 
+# #6687 — retirer une piste désigne une LIGNE (rang affiché ou `entry_id`),
+# plus jamais la colonne `position`. `autotests = false` : sans cette cible,
+# jamais compilé.
+[[test]]
+name = "playlist_retrait_par_ligne_6687"
+path = "tests/playlist_retrait_par_ligne_6687.rs"
+
 # Favoris LOCAUX sur PostgreSQL (chasse PG du 25/09/2026) : `ProfileRepo` liait
 # `favorites.profile_id`/`item_id` en chaine alors que ces colonnes sont BIGINT
 # sur les deux naissances d'une base PG. PAS de `required-features` : la
@@ -1727,6 +1734,13 @@ name = "pg_balises_6124"
 path = "tests/pg_balises_6124.rs"
 required-features = ["postgres"]
 
+# #6287 — la requête textuelle des règles intelligentes sur PostgreSQL : la
+# négation (`NOT COALESCE`), les combinaisons et le crédit, par la vraie route.
+[[test]]
+name = "pg_requete_textuelle_6287"
+path = "tests/pg_requete_textuelle_6287.rs"
+required-features = ["postgres"]
+
 # #6336 — AirPlay 2, SMB, Qobuz, TIDAL et Deezer éprouvés par le vrai routeur
 # contre des faux locaux. Binaire à lui seul : les substitutions de programmes
 # (`tune_core::services_factices`) sont un état de PROCESSUS. `autotests =
@@ -1734,6 +1748,13 @@ required-features = ["postgres"]
 [[test]]
 name = "services_remplacables_6336"
 path = "tests/services_remplacables_6336.rs"
+
+# #6336 (suite) — le battement de la licence et la liaison SSO du serveur au
+# compte, contre un faux mozaiklabs déclaré par `services_factices`
+# (`substituer_base`). Binaire à lui seul pour la même raison.
+[[test]]
+name = "licence_sso_remplacables_6336"
+path = "tests/licence_sso_remplacables_6336.rs"
 
 # #6454 — `GET /profiles` ne rend plus `200 []` sur une base en échec : un
 # 500 au code lisible, et une ligne ERROR au journal. Abonné `tracing` GLOBAL,

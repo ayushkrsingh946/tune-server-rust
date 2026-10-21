@@ -11,6 +11,9 @@ use std::sync::Arc;
 #[path = "radio_profondeur_tests.rs"]
 mod radio_profondeur_tests;
 
+#[path = "journal_sans_url_6468_tests.rs"]
+mod journal_sans_url_6468_tests;
+
 #[tokio::test]
 async fn local_stream_watch_reports_only_an_unconsumed_live_session_once() {
     use crate::http::streamer::{AudioStreamer, StreamInfo};
@@ -2595,6 +2598,48 @@ fn les_reglages_de_sortie_locale_viennent_de_la_base() {
         (true, "asio".to_string()),
         "TUNE_LOCAL_AUDIO_BACKEND doit servir de repli comme dans \
          tune-server/src/config.rs"
+    );
+}
+
+/// #6452 — sous le repli de démarrage, la sortie recréée à la volée part sur
+/// l'hôte par défaut et en PARTAGÉ, et la base garde « asio ».
+///
+/// C'est le test qui rougit sans le repli : `recreate_local_and_play`
+/// rouvrirait ASIO, en exclusif, au premier appui sur Lecture, c'est-à-dire
+/// le pilote que le démarrage venait d'écarter.
+#[test]
+fn le_repli_de_demarrage_ecarte_asio_de_la_sortie_recreee() {
+    let orch = test_orchestrator();
+    let reglages = crate::db::settings_repo::SettingsRepo::with_backend(orch.db.clone());
+    // Ce qu'écrit le choix d'ASIO dans les réglages : l'hôte, l'écho de
+    // l'exclusif et son témoin (#4184).
+    reglages.set("local_audio_backend", "asio").unwrap();
+    reglages.set("local_exclusive_mode", "true").unwrap();
+    reglages
+        .set(crate::config::REGLAGE_EXCLUSIF_ARME_PAR_ASIO, "true")
+        .unwrap();
+
+    assert_eq!(
+        orch.reglages_sortie_locale_selon_le_repli(|_| None, Some("asio")),
+        (false, "auto".to_string()),
+        "sous le repli, la sortie recréée doit ouvrir l'hôte par défaut, en partagé"
+    );
+    // Le choix enregistré n'a pas bougé.
+    assert_eq!(
+        reglages.get("local_audio_backend").unwrap().as_deref(),
+        Some("asio")
+    );
+    // Sans repli, ASIO comme avant (exclusif par nature sous Windows).
+    let (_, hote) = orch.reglages_sortie_locale_selon_le_repli(|_| None, None);
+    assert_eq!(hote, "asio");
+
+    // Un exclusif demandé par l'utilisateur lui-même reste honoré.
+    reglages
+        .delete(crate::config::REGLAGE_EXCLUSIF_ARME_PAR_ASIO)
+        .unwrap();
+    assert_eq!(
+        orch.reglages_sortie_locale_selon_le_repli(|_| None, Some("asio")),
+        (true, "auto".to_string())
     );
 }
 
@@ -10176,6 +10221,7 @@ async fn une_session_abandonnee_avant_l_envoi_arrete_la_zone_au_lieu_de_jouer_un
         channels: Some(2),
         origin_url: None,
         bitrate_kbps: None,
+        format_source: None,
     };
     let habillage = super::transport::Habillage {
         album: None,
@@ -10282,6 +10328,7 @@ async fn banc_session_morte_pendant_l_envoi_6658(
         channels: Some(2),
         origin_url: None,
         bitrate_kbps: None,
+        format_source: None,
     };
     (orch, sid, req, resolved, barriere)
 }
