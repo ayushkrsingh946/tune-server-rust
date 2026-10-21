@@ -2536,6 +2536,26 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "tags_position",
         up: "",
     },
+    // #6466 (FabienM, fil 2302 points 10, 11, 15) — le CONTENEUR d'un élément
+    // de file : l'album, la playlist ou l'artiste dont il a été enfilé, ou
+    // `track` pour un titre ajouté seul. L'historique l'écrit à l'écoute ; à
+    // défaut (ligne d'avant, NULL), c'est le contexte de SESSION de la zone,
+    // comme avant.
+    //
+    // Numérotée 128 / PG 092 à sa jonction avec `batch/bugs-rc7-20261015`
+    // (21/10) : la PR la tenait en 127 / 091, prises dans le lot par
+    // `tags_position` (#6257, entrée la première sur décision de Bertrand) ;
+    // la garde de contiguïté exige la suivante. ⚠️ Les PR de #6285 (faux
+    // hi-res) et de #6332 (débit des pistes) tenaient AUSSI 127 / 091 :
+    // elles se renumérotent à leur tour (règle de la 119).
+    //
+    // Colonnes posées dans le bloc de version et dans la passe finale, PAS
+    // dans `up` : même règle qu'à la 119. Jumelle PG : 092.
+    Migration {
+        version: 128,
+        name: "queue_items_contexte",
+        up: "",
+    },
 ];
 
 /// Migration 127 (#6257) : `tags.position`, 0 pour toutes les etiquettes
@@ -2545,6 +2565,23 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
 fn tags_position(db: &SqliteDb) -> Result<(), String> {
     add_column_if_missing(db, "tags", "position", "INTEGER NOT NULL DEFAULT 0");
     Ok(())
+}
+
+/// Les colonnes de la migration 128 (#6466) : le conteneur d'un élément de
+/// file, dans le vocabulaire de `listen_history.context_*`.
+pub(crate) const COLONNES_CONTEXTE_DE_FILE: [&str; 5] = [
+    "context_type",
+    "context_id",
+    "context_source",
+    "context_title",
+    "context_cover",
+];
+
+/// Pose les colonnes de la migration 128 (#6466). Idempotent.
+fn contexte_des_elements_de_file(db: &SqliteDb) {
+    for colonne in COLONNES_CONTEXTE_DE_FILE {
+        add_column_if_missing(db, "queue_items", colonne, "TEXT");
+    }
 }
 
 /// SQL de la migration 125 (#6179) — voir son entree dans `MIGRATIONS`.
@@ -3856,6 +3893,11 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
             // défaut : NULL = INCONNU pour toute ligne existante.
             add_column_if_missing(db, "queue_items", "artist_ref", "TEXT");
         }
+        if migration.version == 128 {
+            // Le conteneur de chaque élément de file (#6466). Sans défaut :
+            // NULL = l'élément suit le contexte de session de la zone.
+            contexte_des_elements_de_file(db);
+        }
         if migration.version == 124 {
             // La note de la piste lue dans ses balises (#6123). Sans défaut :
             // NULL = le fichier n'en porte pas, ou pas encore relu.
@@ -4466,6 +4508,9 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     // et l'UPDATE des pistes la NOMMENT, et une base arrivée sans elle ne
     // pourrait plus rien scanner. PG : migration 088.
     add_column_if_missing(db, "tracks", "rating", "INTEGER");
+    // Le conteneur des éléments de file (migration 128, #6466) — posé ICI
+    // aussi : l'écriture de la file et l'historique le NOMMENT. PG : 092.
+    contexte_des_elements_de_file(db);
     // Le lien des radios avec l'annuaire (migration 126, #6516) — posé ICI
     // aussi : le rapprochement le NOMME. PG : migration 090.
     lien_des_radios_avec_l_annuaire(db);
@@ -5349,6 +5394,13 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         91,
         "tags_position",
         include_str!("../../migrations/postgres/091_tags_position.sql"),
+    ),
+    // Jumelle de la SQLite 128 (#6466) : le conteneur de chaque élément de
+    // file (`queue_items.context_*`), NULL pour l'existant.
+    (
+        92,
+        "queue_items_contexte",
+        include_str!("../../migrations/postgres/092_queue_items_contexte.sql"),
     ),
 ];
 
@@ -8659,7 +8711,9 @@ mod tests {
         // Pose le lien des radios avec l'annuaire, que le rapprochement NOMME.
         // 91 : `tags_position` (#6257), jumelle de la SQLite 127. Pose
         // `tags.position`, que l'INSERT des etiquettes NOMME.
-        assert_eq!(pg_latest_version(), 91, "latest PG migration must be 91");
+        // 92 : `queue_items_contexte` (#6466), jumelle de la SQLite 128. Pose
+        // le conteneur de chaque élément de file, que l'historique NOMME.
+        assert_eq!(pg_latest_version(), 92, "latest PG migration must be 92");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),
