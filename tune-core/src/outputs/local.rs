@@ -1417,10 +1417,10 @@ impl LocalOutput {
         self.flux_sans_fin.store(sans_fin, Ordering::Relaxed);
     }
 
-    /// #6211 (décision du 19/10) — sur un flux sans fin, le préampli gardé
-    /// par un égaliseur coupé s'éteint en fondu dès la coupure ; sur une
-    /// piste, seule sa part supérieure à 1 s'éteint, après le fondu de la
-    /// courbe (#6524 b, jamais de hausse, dans `EqProcessor`).
+    /// #6211 — sur un flux sans fin, l'extinction du préampli gardé part dès
+    /// la coupure ; sur une piste, après le fondu de la courbe. Partout,
+    /// seule sa part supérieure à 1 s'éteint : jamais de hausse (#6524 b,
+    /// décision du 21/10, dans `EqProcessor`).
     fn eteindre_si_flux_sans_fin(&self, eq: &mut Option<super::super::audio::eq::EqProcessor>) {
         if self.flux_sans_fin.load(Ordering::Relaxed)
             && let Some(eq) = eq.as_mut()

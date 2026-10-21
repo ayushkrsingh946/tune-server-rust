@@ -47,11 +47,15 @@ pub const SEUIL_DE_RAMPE_DB: f64 = 1.0;
 /// la part d'un gain gardé SUPÉRIEURE à 1, `min(g, 1)`. Un préampli négatif,
 /// le cas normal, reste gardé jusqu'au prochain geste de l'auditeur, comme
 /// le veut #5215 : le niveau ne remonte jamais tout seul.
+///
+/// Décision de Bertrand du 21/10 vers 18 h : « jamais de hausse » vaut
+/// PARTOUT, radio comprise. Elle remplace celle du 19/10 sur ce seul point :
+/// sur une radio aussi, la rampe va de `g` à `min(g, 1)`.
 pub const EXTINCTION_SUR_FLUX_SANS_FIN_MS: u32 = 3_000;
 
 /// #6211 — extinction en cours du préampli gardé : `depart` est le gain par
-/// coefficient au début de la rampe, `vers` celui de la fin (1 sur une
-/// radio, `min(depart, 1)` sur une piste, #6524 b), `fait`/`total` comptent
+/// coefficient au début de la rampe, `vers` celui de la fin
+/// (`min(depart, 1)`, jamais de hausse, #6524 b), `fait`/`total` comptent
 /// des trames.
 struct Extinction {
     depart: Vec<f32>,
@@ -88,8 +92,8 @@ pub struct EqProcessor {
     /// jamais de hausse (#6524 b). `None` : identité, le neutre se retire une
     /// fois son fondu fini.
     gain_garde: Option<Vec<f32>>,
-    /// #6211 — sur un flux sans fin, le préampli gardé s'éteint en fondu
-    /// (voir [`Self::eteindre_le_preampli_garde`]).
+    /// #6211 — sur un flux sans fin, la part du préampli gardé supérieure à
+    /// 1 s'éteint en fondu (voir [`Self::eteindre_le_preampli_garde`]).
     extinction: Option<Extinction>,
     clipping: CompteurDEcretage,
     closed: AtomicBool,
@@ -338,18 +342,20 @@ impl EqProcessor {
         Some(reporte)
     }
 
-    /// #6211 (décision de Bertrand du 19/10) — sur un flux SANS FIN (radio),
-    /// le préampli gardé par un égaliseur coupé ne doit pas valoir à vie :
-    /// il revient à 0 dB par une rampe de [`EXTINCTION_SUR_FLUX_SANS_FIN_MS`],
-    /// linéaire en dB. Une fois la rampe finie, le neutre ne garde plus rien
-    /// et se retire ([`Self::est_neutre_au_repos`]).
+    /// #6211 — sur un flux SANS FIN (radio), l'extinction part dès la
+    /// coupure, par une rampe de [`EXTINCTION_SUR_FLUX_SANS_FIN_MS`], linéaire
+    /// en dB. Décision de Bertrand du 21/10 (elle remplace celle du 19/10 sur
+    /// ce point) : jamais de hausse, la rampe va de `g` à `min(g, 1)`. Un
+    /// préampli négatif reste gardé jusqu'au prochain geste ; une part
+    /// supérieure à 1 s'éteint, et le neutre se retire
+    /// ([`Self::est_neutre_au_repos`]).
     ///
     /// Sans effet sur un égaliseur actif, sur un neutre qui ne garde rien, ou
     /// quand une extinction est déjà en cours. Sur une radio elle part dès la
     /// coupure ; sur tout flux, elle part aussi à la fin du fondu de la
     /// courbe (#6524 b).
     pub fn eteindre_le_preampli_garde(&mut self) {
-        self.lancer_l_extinction(false);
+        self.lancer_l_extinction();
     }
 
     /// #6524 (b), arbitrage de Bertrand du 21/10 : « jamais de hausse ». Sur
@@ -357,20 +363,18 @@ impl EqProcessor {
     /// (`min(g, 1)`) ; un gain inférieur ou égal à 1 reste tel quel jusqu'au
     /// prochain geste de l'auditeur. Sans effet quand aucun gain ne dépasse 1.
     fn eteindre_sans_hausse(&mut self) {
-        self.lancer_l_extinction(true);
+        self.lancer_l_extinction();
     }
 
-    fn lancer_l_extinction(&mut self, jamais_de_hausse: bool) {
+    /// La rampe de `g` à `min(g, 1)`, radio comme piste (décision du 21/10).
+    fn lancer_l_extinction(&mut self) {
         if !self.est_neutre() || self.extinction.is_some() {
             return;
         }
         let Some(depart) = self.gain_garde.clone() else {
             return;
         };
-        let vers: Vec<f32> = depart
-            .iter()
-            .map(|&g| if jamais_de_hausse { g.min(1.0) } else { 1.0 })
-            .collect();
+        let vers: Vec<f32> = depart.iter().map(|&g| g.min(1.0)).collect();
         if depart.iter().zip(&vers).all(|(d, v)| d == v) {
             return;
         }
