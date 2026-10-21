@@ -393,6 +393,12 @@ pub async fn run_with(opts: RunOptions) {
     // la base se mettait à niveau, en silence (#1701, fil forum 1386).
     let boot_responder = boot_socket.map(crate::boot_status::spawn);
 
+    // #6452 — le témoin de démarrage inachevé, posé AVANT tout ce qui peut
+    // retenir le démarrage, retiré à `listening`. S'il était déjà là, le
+    // démarrage précédent n'est pas allé au bout (fil 2248 : ASIO4ALL, page
+    // d'attente sans fin à chaque lancement qui suit le choix d'ASIO).
+    let demarrage_precedent_inacheve = crate::startup::poser_le_temoin_de_demarrage();
+
     // Appliance : ne jamais démarrer sur une base vide si le disque de
     // données externe est absent (docs/DATA-RELOCATION.md).
     crate::boot_status::set_phase("attente du disque de données");
@@ -432,6 +438,11 @@ pub async fn run_with(opts: RunOptions) {
             crate::routes::service_tokens::amorcer_arl_deezer(&state, arl_env.as_deref()).await;
         });
     }
+
+    // #6452 — le choix de l'hôte est en base : c'est ici, et pas plus tôt,
+    // que le témoin peut décider. AVANT `init_state`, qui lance le
+    // préchauffage ASIO, et avant les sorties audio.
+    crate::startup::appliquer_le_temoin_de_demarrage(&state, demarrage_precedent_inacheve).await;
 
     // Restore zone volumes, persist music_dirs/discogs_token to DB
     crate::startup::init_state(&state, &config).await;
@@ -608,6 +619,8 @@ pub async fn run_with(opts: RunOptions) {
     // Listener was bound before the DB was opened (see above) — the socket's
     // backlog has been queueing connections since then.
     info!(%addr, "listening");
+    // #6452 — le démarrage a abouti : le suivant n'a rien à replier.
+    crate::startup::retirer_le_temoin_de_demarrage();
 
     // Dire l'adresse COMPLÈTE, une fois, là où quelqu'un la lit (#1272) :
     // fenêtre de console Windows ouverte par `start-tune-server.bat`,
