@@ -1773,11 +1773,34 @@ pub fn dedup_display_tracks(tracks: Vec<Track>) -> Vec<Track> {
 /// lettre accentuée (« Été » et « été ») seraient donc comptées deux fois ici
 /// et repliées à l'écran. Le compte reste alors celui d'avant ce correctif :
 /// le décalage n'est pas aggravé.
+///
+/// ## #6222 — un album en ordre de fichiers ne replie rien
+///
+/// Dans un album que [`album_en_ordre_de_fichiers`] range par fichiers (un
+/// seul disque, deux pistes de même numéro et de titres différents),
+/// [`dedup_display_tracks`] ne replie AUCUNE piste : deux versions d'un même
+/// morceau reprises de deux albums y partagent disque, numéro et titre sans
+/// être des copies. L'écran les montre toutes les deux ; le compte est donc
+/// celui des lignes. La même règle est écrite ici en SQL, sur l'album
+/// entier :
+///
+/// - un seul disque : un seul disque distinct une fois NULL et 0 ramenés à 1 ;
+/// - un numéro en double : parmi les pistes numérotées (> 0), plus de couples
+///   (numéro, titre) distincts que de numéros distincts.
+///
+/// Tout autre album garde la clé ci-dessus, au titre près.
 pub fn sql_compte_pistes_visibles(alias_album: &str) -> String {
     format!(
-        "(SELECT COUNT(DISTINCT COALESCE(t.disc_number, 1) || '/' \
+        "(SELECT CASE WHEN \
+         COUNT(DISTINCT CASE WHEN COALESCE(t.disc_number, 0) > 0 \
+         THEN t.disc_number ELSE 1 END) = 1 \
+         AND COUNT(DISTINCT CASE WHEN t.track_number > 0 THEN t.track_number || '/' \
+         || LOWER(TRIM(COALESCE(t.title, ''))) END) \
+         > COUNT(DISTINCT CASE WHEN t.track_number > 0 THEN t.track_number END) \
+         THEN COUNT(*) \
+         ELSE COUNT(DISTINCT COALESCE(t.disc_number, 1) || '/' \
          || COALESCE(t.track_number, 0) || '/' \
-         || LOWER(TRIM(COALESCE(t.title, '')))) \
+         || LOWER(TRIM(COALESCE(t.title, '')))) END \
          FROM tracks t WHERE t.album_id = {alias_album})"
     )
 }
