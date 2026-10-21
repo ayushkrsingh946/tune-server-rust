@@ -1855,6 +1855,10 @@ mod eq_en_vol_4407_tests;
 // bibliothèque native de test.
 #[cfg(test)]
 mod greffon_natif_tiers_tests;
+// #6256 — la désinstallation d'un greffon natif tiers ne rebâtit que les
+// zones qui l'utilisent.
+#[cfg(all(test, feature = "local-audio"))]
+mod purge_greffon_tiers_6256_tests;
 // #6522, #6524 — le verdict PURE de la sortie locale suit les réglages
 // enregistrés, dans l'état que la vraie bascule produit.
 #[cfg(all(test, feature = "local-audio"))]
