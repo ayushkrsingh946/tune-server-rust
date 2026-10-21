@@ -1301,14 +1301,19 @@ pub async fn recuperer_concerts_au_lieu(
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
-        .map_err(|e| format!("concerts: {e}"))?;
+        // L'URL porte la localisation du profil (`city`, `postal_code`,
+        // `country`) : elle ne doit pas finir au journal (`concerts_fetch_failed`).
+        .map_err(|e| format!("concerts: {}", e.without_url()))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         return Err(CloudError::from_response(format!("concerts: HTTP {status}"), resp).await);
     }
 
-    let data: Value = resp.json().await.map_err(|e| format!("parse: {e}"))?;
+    let data: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse: {}", e.without_url()))?;
     let corps = corps_a_venir(&data);
     info!(
         count = corps["concerts"].as_array().map_or(0, Vec::len),
@@ -1731,6 +1736,36 @@ mod essais {
     /// SANS LE DIRE : sur les 1 747 artistes du serveur de référence, 1 547
     /// n'étaient jamais abonnés et personne ne pouvait le savoir. Ce témoin
     /// compte les appels **reçus par le nuage**, pas les tranches d'un vecteur.
+    /// Une erreur réseau sur `/upcoming` ne recopie pas l'URL, qui porte la
+    /// localisation du profil : sinon `concerts_fetch_failed` la journalise.
+    #[tokio::test]
+    async fn i1755_l_erreur_reseau_ne_recopie_pas_la_localisation() {
+        // Port 1 sur la boucle locale : connexion refusée, sans sortir du poste.
+        let err = recuperer_concerts_au_lieu(
+            "http://127.0.0.1:1",
+            tune_core::http::client::shared(),
+            "inst-1",
+            Page::default(),
+            &[
+                ("city", "Villeneuve-Témoin".to_string()),
+                ("postal_code", "99999".to_string()),
+            ],
+        )
+        .await
+        .expect_err("le port 1 refuse la connexion");
+        let texte = err.to_string();
+        assert!(
+            texte.starts_with("concerts: "),
+            "erreur inattendue : {texte}"
+        );
+        for fuite in ["Villeneuve", "99999", "postal_code", "/upcoming"] {
+            assert!(
+                !texte.contains(fuite),
+                "l'erreur journalisée recopie l'URL ({fuite}) : {texte}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn quatre_cent_cinquante_artistes_partent_en_trois_appels_et_aucun_ne_se_perd() {
         let banc = banc(vec![
