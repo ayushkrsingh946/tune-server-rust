@@ -108,3 +108,6 @@ mod replieur_wal_tests;
 #[cfg(test)]
 mod reprendre_l_ecoute_2130_tests;
 pub mod upnp_revision;
+/// #5974 — un vidage qui échoue ne s'annonce plus réussi.
+#[cfg(test)]
+mod vidage_5974_tests;

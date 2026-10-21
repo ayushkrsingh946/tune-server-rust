@@ -56,6 +56,39 @@ async fn prechargement_hr_coupe_au_demarrage_precharge_le_format_6() {
     );
 }
 
+/// #6658 — le fil 2350 : le préchargement est la PREMIÈRE des huit
+/// tentatives, et le CDN y coupe le flux HR après son premier octet. Le
+/// préchargement doit se replier au format 6, comme la lecture.
+#[tokio::test]
+async fn prechargement_hr_coupe_apres_un_octet_precharge_le_format_6_6658() {
+    let (etat, mut svc) = faux_qobuz(Cdn::CoupeApres(1), Cdn::Sert).await;
+
+    let flux = resoudre_le_flux_a_precharger(&mut svc, "qobuz", "6401")
+        .await
+        .expect("le préchargement doit retenir le format 6");
+
+    assert!(
+        flux.url.ends_with("/cdn/6.flac"),
+        "un flux HR coupé après son premier octet doit être préchargé au format 6, pas : {}",
+        flux.url
+    );
+    assert_eq!(flux.quality.sample_rate, 44_100);
+    assert_eq!(etat.demandes("6"), 1, "un seul repli");
+}
+
+/// #6658 — un flux HR lent mais sain reste préchargé en haute résolution.
+#[tokio::test]
+async fn prechargement_hr_lent_reste_en_haute_resolution_6658() {
+    let (etat, mut svc) = faux_qobuz(Cdn::Lent, Cdn::Sert).await;
+
+    let flux = resoudre_le_flux_a_precharger(&mut svc, "qobuz", "6401")
+        .await
+        .expect("le flux HR lent doit être préchargé");
+
+    assert!(flux.url.ends_with("/cdn/27.flac"), "{}", flux.url);
+    assert_eq!(etat.demandes("6"), 0, "aucun repli sur un flux lent");
+}
+
 #[tokio::test]
 async fn prechargement_hr_sain_reste_en_haute_resolution() {
     let (etat, mut svc) = faux_qobuz(Cdn::Sert, Cdn::Sert).await;

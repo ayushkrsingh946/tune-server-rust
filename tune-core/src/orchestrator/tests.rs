@@ -10216,3 +10216,175 @@ async fn une_session_abandonnee_avant_l_envoi_arrete_la_zone_au_lieu_de_jouer_un
         "le message doit dire que le flux du service n'a pas pu être ouvert : {message}"
     );
 }
+
+/// #6658 — banc commun : une sortie factice dont `play_media` s'arrête à
+/// mi-chemin (la fenêtre où une sortie locale relâche le flux précédent), et
+/// une session de flux Qobuz VIVANTE au moment de la garde #5522.
+async fn banc_session_morte_pendant_l_envoi_6658(
+    device_id: &'static str,
+) -> (
+    PlaybackOrchestrator,
+    String,
+    super::PlayRequest,
+    super::ResolvedStream,
+    BarriereMock,
+) {
+    use crate::http::streamer::StreamInfo;
+
+    let orch = test_orchestrator();
+    let mock = MockOutput::new(device_id, "Sortie 6658");
+    let barriere = mock.retenir_la_lecture();
+    orch.outputs.lock().await.register(Box::new(mock));
+
+    let info = StreamInfo {
+        format: "wav".to_string(),
+        mime_type: "audio/wav".to_string(),
+        ..StreamInfo::default()
+    };
+    let (sid, _tx, _ready) = orch.streamer.create_session(info, false, 1).await;
+    // `_tx` est lâché ici : la session reste inscrite (son émetteur de
+    // maintien vit avec elle), comme une session dont le producteur n'a pas
+    // encore écrit.
+
+    let req = super::PlayRequest {
+        zone_id: 2,
+        output_device_id: Some(device_id.into()),
+        track_id: None,
+        source: Some("qobuz".into()),
+        source_id: Some("25822841".into()),
+        title: Some("No Amount of Loving".into()),
+        artist_name: None,
+        album_title: None,
+        cover_url: None,
+        duration_ms: Some(180_000),
+        seek_ms: None,
+        temp_file_path: None,
+        sample_rate: None,
+        bit_depth: None,
+        media_format: None,
+        track_number: None,
+        disc_number: None,
+        album_ref: None,
+    };
+    let resolved = super::ResolvedStream {
+        url: format!("http://127.0.0.1:8888/stream/{sid}.wav"),
+        mime_type: "audio/wav".into(),
+        title: "No Amount of Loving".into(),
+        artist: None,
+        album: None,
+        duration_ms: Some(180_000),
+        source: "qobuz".into(),
+        cover_url: None,
+        stream_id: Some(sid.clone()),
+        file_size: None,
+        sample_rate: Some(192_000),
+        bit_depth: Some(24),
+        channels: Some(2),
+        origin_url: None,
+        bitrate_kbps: None,
+    };
+    (orch, sid, req, resolved, barriere)
+}
+
+type BarriereMock = (
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+
+/// #6658 — la course du fil 2350 : la session est vivante quand la garde
+/// #5522 la regarde, puis son producteur l'abandonne PENDANT l'envoi à la
+/// sortie (téléchargement Qobuz coupé après un octet). La sortie, qui ouvre
+/// `/stream/<id>` à la fin de l'envoi, tirerait un 404, et la zone resterait
+/// « en lecture » à 0:00 sans un mot. Attendu : la sortie est arrêtée,
+/// `output_sent` est faux et le bandeau dit que le flux n'a pas pu être
+/// ouvert — le chemin d'erreur ordinaire.
+#[tokio::test]
+async fn une_session_abandonnee_pendant_l_envoi_arrete_la_sortie_et_le_dit_6658() {
+    let device_id = "mock-6658-course";
+    let (orch, sid, req, resolved, (entree, feu_vert)) =
+        banc_session_morte_pendant_l_envoi_6658(device_id).await;
+    let habillage = super::transport::Habillage {
+        album: None,
+        cover_path: None,
+    };
+
+    let envoi = orch.envoyer_a_la_sortie(
+        &req,
+        &resolved,
+        &habillage,
+        false,
+        std::time::Instant::now(),
+        0,
+    );
+    let producteur = async {
+        // La garde #5522 est passée : la sortie est entrée dans son envoi.
+        entree.notified().await;
+        assert!(orch.streamer.session_alive(&sid).await);
+        // Le producteur meurt maintenant, avant que la sortie n'ouvre le flux.
+        abandonner_la_session_de_transcodage(&orch.streamer, &sid, None).await;
+        feu_vert.notify_one();
+    };
+    let ((output_sent, output_error), ()) = tokio::join!(envoi, producteur);
+
+    let outputs = orch.outputs.lock().await;
+    let out = outputs.get(device_id).unwrap();
+    let guard = out.lock().await;
+    let mock = guard
+        .as_any()
+        .downcast_ref::<MockOutput>()
+        .expect("mock output");
+    assert!(
+        !output_sent,
+        "un flux mort pendant l'envoi ne compte pas comme envoyé : c'est ce \
+         qui arrête la zone avec un bandeau"
+    );
+    assert!(
+        mock.stop_call_count() >= 1,
+        "la sortie qui tient un flux mort doit être arrêtée"
+    );
+    let message = output_error.expect("un message pour le bandeau de la zone");
+    assert!(
+        message.contains("n'a pas pu être ouvert") && message.contains("qobuz"),
+        "le message dit que le flux du service n'a pas pu être ouvert : {message}"
+    );
+}
+
+/// #6658 — contre-témoin : une session RETIRÉE pendant l'envoi sans que son
+/// producteur l'ait abandonnée (Stop, saut de piste, nouvelle lecture) n'est
+/// pas un échec de cette lecture. La sortie n'est pas arrêtée, aucun bandeau.
+#[tokio::test]
+async fn une_session_retiree_sans_abandon_pendant_l_envoi_n_arrete_rien_6658() {
+    let device_id = "mock-6658-retrait";
+    let (orch, sid, req, resolved, (entree, feu_vert)) =
+        banc_session_morte_pendant_l_envoi_6658(device_id).await;
+    let habillage = super::transport::Habillage {
+        album: None,
+        cover_path: None,
+    };
+
+    let envoi = orch.envoyer_a_la_sortie(
+        &req,
+        &resolved,
+        &habillage,
+        false,
+        std::time::Instant::now(),
+        0,
+    );
+    let retrait = async {
+        entree.notified().await;
+        orch.streamer.remove_session(&sid).await;
+        feu_vert.notify_one();
+    };
+    let ((output_sent, output_error), ()) = tokio::join!(envoi, retrait);
+
+    let outputs = orch.outputs.lock().await;
+    let out = outputs.get(device_id).unwrap();
+    let guard = out.lock().await;
+    let mock = guard
+        .as_any()
+        .downcast_ref::<MockOutput>()
+        .expect("mock output");
+    assert!(output_sent, "l'envoi a abouti : {output_error:?}");
+    assert_eq!(output_error, None);
+    assert_eq!(mock.stop_call_count(), 0, "rien ne doit arrêter la sortie");
+}

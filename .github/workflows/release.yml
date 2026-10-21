@@ -841,10 +841,27 @@ jobs:
             FileWrite `$0 'tune-server.exe$\r$\n'
             FileClose `$0
 
+            ; #6253 - meme lanceur, serveur SANS fenetre de terminal : il se
+            ; relance detache (--sans-console) puis rend la main. Le journal
+            ; reste dans %LOCALAPPDATA%\TuneServer\tune-server.log. Raccourcis
+            ; AJOUTES au menu Demarrer ; ceux d'avant ne changent pas.
+            FileOpen `$0 "`$INSTDIR\start-tune-server-sans-console.bat" w
+            FileWrite `$0 '@echo off$\r$\n'
+            FileWrite `$0 'cd /d "%~dp0"$\r$\n'
+            FileWrite `$0 'set "TUNE_WEB_DIR=%~dp0web"$\r$\n'
+            FileWrite `$0 'set "TUNE_PORT=8888"$\r$\n'
+            FileWrite `$0 'set "TUNE_OPEN_BROWSER=1"$\r$\n'
+            FileWrite `$0 'set "TUNE_LOG_LEVEL=DEBUG"$\r$\n'
+            FileWrite `$0 'tune-server.exe --sans-console$\r$\n'
+            FileClose `$0
+
             ; Start menu
             CreateDirectory "`$SMPROGRAMS\Tune Server"
             CreateShortcut "`$SMPROGRAMS\Tune Server\Tune Server.lnk" "`$INSTDIR\start-tune-server.bat" "" "`$INSTDIR\tune-server.exe"
             CreateShortcut "`$SMPROGRAMS\Tune Server\Uninstall.lnk" "`$INSTDIR\uninstall.exe"
+            ; #6253 - console reduite le temps du detachement, puis fermee.
+            CreateShortcut "`$SMPROGRAMS\Tune Server\Tune Server (sans console).lnk" "`$INSTDIR\start-tune-server-sans-console.bat" "" "`$INSTDIR\tune-server.exe" 0 SW_SHOWMINIMIZED
+            CreateShortcut "`$SMPROGRAMS\Tune Server\Quitter Tune Server.lnk" "`$SYSDIR\taskkill.exe" "/F /IM tune-server.exe" "`$INSTDIR\tune-server.exe" 0 SW_SHOWMINIMIZED
             CreateShortcut "`$DESKTOP\Tune Server.lnk" "`$INSTDIR\start-tune-server.bat" "" "`$INSTDIR\tune-server.exe"
 
             WriteUninstaller "`$INSTDIR\uninstall.exe"
