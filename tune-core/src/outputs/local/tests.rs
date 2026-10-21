@@ -4233,12 +4233,13 @@ fn le_preampli_garde_vaut_pour_les_pistes_suivantes_5215() {
     assert!(!sortie.has_eq(), "l'égaliseur ne compte pas comme actif");
 }
 
-/// #6211 (décision de Bertrand du 19/10) — sur un flux SANS FIN (radio
-/// jouée en local), aucune piste suivante ne relaie le préampli gardé : il
-/// s'éteint en fondu jusqu'à 0 dB, sans marche, et le neutre se retire.
-/// Avant, le niveau restait baissé jusqu'à la relance de la station.
+/// #6211, décision de Bertrand du 21/10 (« jamais de hausse » vaut PARTOUT,
+/// radio comprise ; elle remplace celle du 19/10 sur ce point). Radio jouée
+/// en local, préampli négatif, coupure de l'égaliseur : le niveau ne monte
+/// jamais. La courbe s'efface à niveau constant, puis le préampli reste
+/// gardé jusqu'au prochain geste, sans marche ; le neutre reste monté.
 #[test]
-fn sur_une_radio_le_preampli_garde_s_eteint_en_fondu_6211() {
+fn radio_preampli_negatif_coupure_de_l_egaliseur_le_niveau_ne_monte_jamais_6211() {
     let sortie = LocalOutput::new("Casque".to_string());
     sortie.set_compensation_de_niveau(false);
     sortie.set_flux_sans_fin(true);
@@ -4248,30 +4249,32 @@ fn sur_une_radio_le_preampli_garde_s_eteint_en_fondu_6211() {
         preampli < -10.0,
         "prémisse : grosse réserve ({preampli} dB)"
     );
+    let plafond = (AMPLITUDE_5215 * 10f64.powf(preampli / 20.0)) as f32 * 1.012;
     let mut trame = 0;
-    // Avant l'égaliseur : le niveau de référence.
-    let sec = jouer_5215(&sortie, &mut trame, 20);
-    let reference = crete_5215(&sec);
     sortie.replace_eq_live(Some(eq));
     let mut signal = jouer_5215(&sortie, &mut trame, 60);
     sortie.replace_eq_live(None);
-    // 3 s de rampe = 300 paquets de 10 ms ; 50 de marge.
-    signal.extend(jouer_5215(&sortie, &mut trame, 350));
-    let fin = crete_5215(&signal[signal.len() - 4800..]);
-    let ecart_db = 20.0 * f64::from(fin / reference).log10();
-    assert!(
-        ecart_db.abs() < 0.5,
-        "radio, égaliseur coupé, fondu fini : le niveau doit revenir à celui \
-         d'avant l'égaliseur ({ecart_db:+.2} dB ; préampli {preampli:.2} dB)"
-    );
+    let coupure = signal.len();
+    // 3 s de rampe = 300 paquets de 10 ms ; 100 de marge.
+    signal.extend(jouer_5215(&sortie, &mut trame, 400));
+    for (i, fenetre) in signal[coupure..].chunks(4800).enumerate() {
+        let crete = crete_5215(fenetre);
+        assert!(
+            crete <= plafond,
+            "radio, égaliseur coupé, préampli {preampli:.2} dB : le niveau est monté \
+             (crête {crete} > {plafond} à {:.1} s de la coupure) — jamais de hausse \
+             (décision du 21/10)",
+            i as f64 * 0.1
+        );
+    }
     let marche = plus_grande_marche_5215(&signal);
     assert!(
         marche <= MARCHE_MAX_5215,
-        "l'extinction du préampli fait une marche de {marche} (seuil {MARCHE_MAX_5215})"
+        "une marche de {marche} après la coupure (seuil {MARCHE_MAX_5215})"
     );
     assert!(
-        sortie.eq.lock().unwrap().is_none(),
-        "préampli éteint : le neutre doit quitter la chaîne"
+        sortie.eq.lock().unwrap().is_some(),
+        "le préampli négatif reste gardé dans la chaîne de la radio"
     );
 }
 
