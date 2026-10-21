@@ -3799,13 +3799,24 @@ impl PositionPoller {
                                 current_bytes,
                             );
                             ps.last_bytes_sent = current_bytes;
-                            if ps.playing_stall_ticks >= PLAYING_STALL_THRESHOLD {
+                            // #6702 — trente tours ET trente secondes : une
+                            // rafale de tours rattrapés ne coupe plus une
+                            // lecture saine.
+                            if decisions::lecture_sans_progres_etablie(
+                                ps.playing_stall_ticks,
+                                &mut ps.playing_stall_depuis,
+                                Instant::now(),
+                            ) {
                                 warn!(
                                     zone_id,
                                     position_ms = status.position_ms,
                                     peak_position_ms = ps.peak_position_ms,
                                     bytes_sent = current_bytes,
                                     stall_ticks = ps.playing_stall_ticks,
+                                    stall_secs = ps
+                                        .playing_stall_depuis
+                                        .map(|t| t.elapsed().as_secs())
+                                        .unwrap_or(0),
                                     wall_secs = wall_elapsed,
                                     "dlna_playing_without_progress_stopping_zone"
                                 );
