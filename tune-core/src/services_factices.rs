@@ -16,6 +16,19 @@
 //! Les services réseau (Qobuz, TIDAL, Deezer) ne passent PAS par ici : leurs
 //! adresses de base se donnent à la construction du service
 //! (`avec_bases_de_test`), service par service.
+//!
+//! Une exception, pour le même motif que les programmes : deux appels de la
+//! licence et du SSO vers mozaiklabs.fr n'ont ni service à construire ni
+//! réglage qui les redirige (`mozaik_base_url` ne les concerne pas) — le
+//! battement horaire (`POST /api/v1/heartbeat`), qui porte le verdict de la
+//! licence, et la liaison du serveur au compte (`POST
+//! /api/v1/cloud-library/{server_id}/link`), faite à la connexion SSO et au
+//! battement de compte. [`substituer_base`] / [`base_substituee`] leur donnent
+//! une racine d'essai sous le nom [`MOZAIKLABS`], avec la même feature et le
+//! même `None` hors feature.
+
+/// Le nom de la racine mozaiklabs.fr pour [`substituer_base`].
+pub const MOZAIKLABS: &str = "mozaiklabs";
 
 #[cfg(any(test, feature = "services-factices"))]
 mod registre {
@@ -39,6 +52,28 @@ mod registre {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(nom)
+            .cloned()
+    }
+
+    /// Les adresses de base : une table à part, pour qu'un nom de service ne
+    /// puisse jamais être pris pour un nom de programme.
+    fn bases() -> &'static Mutex<HashMap<String, String>> {
+        static BASES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+        BASES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub fn substituer_base(service: &str, base: &str) {
+        bases()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(service.to_string(), base.trim_end_matches('/').to_string());
+    }
+
+    pub fn base_substituee(service: &str) -> Option<String> {
+        bases()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(service)
             .cloned()
     }
 }
@@ -66,6 +101,27 @@ pub fn substitut(_nom: &str) -> Option<String> {
     None
 }
 
+/// Fait viser `base` (sans `/` final) par le service `service` au lieu de son
+/// adresse de production. Même portée que [`substituer_programme`] : le
+/// processus.
+#[cfg(any(test, feature = "services-factices"))]
+pub fn substituer_base(service: &str, base: &str) {
+    registre::substituer_base(service, base);
+}
+
+/// L'adresse de base d'essai du service `service`, s'il en a été déclaré une.
+#[cfg(any(test, feature = "services-factices"))]
+pub fn base_substituee(service: &str) -> Option<String> {
+    registre::base_substituee(service)
+}
+
+/// Hors construction de tests : jamais d'adresse d'essai.
+#[cfg(not(any(test, feature = "services-factices")))]
+#[inline(always)]
+pub fn base_substituee(_service: &str) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +137,21 @@ mod tests {
         assert_eq!(
             substitut("programme-declare-6336").as_deref(),
             Some("/chemin/du/faux")
+        );
+    }
+
+    #[test]
+    fn une_base_declaree_est_rendue_sans_barre_finale_et_a_part_des_programmes() {
+        assert_eq!(base_substituee("service-jamais-declare-6336"), None);
+        substituer_base("service-declare-6336", "http://127.0.0.1:9/");
+        assert_eq!(
+            base_substituee("service-declare-6336").as_deref(),
+            Some("http://127.0.0.1:9")
+        );
+        assert_eq!(
+            substitut("service-declare-6336"),
+            None,
+            "une base n'est pas un programme"
         );
     }
 }
