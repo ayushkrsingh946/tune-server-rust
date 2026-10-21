@@ -2814,6 +2814,78 @@ fn une_sortie_multicanal_mesuree_porte_son_etape_et_garde_le_verdict() {
     assert_eq!(sp.get("bit_perfect").and_then(|b| b.as_bool()), Some(false));
 }
 
+/// #6057 — un DFF 5.1 dont la liste `CHNL` n'est pas dans l'ordre de la
+/// sortie : la sortie locale ouvre six voies et les RÉORDONNE selon la
+/// disposition déclarée (#6058). Le chemin du signal annonçait « 6 canaux,
+/// sortie multicanal », bit-perfect, comme si les voies partaient telles
+/// quelles. Il doit dire la réorganisation, mesurée, et retirer le verdict.
+#[test]
+fn une_reorganisation_a_nombre_egal_est_une_etape_du_chemin_6057() {
+    use tune_core::outputs::traits::{AudioSpec, FormatOuvert, ProfondeurPcm};
+    let (backend, zone) = local_zone_migrated();
+    let mut ps = flac_playing();
+    let entree_5_1 = AudioSpec::nouvelle(96_000, ProfondeurPcm::Entier24, 6).unwrap();
+    ps.transformations_reelles = Some(
+        TransformationsReelles::nouvelles(entree_5_1, FormatOuvert::new(96_000, 6), false)
+            .avec_reorganisation_canaux(true),
+    );
+    let sp = build_signal_path(
+        &ps,
+        &zone,
+        &backend,
+        Some("HDMI"),
+        "CPAL",
+        Some(&wire("flac", 96_000, 24)),
+    )
+    .unwrap();
+    assert_eq!(
+        step_desc(&sp, "Canaux").as_deref(),
+        Some(
+            "6 canaux (5.1), voies réordonnées selon la disposition déclarée par le \
+             fichier (mesuré)"
+        ),
+        "la sortie a réordonné les voies : le chemin doit le dire, pas annoncer une \
+         sortie multicanal telle quelle (#6057)"
+    );
+    let canaux = sp["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "Canaux")
+        .unwrap();
+    assert_eq!(canaux["bit_perfect"], false, "l'étape n'est pas intacte");
+    assert_eq!(
+        sp.get("bit_perfect").and_then(|b| b.as_bool()),
+        Some(false),
+        "des voies ont changé de place : le flux n'est plus celui de la source"
+    );
+
+    // Une réorganisation en stéréo (voies gauche et droite déclarées
+    // inversées) se dit aussi, alors qu'aucune étape multicanal n'existe.
+    let entree_2 = AudioSpec::nouvelle(96_000, ProfondeurPcm::Entier24, 2).unwrap();
+    ps.transformations_reelles = Some(
+        TransformationsReelles::nouvelles(entree_2, FormatOuvert::new(96_000, 2), false)
+            .avec_reorganisation_canaux(true),
+    );
+    let sp = build_signal_path(
+        &ps,
+        &zone,
+        &backend,
+        Some("HDMI"),
+        "CPAL",
+        Some(&wire("flac", 96_000, 24)),
+    )
+    .unwrap();
+    assert!(
+        step_desc(&sp, "Canaux")
+            .as_deref()
+            .is_some_and(|d| d.starts_with("2 canaux") && d.contains("réordonnées")),
+        "stéréo réordonnée : {:?}",
+        step_desc(&sp, "Canaux")
+    );
+    assert_eq!(sp.get("bit_perfect").and_then(|b| b.as_bool()), Some(false));
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // REF-6b côté PRODUCTEUR (#2219, REF-7) — la sortie locale remplit le contrat
 // que #3987 avait posé sans producteur : `EtageDeConversion::transformations()`

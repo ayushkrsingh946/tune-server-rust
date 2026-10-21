@@ -180,6 +180,20 @@ fn default_channels() -> u16 {
     2
 }
 
+impl StreamQuality {
+    /// #6334 — le codec livré est-il avec perte (AAC, MP3, Ogg, Opus) ? Sa
+    /// profondeur de bits n'existe pas alors : un AAC n'a pas « 16 bits »,
+    /// et `bit_depth` vaut 0 sans que la qualité soit pour autant incomplète.
+    /// Faux pour un codec inconnu ou ambigu (M4A) : on ne conclut rien.
+    pub fn avec_perte(&self) -> bool {
+        use crate::audio::formats::AudioFormat;
+        matches!(
+            AudioFormat::from_extension(&self.codec),
+            Some(AudioFormat::Aac | AudioFormat::Mp3 | AudioFormat::Ogg | AudioFormat::Opus)
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamUrl {
     pub url: String,
@@ -939,6 +953,24 @@ pub trait StreamingService: Send + Sync {
     /// chaque profil, exactement comme avant.
     fn favoris_miroir(&self) -> bool {
         false
+    }
+
+    /// Les playlists de la bibliothèque du compte, possédées ET suivies, lues
+    /// EN ENTIER, chacune avec `editable` (`Some(false)` : suivie).
+    ///
+    /// #6461 (FabienM, fil 2302, point 1) : chez Qobuz, une playlist
+    /// éditoriale n'entre dans la bibliothèque que si on la met en favori, et
+    /// en sort quand on retire le cœur. Le miroir ([`crate::streaming::favorites_mirror`])
+    /// relit donc ces playlists suivies comme des favoris.
+    ///
+    /// * `None` (défaut) : le service ne sait pas le dire — les playlists
+    ///   restent poussées sans jamais être relues, comme avant ;
+    /// * `Some(Err)` : la lecture a échoué OU n'est pas complète. Le miroir
+    ///   retire une playlist que la lecture ne nomme plus : une liste tronquée
+    ///   lui ferait retirer tout ce qui dépasse la coupe. Une lecture
+    ///   incomplète n'est donc jamais rendue en `Ok`.
+    async fn playlists_de_la_bibliotheque(&self) -> Option<Result<Vec<StreamPlaylist>, TuneError>> {
+        None
     }
 
     async fn add_favorite(&mut self, fav_type: &str, item_id: &str) -> Result<(), TuneError> {
