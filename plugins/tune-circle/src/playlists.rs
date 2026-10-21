@@ -194,7 +194,13 @@ async fn lire(State(e): State<Arc<Collaboratif>>, Path(id): Path<String>) -> Res
     if !identifiant_valide(&id) {
         return introuvable();
     }
-    en_reponse(lire_la_playlist(&e.relais, &id).await)
+    // #6688 — la fiche d'une playlist de cercle qui suit une playlist locale
+    // porte `follow`.
+    crate::suivi::avec_le_suivi(
+        &e.relais.reglages(),
+        &id,
+        lire_la_playlist(&e.relais, &id).await,
+    )
 }
 
 async fn lire_la_playlist(relais: &Relais, id: &str) -> Issue {
@@ -906,7 +912,13 @@ async fn renoncer(State(e): State<Arc<Collaboratif>>, Path(id): Path<String>) ->
 /// défaut), comme les playlists créées par un greffon WASM
 /// (`plugins_host::profil_actif`).
 fn profil_actif(e: &Collaboratif) -> i64 {
-    SettingsRepo::with_backend(e.resolveur.backend().clone())
+    profil_actif_de(e.resolveur.backend())
+}
+
+/// [`profil_actif`], depuis la base seule (#6688 : le lien de suivi désigne
+/// une playlist de ce profil).
+pub(crate) fn profil_actif_de(backend: &Arc<dyn tune_core::db::backend::DbBackend>) -> i64 {
+    SettingsRepo::with_backend(backend.clone())
         .get("active_profile_id")
         .ok()
         .flatten()
@@ -935,7 +947,8 @@ fn en_ligne_de_playlist(trouvee: &Trouvee) -> Option<EntryContent> {
 /// locale déjà commencée : `circle_copie_recuperable:{id de l'archive}` →
 /// identifiant de la playlist locale.
 ///
-/// C'est le SEUL état que T5 garde ici, et il ne dit rien du cercle : deux
+/// Avec le lien de suivi de #6688 ([`crate::suivi::PREFIXE_SUIVI`]), c'est le
+/// seul état que T5 garde ici, et il ne dit rien du cercle : deux
 /// identifiants, pour qu'une seconde copie complète la même playlist au lieu
 /// d'en créer une autre. Il vit dans `settings`, comme le stockage des
 /// greffons WASM, et disparaît quand l'archive est libérée. Il ne sert rien
