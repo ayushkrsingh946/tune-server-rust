@@ -288,7 +288,7 @@ impl Compteurs {
 /// Compare des CHEMINS, pas des identifiants : les pistes d'une feuille CUE
 /// partagent le fichier image. Aucune zone ne tient de piste — le cas sans
 /// lecture — : aucune requête, rien n'est écarté.
-async fn fichier_en_lecture(
+pub(super) async fn fichier_en_lecture(
     playback: &tune_core::playback::PlaybackManager,
     pistes: &tune_core::db::track_repo::TrackRepo,
     chemin: &str,

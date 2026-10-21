@@ -82,6 +82,7 @@ mod garde_ecriture_fichiers {
         ".save_to_path(",
         ".save_to(",
         "write_tags(",
+        "write_tags_atomique(",
         "write_metadata(",
         "write_metadata_to_file(",
         "write_metadata_to_file_sync(",

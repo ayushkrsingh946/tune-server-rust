@@ -8,7 +8,9 @@ use tracing::{debug, info, warn};
 use tune_http_types::panne_sql::OuDefautJournalise;
 
 use tune_core::db::backend::ToSqlValue;
-use tune_core::metadata::tag_writer::{TagUpdate, write_tags};
+use tune_core::metadata::tag_writer::{
+    MOTIF_FORMAT_SANS_EMPREINTE, TagUpdate, write_tags_atomique,
+};
 
 use crate::state::AppState;
 
@@ -42,6 +44,52 @@ const TACHE_WRITE_TAGS: &str = "write_tags";
 /// ferait un événement WebSocket par fichier.
 const JALON_AVANCEMENT: i32 = 50;
 
+/// Motif du refus d'écrire le fichier d'une piste qu'une zone tient, en
+/// lecture ou en pause (#6635, même garde que la gravure du DR, #6212).
+pub(crate) const MOTIF_FICHIER_EN_LECTURE: &str =
+    "fichier en cours de lecture : écriture refusée, original intact";
+
+/// Motif de l'arrêt de la passe quand le réglage est coupé en cours de route.
+pub(crate) const MOTIF_REGLAGE_COUPE: &str =
+    "écriture dans les fichiers désactivée en cours de passe : arrêt";
+
+/// Au plus autant de refus détaillés dans le statut : le compte, lui, est
+/// complet (`skipped`, `errors`).
+const REFUS_DETAILLES_MAX: usize = 50;
+
+/// Les fichiers refusés ou en échec, avec leur motif, tels que le statut les
+/// remonte à l'utilisateur.
+#[derive(Default)]
+struct Refus(Vec<Value>);
+
+impl Refus {
+    fn noter(&mut self, track_id: i64, file_path: &str, motif: &str) {
+        if self.0.len() < REFUS_DETAILLES_MAX {
+            self.0
+                .push(json!({"track_id": track_id, "file": file_path, "reason": motif}));
+        }
+    }
+}
+
+/// Après l'écriture, la ligne de la piste reprend la taille et la date du
+/// fichier réécrit, comme après la gravure du DR (fil 2134) : la base porte
+/// déjà les valeurs écrites, et le surveillant ne relit pas le fichier pour
+/// rien. La date du fichier, elle, avance : le fichier a changé.
+fn remettre_la_ligne_en_phase(
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    chemin: &str,
+) {
+    let Some((taille, mtime)) =
+        tune_core::audio::iso9660::taille_et_mtime(std::path::Path::new(chemin))
+    else {
+        return;
+    };
+    let pistes = tune_core::db::track_repo::TrackRepo::with_backend(backend.clone());
+    if let Err(e) = pistes.update_mtime_and_size(chemin, mtime, taille as i64) {
+        warn!(chemin = %chemin, error = %e, "write_tags_ligne_non_remise_en_phase");
+    }
+}
+
 /// Les colonnes que la passe lit, dans l'ordre des `row.get(n)` plus bas.
 ///
 /// #6635 — l'interprète et l'album viennent de leurs tables, le commentaire de
@@ -62,6 +110,14 @@ const SELECTION_PISTES: &str = "SELECT t.id, t.file_path, t.title, ar.name, al.t
 /// Writes metadata from the DB back to audio files' tags using lofty.
 /// Reads current file tags first, then only fills in missing fields
 /// (when `only_missing` is true).
+///
+/// ⛔ #6635 — chaque fichier passe par l'écriture SÛRE
+/// (`tag_writer::write_tags_atomique`) : copie cachée dans le même dossier,
+/// contrôle de l'audio de la copie, `fsync` puis `rename` atomique, droits et
+/// propriétaire conservés. Jamais en place. Refusés, avec leur motif dans
+/// `refus` du statut : le fichier d'une piste qu'une zone tient, un fichier ou
+/// un volume en lecture seule, un format dont l'audio ne se contrôle pas.
+/// Geste explicite seulement : rien ne lance cette passe d'office.
 pub(crate) async fn write_tags_to_files(
     State(state): State<AppState>,
     Json(body): Json<WriteTagsRequest>,
@@ -92,6 +148,7 @@ pub(crate) async fn write_tags_to_files(
     let taches = state.background_tasks.clone();
 
     let backend2 = backend.clone();
+    let state2 = state.clone();
     let task_id_clone = task_id.clone();
     let only_missing = body.only_missing;
     let track_ids = body.track_ids;
@@ -161,6 +218,8 @@ pub(crate) async fn write_tags_to_files(
         let mut written = 0i32;
         let mut skipped = 0i32;
         let mut errors = 0i32;
+        let mut refus = Refus::default();
+        let pistes = tune_core::db::track_repo::TrackRepo::with_backend(backend2.clone());
 
         // Le total dès qu'il est connu. La sélection SQL précède la boucle :
         // publier ici évite un bandeau bloqué sur « 0/0 », que le client
@@ -221,6 +280,22 @@ pub(crate) async fn write_tags_to_files(
             // résoudre pareil, sinon il écarte avant même de l'appeler.
             if tune_core::library::local_path::resolve_local_path(&file_path).is_missing() {
                 debug!(track_id, file_path = %file_path, "write_tags_file_not_found");
+                skipped += 1;
+                continue;
+            }
+
+            // Le réglage relu avant CHAQUE fichier : coupé en cours de passe,
+            // plus rien n'est écrit.
+            if !crate::routes::ecriture_fichiers::autorisee(&state2) {
+                warn!(track_id, "write_tags_reglage_coupe_arret");
+                refus.noter(track_id, &file_path, MOTIF_REGLAGE_COUPE);
+                break;
+            }
+            // #6635 — jamais le fichier d'une piste qu'une zone tient (lecture
+            // ou pause) : même garde que la gravure du DR (#6212).
+            if super::graver_dr::fichier_en_lecture(&state2.playback, &pistes, &file_path).await {
+                info!(track_id, file_path = %file_path, "write_tags_refuse_fichier_en_lecture");
+                refus.noter(track_id, &file_path, MOTIF_FICHIER_EN_LECTURE);
                 skipped += 1;
                 continue;
             }
@@ -305,9 +380,12 @@ pub(crate) async fn write_tags_to_files(
                     continue;
                 }
 
-                match write_tags(&file_path, &update).await {
+                match write_tags_atomique(&file_path, &update).await {
                     Ok(result) => {
                         written += 1;
+                        if result.fields_written > 0 {
+                            remettre_la_ligne_en_phase(&backend2, &file_path);
+                        }
                         debug!(
                             track_id,
                             file_path = %file_path,
@@ -315,8 +393,14 @@ pub(crate) async fn write_tags_to_files(
                             "tags_written"
                         );
                     }
+                    Err(e) if e == MOTIF_FORMAT_SANS_EMPREINTE => {
+                        info!(track_id, file_path = %file_path, "write_tags_format_refuse");
+                        refus.noter(track_id, &file_path, &e);
+                        skipped += 1;
+                    }
                     Err(e) => {
                         warn!(track_id, file_path = %file_path, error = %e, "write_tags_failed");
+                        refus.noter(track_id, &file_path, &e);
                         errors += 1;
                     }
                 }
@@ -339,9 +423,12 @@ pub(crate) async fn write_tags_to_files(
                     lyrics: None,
                 };
 
-                match write_tags(&file_path, &update).await {
+                match write_tags_atomique(&file_path, &update).await {
                     Ok(result) => {
                         written += 1;
+                        if result.fields_written > 0 {
+                            remettre_la_ligne_en_phase(&backend2, &file_path);
+                        }
                         debug!(
                             track_id,
                             file_path = %file_path,
@@ -349,8 +436,14 @@ pub(crate) async fn write_tags_to_files(
                             "tags_written_overwrite"
                         );
                     }
+                    Err(e) if e == MOTIF_FORMAT_SANS_EMPREINTE => {
+                        info!(track_id, file_path = %file_path, "write_tags_format_refuse");
+                        refus.noter(track_id, &file_path, &e);
+                        skipped += 1;
+                    }
                     Err(e) => {
                         warn!(track_id, file_path = %file_path, error = %e, "write_tags_failed");
+                        refus.noter(track_id, &file_path, &e);
                         errors += 1;
                     }
                 }
@@ -370,6 +463,7 @@ pub(crate) async fn write_tags_to_files(
                             "skipped": skipped,
                             "errors": errors,
                             "total": total,
+                            "refus": refus.0,
                         })
                         .to_string(),
                     )
@@ -388,6 +482,7 @@ pub(crate) async fn write_tags_to_files(
                     "skipped": skipped,
                     "errors": errors,
                     "total": total,
+                    "refus": refus.0,
                 })
                 .to_string(),
             )

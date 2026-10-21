@@ -235,3 +235,153 @@ async fn sans_genre_dans_le_fichier_le_remplissage_pose_tous_les_genres_6635() {
     );
     assert_eq!(genres_m4a(&m4a), ["Soul"], "le genre déjà présent reste");
 }
+
+// ---------------------------------------------------------------------------
+// #6635 — l'écriture SÛRE, par la route : l'audio reste identique, aucune
+// copie de travail ne traîne, le fichier joué et le fichier en lecture seule
+// sont refusés avec leur motif, les droits sont conservés, la ligne de la
+// piste reprend la taille et la date du fichier réécrit.
+// ---------------------------------------------------------------------------
+
+fn empreinte(p: &Path) -> [u8; 32] {
+    tune_core::metadata::empreinte_audio::empreinte_audio(p)
+        .unwrap()
+        .unwrap()
+}
+
+/// Les fichiers du dossier qui ne sont pas les trois pistes : copies de
+/// travail laissées, quel que soit leur préfixe.
+fn restes(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !["01.flac", "02.mp3", "03.m4a"].contains(&n.as_str()))
+        .collect()
+}
+
+fn motifs(statut: &Value) -> Vec<(String, String)> {
+    statut["refus"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|r| {
+            (
+                r["file"].as_str().unwrap_or("").to_string(),
+                r["reason"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn graver_tags_garde_l_audio_identique_et_ne_laisse_aucune_copie_6635() {
+    let banc = banc();
+    let fichiers = ["01.flac", "02.mp3", "03.m4a"].map(|n| banc.dir.join(n));
+    let avant: Vec<_> = fichiers.iter().map(|p| empreinte(p)).collect();
+    let statut = graver(&banc.state, false).await;
+    assert_eq!(statut["written"], 3, "{statut}");
+    for (p, a) in fichiers.iter().zip(&avant) {
+        assert_eq!(
+            &empreinte(p),
+            a,
+            "#6635 : l'audio de {} doit rester identique après « Graver tags »",
+            p.display()
+        );
+    }
+    assert!(
+        restes(banc.dir.path()).is_empty(),
+        "#6635 : aucune copie de travail ne doit rester : {:?}",
+        restes(banc.dir.path())
+    );
+    // La ligne de la piste reprend la date et la taille du fichier réécrit.
+    let flac = &fichiers[0];
+    let (taille, mtime) = tune_core::audio::iso9660::taille_et_mtime(flac).unwrap();
+    let ligne = tune_core::db::track_repo::TrackRepo::with_backend(banc.state.backend.clone())
+        .get(11)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ligne.file_size, Some(taille as i64));
+    assert_eq!(ligne.file_mtime, Some(mtime));
+}
+
+#[tokio::test]
+async fn graver_tags_refuse_le_fichier_en_cours_de_lecture_6635() {
+    let banc = banc();
+    let flac = banc.dir.join("01.flac");
+    let octets = std::fs::read(&flac).unwrap();
+    banc.state
+        .playback
+        .play(
+            6635,
+            tune_core::playback::NowPlaying {
+                track_id: Some(11),
+                title: "piste jouée".into(),
+                source: "local".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+    let statut = graver(&banc.state, false).await;
+    assert_eq!(
+        std::fs::read(&flac).unwrap(),
+        octets,
+        "#6635 : le fichier joué ne doit pas être écrit — {statut}"
+    );
+    assert_eq!(
+        statut["written"], 2,
+        "les deux autres pistes s'écrivent — {statut}"
+    );
+    assert!(
+        motifs(&statut)
+            .iter()
+            .any(|(f, m)| f.ends_with("01.flac") && m == MOTIF_FICHIER_EN_LECTURE),
+        "#6635 : le refus doit être remonté avec son motif — {statut}"
+    );
+    assert!(restes(banc.dir.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn graver_tags_refuse_le_fichier_en_lecture_seule_6635() {
+    use std::os::unix::fs::PermissionsExt;
+    let banc = banc();
+    let flac = banc.dir.join("01.flac");
+    std::fs::set_permissions(&flac, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let octets = std::fs::read(&flac).unwrap();
+    let statut = graver(&banc.state, false).await;
+    std::fs::set_permissions(&flac, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        std::fs::read(&flac).unwrap(),
+        octets,
+        "#6635 : un fichier en lecture seule ne doit pas être écrit — {statut}"
+    );
+    assert_eq!(statut["errors"], 1, "{statut}");
+    assert!(
+        motifs(&statut).iter().any(|(f, m)| f.ends_with("01.flac")
+            && m == tune_core::metadata::tag_writer::MOTIF_FICHIER_LECTURE_SEULE),
+        "#6635 : le refus doit être remonté avec son motif — {statut}"
+    );
+    assert!(restes(banc.dir.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn graver_tags_conserve_les_droits_du_fichier_6635() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let banc = banc();
+    let mp3 = banc.dir.join("02.mp3");
+    std::fs::set_permissions(&mp3, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let avant = std::fs::metadata(&mp3).unwrap();
+    let statut = graver(&banc.state, false).await;
+    assert_eq!(statut["written"], 3, "{statut}");
+    let apres = std::fs::metadata(&mp3).unwrap();
+    assert_ne!(
+        avant.ino(),
+        apres.ino(),
+        "le fichier a été remplacé, pas écrit en place"
+    );
+    assert_eq!(apres.mode() & 0o7777, 0o640, "#6635 : droits conservés");
+    assert_eq!((apres.uid(), apres.gid()), (avant.uid(), avant.gid()));
+}
