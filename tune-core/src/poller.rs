@@ -218,6 +218,16 @@ const STALL_DECLINE_MAX_TICKS: u8 = 10;
 /// advanced once, so slow starts and renderers with no position support remain
 /// outside its scope.
 const PLAYING_STALL_THRESHOLD: u8 = 30;
+/// 🔴 #6702 — le plancher en SECONDES du seuil ci-dessus, comme
+/// [`STOPPED_FAILURE_MIN_SECS`] pour le bras « arrêté » (#4480).
+///
+/// Après un tour bloqué, `tokio::time::interval` rattrape les tours manqués en
+/// rafale : sur le .18 le 21/10, trente tours « figés » en 247 ms, position du
+/// renderer égale au temps écoulé (204 s pour 204 s), renderer encore en train
+/// de jouer — et la zone coupée. La position d'un renderer DLNA avance à la
+/// seconde : des tours espacés de quelques millisecondes la voient forcément
+/// figée.
+const PLAYING_STALL_MIN_SECS: u64 = 30;
 /// Grace period (seconds) after a seek during which the poller does not
 /// overwrite the in-memory position with the value reported by the output.
 /// This prevents the progress bar from snapping back to the pre-seek

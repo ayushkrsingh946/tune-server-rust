@@ -494,6 +494,38 @@ pub fn next_dlna_playing_stall_ticks(
     }
 }
 
+/// 🔴 #6702 — la série de tours sans progrès a-t-elle duré assez longtemps,
+/// en TEMPS RÉEL, pour couper la zone ?
+///
+/// `ticks` est le compteur que vient de rendre
+/// [`next_dlna_playing_stall_ticks`]. `depuis` date le premier tour de la
+/// série : il est posé quand la série commence (`ticks == 1`, ou première
+/// rencontre), effacé quand elle retombe à zéro. Les remises à zéro faites
+/// ailleurs dans le sondeur repartent donc d'elles-mêmes d'un instant neuf.
+///
+/// Il faut les DEUX : `PLAYING_STALL_THRESHOLD` tours (des sondages réels) et
+/// `PLAYING_STALL_MIN_SECS` secondes depuis le premier. Une rafale de tours
+/// rattrapés après un blocage du sondeur n'a pas laissé au renderer le temps
+/// d'avancer sa position d'une seconde : elle ne prouve rien.
+pub fn lecture_sans_progres_etablie(
+    ticks: u8,
+    depuis: &mut Option<std::time::Instant>,
+    maintenant: std::time::Instant,
+) -> bool {
+    if ticks == 0 {
+        *depuis = None;
+        return false;
+    }
+    if ticks == 1 || depuis.is_none() {
+        *depuis = Some(maintenant);
+    }
+    ticks >= super::PLAYING_STALL_THRESHOLD
+        && depuis.is_some_and(|t| {
+            maintenant.saturating_duration_since(t)
+                >= std::time::Duration::from_secs(super::PLAYING_STALL_MIN_SECS)
+        })
+}
+
 /// Une relance automatique après démarrage mort est-elle permise ?
 /// Au plus une par fenêtre : si la précédente date de moins de
 /// DEAD_START_RETRY_COOLDOWN_SECS, l'échec suivant coupe la zone comme
