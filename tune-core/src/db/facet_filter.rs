@@ -206,54 +206,83 @@ pub fn bloc_sans_etiquette(
     }
 }
 
-/// Les champs que compare le TEXTE LIBRE d'Oxygen (#5192), dans l'ordre du
-/// prédicat de [`condition_texte_libre`] — et, mot pour mot, ceux que le
-/// client web compare dans sa fenêtre chargée (`OxygenView.svelte`) : le
-/// titre, l'artiste, l'album, le label, les termes de chemin
-/// (`path_terms`, que `/library/tracks` rend calculés, voir
-/// [`crate::library::full_text_search::termes_de_chemin`]) et le compositeur
-/// de la piste (fil 1684 : « Ravel » trouve le Boléro joué par un orchestre).
+/// Les champs que compare le TEXTE LIBRE d'Oxygen et de la Bibliothèque
+/// (#5192), dans l'ordre du prédicat de [`condition_texte_libre`] : UN
+/// marqueur par entrée, et ce pour CHAQUE mot de la saisie (#4319).
+///
+/// Les six premiers sont, mot pour mot, ceux que le client web compare dans
+/// sa fenêtre chargée (`OxygenView.svelte`) : le titre, l'artiste, l'album,
+/// le label, les termes de chemin (`path_terms`, que `/library/tracks` rend
+/// calculés, voir [`crate::library::full_text_search::termes_de_chemin`]) et
+/// le compositeur de la piste (fil 1684 : « Ravel » trouve le Boléro joué par
+/// un orchestre).
+///
+/// #4319 (Tades, fils 1817 et 2264 : « mahler mehta » ne trouvait pas la
+/// Symphonie n° 3 dirigée par Zubin Mehta) y ajoute l'ARTISTE DE L'ALBUM et le
+/// CHEF D'ORCHESTRE. Le chef n'a pas de colonne : il vit dans trois magasins,
+/// chacun son marqueur — l'étiquette de fichier (`track_metadata`, clé
+/// `conductor`, écrite par le scan), les crédits de la piste
+/// (`track_credits`, rôle `conductor` : TPE3 des DSF, MusicBrainz, Qobuz) et
+/// la fiche d'album (`album_metadata`, clé `conductor`).
 ///
 /// Avant #5192, le serveur ne comparait que le titre et l'artiste, le
 /// navigateur les quatre premiers : les deux ne rendaient pas la même liste.
-pub const CHAMPS_DU_TEXTE_LIBRE: [&str; 6] = [
+pub const CHAMPS_DU_TEXTE_LIBRE: [&str; 10] = [
     "title",
     "artist_name",
     "album_title",
     "label",
     "path_terms",
     "composer",
+    "album_artist",
+    "conductor",
+    "conductor_credit",
+    "album_conductor",
 ];
 
-/// Le prédicat du texte libre d'Oxygen, pour la piste d'alias `t` : sous-
-/// chaîne, insensible à la casse et aux accents, de l'un des
-/// [`CHAMPS_DU_TEXTE_LIBRE`].
+/// Les mots du texte libre (#4319) : la saisie, doubles guillemets ôtés
+/// (`motif_like`), découpée aux blancs. Une saisie sans mot n'en rend aucun.
+pub fn mots_du_texte_libre(query: &str) -> Vec<String> {
+    query
+        .replace('"', "")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Le prédicat du texte libre d'Oxygen et de la Bibliothèque, pour la piste
+/// d'alias `t`.
+///
+/// 🔴 #4319 — CHAQUE MOT de la saisie doit se trouver, en sous-chaîne
+/// insensible à la casse et aux accents, dans AU MOINS UN des
+/// [`CHAMPS_DU_TEXTE_LIBRE`] : ET entre les mots, OU entre les champs. Avant,
+/// la saisie entière était cherchée d'un seul tenant, dans un seul champ :
+/// « mahler mehta » ne trouvait que l'album dont UN champ contenait les deux
+/// mots accolés, jamais celui où « Mahler » est dans le titre et « Mehta »
+/// chef d'orchestre. Une saisie d'un seul mot se comporte comme avant ; une
+/// saisie qu'un champ contenait d'un seul tenant est encore trouvée (chacun
+/// de ses mots y est). Le découpage ne fait donc qu'élargir.
 ///
 /// UNE rédaction pour les trois jumeaux — la liste (`list_filtered`), le
 /// tirage par répertoire (`random_ids_in_folder`) et les effectifs du rail
-/// (`facets::build_conditions`) — qui en tenaient chacun une copie. L'artiste
-/// et l'album passent par sous-requête : le compteur du rail n'a aucune
-/// jointure.
+/// (`facets::build_conditions`, donc `albums-detailed`) — qui en tenaient
+/// chacun une copie. L'artiste, l'album, l'artiste de l'album et le chef
+/// passent par sous-requête NON corrélée : le compteur du rail n'a aucune
+/// jointure, et chaque sous-requête n'est évaluée qu'une fois.
 ///
-/// La saisie est LITTÉRALE : ses `%` et `_` sont échappés, comme le navigateur
-/// qui fait un `includes`. Les doubles guillemets sont ôtés (`motif_like`).
-/// Rend le prédicat et les valeurs à lier, dans l'ordre des marqueurs.
+/// Chaque mot est LITTÉRAL : ses `%` et `_` sont échappés, comme le
+/// navigateur qui fait un `includes`. Rend le prédicat et les valeurs à lier,
+/// dans l'ordre des marqueurs : `CHAMPS_DU_TEXTE_LIBRE.len()` par mot.
 pub fn condition_texte_libre(
     ph: &mut Placeholders,
     query: &str,
 ) -> (String, Vec<super::backend::SqlValue>) {
-    let motif = format!(
-        "%{}%",
-        super::track_repo::echapper_jokers_like(query.replace('"', "").trim())
-    );
+    let mots = mots_du_texte_libre(query);
+    if mots.is_empty() {
+        // Comme l'ancien motif `%%` : rien n'est exclu.
+        return ("1=1".to_string(), Vec::new());
+    }
     let esc = super::track_repo::like_escape_clause();
-    let like = |ph: &mut Placeholders| format!("LIKE LOWER(unaccent({})){esc}", ph.take());
-    let titre = like(ph);
-    let artiste = like(ph);
-    let album = like(ph);
-    let label = like(ph);
-    let chemin = like(ph);
-    let compositeur = like(ph);
     // Jamais l'expression pure ici : ~60 µs par piste, et ce prédicat
     // parcourt la bibliothèque entière. SQLite : la fonction Rust enregistrée.
     let termes = match ph.engine() {
@@ -263,18 +292,55 @@ pub fn condition_texte_libre(
         // PostgreSQL : la colonne calculée et stockée (migration 076).
         Engine::Postgres => "t.path_terms".to_string(),
     };
-    let sql = format!(
-        "(LOWER(unaccent(t.title)) {titre} \
-         OR t.artist_id IN (SELECT id FROM artists WHERE LOWER(unaccent(name)) {artiste}) \
-         OR t.album_id IN (SELECT id FROM albums WHERE LOWER(unaccent(title)) {album}) \
-         OR LOWER(unaccent(t.label)) {label} \
-         OR LOWER(unaccent({termes})) {chemin} \
-         OR LOWER(unaccent(t.composer)) {compositeur})"
-    );
-    let valeurs = (0..CHAMPS_DU_TEXTE_LIBRE.len())
-        .map(|_| super::backend::SqlValue::Text(motif.clone()))
-        .collect();
-    (sql, valeurs)
+    // Les identifiants de piste des magasins ouverts : `track_credits.track_id`
+    // est du TEXTE sur un miroir PostgreSQL copié depuis SQLite, un BIGINT sur
+    // une base neuve (voir `track_id_pour_track_credits`). Les deux côtés sont
+    // projetés en texte sur PostgreSQL, ce qui tient dans les deux cas.
+    let (piste, magasin_piste, album, magasin_album) = match ph.engine() {
+        Engine::Sqlite => ("t.id", "track_id", "t.album_id", "album_id"),
+        Engine::Postgres => (
+            "CAST(t.id AS TEXT)",
+            "CAST(track_id AS TEXT)",
+            "CAST(t.album_id AS TEXT)",
+            "CAST(album_id AS TEXT)",
+        ),
+    };
+    let mut clauses = Vec::with_capacity(mots.len());
+    let mut valeurs = Vec::with_capacity(mots.len() * CHAMPS_DU_TEXTE_LIBRE.len());
+    for mot in &mots {
+        let like = |ph: &mut Placeholders| format!("LIKE LOWER(unaccent({})){esc}", ph.take());
+        let titre = like(ph);
+        let artiste = like(ph);
+        let titre_album = like(ph);
+        let label = like(ph);
+        let chemin = like(ph);
+        let compositeur = like(ph);
+        let artiste_album = like(ph);
+        let chef = like(ph);
+        let chef_credit = like(ph);
+        let chef_album = like(ph);
+        clauses.push(format!(
+            "(LOWER(unaccent(t.title)) {titre} \
+             OR t.artist_id IN (SELECT id FROM artists WHERE LOWER(unaccent(name)) {artiste}) \
+             OR t.album_id IN (SELECT id FROM albums WHERE LOWER(unaccent(title)) {titre_album}) \
+             OR LOWER(unaccent(t.label)) {label} \
+             OR LOWER(unaccent({termes})) {chemin} \
+             OR LOWER(unaccent(t.composer)) {compositeur} \
+             OR t.album_id IN (SELECT al.id FROM albums al JOIN artists ar ON ar.id = al.artist_id \
+                WHERE LOWER(unaccent(ar.name)) {artiste_album}) \
+             OR {piste} IN (SELECT {magasin_piste} FROM track_metadata \
+                WHERE key = 'conductor' AND LOWER(unaccent(value)) {chef}) \
+             OR {piste} IN (SELECT {magasin_piste} FROM track_credits \
+                WHERE LOWER(role) = 'conductor' AND LOWER(unaccent(artist_name)) {chef_credit}) \
+             OR {album} IN (SELECT {magasin_album} FROM album_metadata \
+                WHERE key = 'conductor' AND LOWER(unaccent(value)) {chef_album}))"
+        ));
+        let motif = format!("%{}%", super::track_repo::echapper_jokers_like(mot));
+        valeurs.extend(
+            (0..CHAMPS_DU_TEXTE_LIBRE.len()).map(|_| super::backend::SqlValue::Text(motif.clone())),
+        );
+    }
+    (format!("({})", clauses.join(" AND ")), valeurs)
 }
 
 /// Générateur de marqueurs positionnels, partagé par les DEUX constructeurs de
@@ -1448,16 +1514,17 @@ mod tests {
     }
     /// Fil 1684 — le prédicat du texte libre compare le compositeur, en
     /// SIXIÈME position, avec le même repli de casse et d'accents et le même
-    /// échappement que les cinq autres ; et il demande exactement autant de
+    /// échappement que les autres ; et il demande exactement autant de
     /// marqueurs qu'il rend de valeurs, sur les DEUX moteurs (piège n°2).
+    /// Un seul mot ici : le découpage en mots (#4319) a son propre témoin.
     #[test]
     fn le_texte_libre_compare_le_compositeur_sur_les_deux_moteurs() {
-        assert_eq!(CHAMPS_DU_TEXTE_LIBRE.len(), 6);
+        assert_eq!(CHAMPS_DU_TEXTE_LIBRE.len(), 10);
         assert_eq!(CHAMPS_DU_TEXTE_LIBRE[5], "composer");
         let esc = super::super::track_repo::like_escape_clause();
         for engine in [Engine::Sqlite, Engine::Postgres] {
             let mut ph = Placeholders::resuming_at(engine, 3);
-            let (sql, valeurs) = condition_texte_libre(&mut ph, "Ravél 50%");
+            let (sql, valeurs) = condition_texte_libre(&mut ph, "Ravél50%");
             assert_eq!(valeurs.len(), CHAMPS_DU_TEXTE_LIBRE.len(), "{engine:?}");
             assert_eq!(
                 ph.next_index(),
@@ -1475,13 +1542,13 @@ mod tests {
             };
             assert!(
                 sql.contains(&format!(
-                    "OR LOWER(unaccent(t.composer)) LIKE LOWER(unaccent({sixieme})){esc})"
+                    "OR LOWER(unaccent(t.composer)) LIKE LOWER(unaccent({sixieme})){esc} OR"
                 )),
-                "{engine:?} : le compositeur, sixième et dernier : {sql}"
+                "{engine:?} : le compositeur, sixième : {sql}"
             );
             let motif = format!(
                 "%{}%",
-                super::super::track_repo::echapper_jokers_like("Ravél 50%")
+                super::super::track_repo::echapper_jokers_like("Ravél50%")
             );
             for v in &valeurs {
                 assert!(
@@ -1492,3 +1559,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "texte_libre_mots_4319_tests.rs"]
+pub(crate) mod texte_libre_mots_4319_tests;

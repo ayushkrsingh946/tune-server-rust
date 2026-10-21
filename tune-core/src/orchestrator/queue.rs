@@ -23,6 +23,32 @@ impl Enjambee {
     }
 }
 
+/// Le flux que vise la sonde de niveaux d'une piste de service devenue
+/// courante par avance sans blanc : la qualité de la zone, puis — #6401 — le
+/// même repli Qobuz en 16/44,1 que la lecture. Sans lui, la piste que la
+/// lecture avait repliée au format 6 voyait sa sonde viser le flux HR que le
+/// CDN refuse : aiguilles figées sur toute la piste.
+pub(super) async fn flux_de_la_sonde_de_niveaux(
+    svc: &dyn StreamingService,
+    source: &str,
+    source_id: &str,
+    provider_quality: Option<&str>,
+) -> Option<StreamUrl> {
+    let flux = svc.get_track_url(source_id, provider_quality).await.ok()?;
+    Some(
+        crate::streaming::qobuz_repli_qualite::retenir_le_flux_du_service(
+            source,
+            svc,
+            crate::http::client::shared(),
+            source_id,
+            provider_quality,
+            flux,
+        )
+        .await
+        .flux,
+    )
+}
+
 /// #5143 — LE cœur de « la prochaine piste jouable » : depuis `position`,
 /// les lignes de file bannies pour le profil des sélections automatiques
 /// (locales par `track_id`, de service par `source` + `source_id`), et où
@@ -959,6 +985,11 @@ impl PlaybackOrchestrator {
         // pour un renderer qui se contredit et le curseur serait resté collé à
         // la fin de la piste précédente pendant tout un album enchaîné (#3229).
         self.playback.reset_position(zone_id, 0).await;
+        // #6230 — la piste enchaînée a sa propre règle de réaffectation
+        // (album, nombre de canaux) : la reposer sur la sortie locale, et la
+        // rouvrir si le nombre de voies change. Sans règle armée, rien ne
+        // bouge : le gapless ordinaire reste intact.
+        self.refresh_zone_reaffectation(zone_id).await;
         // Le déplacement éventuel appartenait à la piste d'avant : sa grâce ne
         // court pas sur celle-ci (#4682).
         self.playback.oublier_le_deplacement(zone_id).await;
@@ -1116,7 +1147,8 @@ impl PlaybackOrchestrator {
                         let svc = svc.clone();
                         drop(registry);
                         let svc = svc.read().await;
-                        svc.get_track_url(&source_id, provider_quality).await.ok()
+                        flux_de_la_sonde_de_niveaux(&**svc, &source, &source_id, provider_quality)
+                            .await
                     };
                     let Some(data) = resolved else {
                         debug!(zone_id, source = %source, "gapless_streaming_levels_url_unresolved");
@@ -1307,6 +1339,8 @@ impl PlaybackOrchestrator {
             ),
         )
         .await;
+        // #6334 — vers `PlayMedia` (SetNext) : la profondeur du fil.
+        let profondeur_fil = profondeur_du_fil(&resolved);
         let raw_cover = cover.or(resolved.cover_url);
         Ok(ResolvedQueueItem {
             url: resolved.url,
@@ -1321,7 +1355,7 @@ impl PlaybackOrchestrator {
             duration_ms: resolved.duration_ms.map(|d| d as u64),
             stream_id: resolved.stream_id,
             sample_rate: resolved.sample_rate,
-            bit_depth: resolved.bit_depth,
+            bit_depth: profondeur_fil,
             channels: resolved.channels,
             file_size: resolved.file_size,
             file_path: None,

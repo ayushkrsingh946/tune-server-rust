@@ -630,13 +630,8 @@ async fn probe_hqplayer(host: &str, port: u16) -> Result<bool, String> {
 /// L'état de transport **reconnu** dans une réponse `<Status>` de HQPlayer,
 /// ou `None` quand son champ d'état n'est pas reconnu.
 ///
-/// Séparé de [`parse_state_from_xml`] pour une raison précise : la valeur de
-/// repli est `Stopped`, et `Stopped` n'est pas un état neutre pour le
-/// sondeur. C'est **lui** qui déclenche l'avance de file après cinq sondes
-/// (`STOPPED_TICKS_THRESHOLD`) et l'arrêt de zone après trente
-/// (`STOPPED_FAILURE_THRESHOLD`). « Je n'ai pas compris la réponse » et « le
-/// lecteur est à l'arrêt » ne peuvent donc pas rendre la même chose sans que
-/// personne ne le sache : le repli reste, mais il est désormais **dit**.
+/// Un état inconnu n'est pas un arrêt : `get_status` le rend comme erreur
+/// de sondage, pour que le sondeur ne le prenne pas pour une fin de piste.
 fn etat_reconnu(xml: &str) -> Option<TransportState> {
     use quick_xml::{Reader, events::Event};
 
@@ -701,15 +696,6 @@ fn etat_reconnu(xml: &str) -> Option<TransportState> {
             _ => {}
         }
     }
-}
-
-/// Parse transport state from HQPlayer XML status response.
-///
-/// Le comportement ne change pas : une réponse non reconnue vaut `Stopped`.
-/// Voir [`etat_reconnu`] pour ce que cela coûte, et `get_status` pour la
-/// ligne qui le signale.
-fn parse_state_from_xml(xml: &str) -> TransportState {
-    etat_reconnu(xml).unwrap_or(TransportState::Stopped)
 }
 
 /// Extract an attribute value from XML by attribute name.
@@ -822,10 +808,7 @@ impl OutputTarget for HqplayerOutput {
         })?;
 
         // Add URI to playlist (clear existing, start playing)
-        let xml = format!(
-            r#"<PlaylistAdd uri="{}" queued="0" clear="1"></PlaylistAdd>"#,
-            escape_xml(media.url)
-        );
+        let xml = playlist_add_xml(media, true);
         self.action(&xml).await.map_err(|e| {
             warn!(error = %e, "hqplayer_playlist_add_failed");
             e
@@ -880,10 +863,7 @@ impl OutputTarget for HqplayerOutput {
             self.retirer_la_suivante(&precedente).await?;
             self.enchainement().suivante = None;
         }
-        let xml = format!(
-            r#"<PlaylistAdd uri="{}" queued="0" clear="0"></PlaylistAdd>"#,
-            escape_xml(media.url)
-        );
+        let xml = playlist_add_xml(media, false);
         self.action(&xml).await.map_err(|e| {
             warn!(error = %e, "hqplayer_suivante_add_failed");
             e
@@ -910,29 +890,19 @@ impl OutputTarget for HqplayerOutput {
     async fn get_status(&self) -> Result<OutputStatus, String> {
         let response = self.command(r#"<Status subscribe="0" />"#).await?;
 
-        // #4023 — une réponse dont l'état n'est pas reconnu retombe sur
-        // `Stopped`, et `Stopped` est ce qui fait avancer la file au bout de
-        // cinq sondes puis arrêter la zone au bout de trente. Si un jour un
-        // HQPlayer répond dans une forme que ce parseur ne couvre pas, le
-        // symptôme est « l'album s'arrête après une piste » et RIEN dans le
-        // journal ne le dit. Une ligne, UNE seule par sortie : ce sondage
-        // tourne en boucle et #4025 vient justement de le faire taire.
-        if etat_reconnu(&response).is_none() && !self.etat_inconnu_dit.swap(true, Ordering::Relaxed)
-        {
-            warn!(
-                device = %self.name,
-                reponse = %response.trim().chars().take(400).collect::<String>(),
-                "hqplayer_status_etat_inconnu — aucun etat reconnu dans la reponse Status ; \
-                 lue comme `stopped`, ce qui fait avancer la file puis arreter la zone"
-            );
-        }
-
-        let state = parse_state_from_xml(&response);
-        // #6115 — seul un état RECONNU est retenu : le repli `Stopped` d'une
-        // réponse incomprise ne doit pas faire sauter l'arrêt de `play_media`.
-        if let Some(reconnu) = etat_reconnu(&response) {
-            *self.dernier_etat() = Some(reconnu);
-        }
+        // #6515 — ne jamais fabriquer Stopped à partir d'une réponse
+        // inconnue : le sondeur pourrait l'interpréter comme une fin de piste.
+        let Some(state) = etat_reconnu(&response) else {
+            if !self.etat_inconnu_dit.swap(true, Ordering::Relaxed) {
+                warn!(
+                    device = %self.name,
+                    reponse = %response.trim().chars().take(400).collect::<String>(),
+                    "hqplayer_status_etat_inconnu — état absent ou non reconnu ; sondage rejeté"
+                );
+            }
+            return Err("hqplayer_status_etat_inconnu: état Status absent ou non reconnu".into());
+        };
+        *self.dernier_etat() = Some(state);
         let position = extract_xml_attr(&response, "position")
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0);
@@ -1000,6 +970,38 @@ impl OutputTarget for HqplayerOutput {
 }
 
 /// Escape special XML characters in a string.
+/// La commande `PlaylistAdd` d'un média, `clear` vidant la playlist.
+///
+/// #6177 (kiran, fil 2233) — HQPlayer n'affichait que « HTTP stream » : seule
+/// l'URI partait. Le protocole porte les étiquettes dans un élément enfant
+/// `<metadata …/>`, dont chaque attribut est une étiquette (HQPlayer Control
+/// 6.0.1, `clControlInterface::playlistAdd` ; les mêmes clés sont relues dans
+/// `Status`). On n'écrit que ce que l'on sait : pas d'attribut vide, et aucun
+/// élément du tout sans étiquette — la commande reste alors celle d'avant.
+fn playlist_add_xml(media: &PlayMedia<'_>, clear: bool) -> String {
+    let etiquettes: String = [
+        ("artist", media.artist),
+        ("album", media.album),
+        ("song", media.title),
+    ]
+    .into_iter()
+    .filter_map(|(cle, valeur)| {
+        let valeur = valeur.map(str::trim).filter(|v| !v.is_empty())?;
+        Some(format!(r#" {cle}="{}""#, escape_xml(valeur)))
+    })
+    .collect();
+    let metadonnees = if etiquettes.is_empty() {
+        String::new()
+    } else {
+        format!("<metadata{etiquettes} />")
+    };
+    format!(
+        r#"<PlaylistAdd uri="{}" queued="0" clear="{}">{metadonnees}</PlaylistAdd>"#,
+        escape_xml(media.url),
+        if clear { 1 } else { 0 }
+    )
+}
+
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -1042,19 +1044,28 @@ mod tests {
     #[test]
     fn parse_state_playing() {
         let xml = r#"<Status state="playing" position="10.5" duration="300.0"/>"#;
-        assert_eq!(parse_state_from_xml(xml), TransportState::Playing);
+        assert_eq!(
+            etat_reconnu(xml).expect("état reconnu"),
+            TransportState::Playing
+        );
     }
 
     #[test]
     fn parse_state_paused() {
         let xml = r#"<Status state="paused" position="10.5"/>"#;
-        assert_eq!(parse_state_from_xml(xml), TransportState::Paused);
+        assert_eq!(
+            etat_reconnu(xml).expect("état reconnu"),
+            TransportState::Paused
+        );
     }
 
     #[test]
     fn parse_state_stopped() {
         let xml = r#"<Status state="stopped"/>"#;
-        assert_eq!(parse_state_from_xml(xml), TransportState::Stopped);
+        assert_eq!(
+            etat_reconnu(xml).expect("état reconnu"),
+            TransportState::Stopped
+        );
     }
 
     #[test]
@@ -1071,6 +1082,38 @@ mod tests {
         let xml = r#"<Status><Title>Test Song</Title><Artist>Test Artist</Artist></Status>"#;
         assert_eq!(extract_xml_text(xml, "Title"), Some("Test Song".into()));
         assert_eq!(extract_xml_text(xml, "Artist"), Some("Test Artist".into()));
+    }
+
+    /// #6177 — l'URI seule faisait afficher « HTTP stream » à HQPlayer.
+    #[test]
+    fn playlist_add_porte_les_etiquettes_du_morceau_6177() {
+        let media = PlayMedia {
+            url: "http://10.0.0.2:8888/stream/abc.flac",
+            title: Some("Echoes"),
+            artist: Some("Pink Floyd"),
+            album: Some("Meddle & co"),
+            ..Default::default()
+        };
+        assert_eq!(
+            playlist_add_xml(&media, true),
+            r#"<PlaylistAdd uri="http://10.0.0.2:8888/stream/abc.flac" queued="0" clear="1"><metadata artist="Pink Floyd" album="Meddle &amp; co" song="Echoes" /></PlaylistAdd>"#,
+            "#6177 : HQPlayer ne reçoit que l'URI et affiche « HTTP stream »"
+        );
+        assert!(playlist_add_xml(&media, false).contains(r#"clear="0"><metadata "#));
+    }
+
+    /// Sans étiquette connue, la commande est celle d'avant, sans élément vide.
+    #[test]
+    fn playlist_add_sans_etiquette_reste_nu() {
+        let media = PlayMedia {
+            url: "http://h/s.flac",
+            title: Some("  "),
+            ..Default::default()
+        };
+        assert_eq!(
+            playlist_add_xml(&media, false),
+            r#"<PlaylistAdd uri="http://h/s.flac" queued="0" clear="0"></PlaylistAdd>"#
+        );
     }
 
     #[test]

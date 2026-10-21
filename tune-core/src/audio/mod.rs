@@ -5,6 +5,8 @@ pub mod analyzer;
 pub mod ape;
 pub mod audiophile;
 pub mod autoeq;
+/// #6388 — la base AutoEq en ligne : index, recherche, copie locale.
+pub mod autoeq_base;
 pub mod canaux_declares;
 pub mod canaux_reseau_4573;
 
@@ -68,6 +70,8 @@ pub mod faststart;
 /// Mémoire du volume d'avant l'armement du mode bit-perfect (#2395).
 pub mod fixed_volume;
 pub mod flac_vendeur;
+/// #6353 — flux Dolby d'un Matroska, reconnus sans décodage.
+pub mod flux_dolby;
 /// #2211 — le réglage de fondu d'une zone et la consigne de chaque frontière
 /// (même album, live, DSD) que l'orchestrateur remet à la sortie locale.
 pub mod fondu_de_zone;
@@ -113,6 +117,7 @@ pub mod pipeline;
 pub mod reaffectation_canaux;
 pub mod replaygain;
 pub mod repli_dsd_4354;
+pub mod reprise_nouveau_flux;
 pub mod resample;
 /// Runtime provisioning of the onnxruntime shared lib (`load-dynamic`).
 #[cfg(feature = "audio-embedding")]
@@ -127,10 +132,13 @@ pub mod soft_mute;
 pub mod staged_growth;
 pub mod support;
 pub mod tap;
+pub mod tempo;
 /// CLAP text tower for natural-language acoustic search (Phase 3).
 #[cfg(feature = "audio-embedding")]
 pub mod text_embedding;
 pub mod thermal;
+/// #6541 — limites de sécurité et de confort du volume d'une zone.
+pub mod volume_limites;
 /// Conversion volume linéaire ↔ décibels — le seul endroit (#1274).
 pub mod volume_scale;
 pub mod wav;

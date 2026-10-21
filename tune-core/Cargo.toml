@@ -43,6 +43,9 @@ async-stream = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
+# Ecoute a distance par laissez-passer (#6603) : cle Ed25519 du serveur et
+# messages signes, la meme regle que le relais.
+tune-laissez-passer = { path = "../tune-laissez-passer" }
 thiserror = { workspace = true }
 urlencoding = { workspace = true }
 cpal = { path = "../vendor/cpal", version = "0.17.3", optional = true }
@@ -448,6 +451,11 @@ journal-de-test = []
 # `[dev-dependencies]` de tune-server, comme `journal-de-test` : aucun binaire
 # publie ne la compile.
 isolement-disque-de-test = []
+# #6336 : rend remplaçables en test le démon AirPlay 2, le montage SMB et les
+# adresses de Qobuz, TIDAL et Deezer (`services_factices`, constructeurs
+# `avec_bases_de_test`). Allumée SEULEMENT par les `[dev-dependencies]` de
+# tune-server, comme `journal-de-test` : aucun binaire publié ne la compile.
+services-factices = []
 
 # #3248 : sur PostgreSQL, un INSERT conditionnel qui n'ecrit rien annulait la
 # transaction entiere, et la branche `returning` rendait `Ok(1)` en dur.

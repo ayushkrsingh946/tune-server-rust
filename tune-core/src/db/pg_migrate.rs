@@ -268,6 +268,22 @@ const TABLES_NON_COPIEES: &[(&str, &str)] = &[
         "reponses MusicBrainz gardees (#4805) : un cache de 90 jours, que la passe \
          des credits reconstitue",
     ),
+    (
+        "album_completude",
+        "constat de completude (#4805, lot MetaRust) : recalcule depuis la release gardee",
+    ),
+    (
+        "artiste_instruments",
+        "instruments Wikidata des artistes (#4805) : un cache que la passe des credits reconstitue",
+    ),
+    (
+        "propositions_discogs",
+        "propositions Discogs a valider (#4805) : se redemandent ; aucune n'a ete appliquee sans decision",
+    ),
+    (
+        "bpm_estimes",
+        "BPM estimes (Wikidata ou signal, #4805) : se remesurent ; les balises BPM restent dans `tracks`",
+    ),
 ];
 
 /// The complete PG schema DDL. Creates all tables that exist in SQLite.
@@ -786,6 +802,10 @@ CREATE TABLE IF NOT EXISTS item_tags (
 -- CREATE IF NOT EXISTS ci-dessus ne la corrige pas. Même raison que
 -- `streaming_favorites.first_seen_at` plus haut.
 ALTER TABLE item_tags ADD COLUMN IF NOT EXISTS created_at TEXT;
+-- Ordre des etiquettes choisi par l'utilisateur (#6257, PG 091 / SQLite 127).
+-- TEXT pour la copie ; la 091, rejouee juste apres, la convertit en BIGINT et
+-- garde l'ordre copie. En ALTER pour la meme raison qu'au-dessus.
+ALTER TABLE tags ADD COLUMN IF NOT EXISTS position TEXT;
 -- Marque « déjà tenté, rien trouvé » de l'identification en lot (#4991,
 -- PG 080 / SQLite 116). En ALTER pour la même raison qu'au-dessus.
 ALTER TABLE albums ADD COLUMN IF NOT EXISTS identification_tentee_le TEXT;
@@ -1094,6 +1114,40 @@ CREATE TABLE IF NOT EXISTS musicbrainz_release_cache (
     corps BYTEA NOT NULL,
     fetched_at TEXT NOT NULL
 );
+-- Enrichissement MetaRust, lot 1 (#4805). Mêmes types qu'`ENSURE_TABLES` ;
+-- non copiées à la bascule (voir TABLES_NON_COPIEES).
+CREATE TABLE IF NOT EXISTS album_completude (
+    album_id BIGINT PRIMARY KEY,
+    release_mbid TEXT NOT NULL,
+    attendues INTEGER NOT NULL,
+    presentes INTEGER NOT NULL,
+    manquantes INTEGER NOT NULL,
+    doublons INTEGER NOT NULL,
+    detail TEXT NOT NULL,
+    calcule_le TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS artiste_instruments (
+    artist_mbid TEXT PRIMARY KEY,
+    qid TEXT,
+    instruments TEXT NOT NULL,
+    lu_le TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS propositions_discogs (
+    album_id BIGINT NOT NULL,
+    discogs_release_id BIGINT NOT NULL,
+    methode TEXT NOT NULL,
+    proposition TEXT NOT NULL,
+    statut TEXT NOT NULL,
+    cree_le TEXT NOT NULL,
+    decide_le TEXT,
+    PRIMARY KEY (album_id, discogs_release_id)
+);
+CREATE TABLE IF NOT EXISTS bpm_estimes (
+    file_path TEXT PRIMARY KEY,
+    bpm DOUBLE PRECISION NOT NULL,
+    source TEXT NOT NULL,
+    mesure_le TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS upnp_library_sources (
     source_key TEXT PRIMARY KEY,
     udn TEXT NOT NULL,
@@ -1259,6 +1313,10 @@ CREATE INDEX IF NOT EXISTS idx_tracks_audio_pcm_key ON tracks(audio_pcm_key);
 -- tracks: note de la piste lue dans ses balises (SQLite migration v124 / PG
 -- 088, #6123). TEXT pour la copie ; la 088, rejouee juste apres, la convertit.
 ALTER TABLE tracks ADD COLUMN IF NOT EXISTS rating TEXT;
+-- radio_stations: lien avec la fiche de l'annuaire (SQLite migration v126 /
+-- PG 090, #6516). TEXT des deux côtés : la copie texte n'a rien à convertir.
+ALTER TABLE radio_stations ADD COLUMN IF NOT EXISTS external_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_radio_stations_external_id ON radio_stations(external_id);
 "#;
 
 /// Post-copy normalisation: `tracks.file_mtime` is canonically DOUBLE

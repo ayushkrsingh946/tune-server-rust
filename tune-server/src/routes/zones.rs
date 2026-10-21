@@ -333,6 +333,8 @@ fn inject_device_identity(
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0);
     obj.insert("gain_trim_db".into(), json!(trim));
+    // #6541 — les limites de volume, toujours publiées (`null` = aucune).
+    tune_core::audio::volume_limites::publier(obj, backend, zone_id);
     let upnp_renderer = settings
         .get(&format!("zone_{zone_id}_upnp_renderer"))
         .ok()
@@ -481,6 +483,17 @@ fn inject_device_identity(
         "detected_model".into(),
         json!(detected.filter(|_| !effacee).and_then(|d| d.model.clone())),
     );
+    // #6546 — la plage MAC reconnue et sa marque, comme sur `GET /devices`.
+    // Même règle que la détection juste au-dessus : une identité récusée
+    // (#3660) ne se republie pas par la porte de l'OUI. Seuls les trois
+    // premiers octets sortent ; la MAC complète n'est pas publiée ici.
+    let (mac_prefix, mac_vendor) = tune_core::discovery::mac::plage_et_marque(
+        detected
+            .filter(|_| !effacee)
+            .and_then(|d| d.mac_address.as_deref()),
+    );
+    obj.insert("mac_prefix".into(), json!(mac_prefix));
+    obj.insert("mac_vendor".into(), json!(mac_vendor));
 }
 
 pub fn router() -> Router<AppState> {
@@ -500,6 +513,16 @@ pub fn router() -> Router<AppState> {
                 .post(rattacher_asio_6120::rattacher_zone),
         )
         .route("/{id}/volume", put(update_volume))
+        // #6541 — boutons + / − et limites de volume (sécurité, confort).
+        .route(
+            "/{id}/volume/step",
+            post(limites_de_volume_6541::pas_de_volume),
+        )
+        .route(
+            "/{id}/volume-limits",
+            get(limites_de_volume_6541::lire_les_limites)
+                .put(limites_de_volume_6541::regler_les_limites),
+        )
         .route("/{id}/muted", put(update_muted))
         .route("/{id}/dsp", get(get_zone_dsp).put(set_zone_dsp))
         .route("/{id}/eq/response", get(eq_response))
@@ -595,6 +618,8 @@ mod lecture;
 pub use lecture::*;
 mod presence;
 mod rattacher_asio_6120;
+// #6541 — boutons + / − et limites de volume d'une zone.
+mod limites_de_volume_6541;
 
 // #5353 — le backend nommé par le chemin du signal est celui de LA sortie.
 mod backend_de_la_sortie_5353;
@@ -611,7 +636,11 @@ mod fusion_tests;
 #[cfg(test)]
 mod identite_appareil_tests;
 #[cfg(test)]
+mod oubli_du_dlna_decouvert_6299;
+#[cfg(test)]
 mod page_d_album_bandcamp_tests;
+#[cfg(test)]
+mod plages_mac_6546_tests;
 #[cfg(test)]
 mod sante_reseau_de_zone_tests;
 #[cfg(test)]
@@ -1402,7 +1431,8 @@ pub(crate) async fn output_reach(state: &AppState, zone: &Zone, ps: &ZoneState) 
                 .streamer
                 .stream_bytes_sent(sid)
                 .await
-                .is_some_and(|n| n > 0),
+                // #6066 — une sonde de plage n'est pas un onglet qui joue.
+                .is_some_and(tune_core::poller::octets_d_une_ecoute),
             None => false,
         }
     } else {
@@ -1559,6 +1589,7 @@ fn output_reach_of(
 }
 
 mod signal_path;
+pub(crate) mod textes_signal;
 pub use signal_path::*;
 
 mod ecriture;
@@ -1602,10 +1633,15 @@ mod signal_path_pure_replaygain_5633_tests;
 
 // #4384 — ReplayGain sans gain tagué, et où le gain s'applique.
 #[cfg(test)]
+mod signal_path_decodeur_sortie_pull_6178_tests;
+#[cfg(test)]
 mod signal_path_gain_sortie_4384_tests;
 // #6166 — le WAV 32 bits interne d'une sortie locale n'est pas une conversion.
 #[cfg(test)]
 mod signal_path_conteneur_local_6166_tests;
+// #6334 — un AAC Tidal servi en WAV se dit AAC, sans profondeur de bits.
+#[cfg(test)]
+mod signal_path_aac_tidal_6334_tests;
 // #2029 — un DSD qui part en DoP se dit « over PCM (DoP) ».
 #[cfg(test)]
 mod signal_path_dop_2029_tests;

@@ -1062,9 +1062,11 @@ impl std::fmt::Display for ErreurSite {
 /// Ce qu'il faut pour parler au site au nom du compte.
 #[derive(Debug, Clone)]
 pub struct Compte {
-    base: String,
-    acces: String,
-    liaison: Option<String>,
+    // `pub(crate)` : l'envoi des écoutes (`ecoutes_au_compte`, #6510) parle
+    // au site au nom du MÊME compte, par la même lecture des réglages.
+    pub(crate) base: String,
+    pub(crate) acces: String,
+    pub(crate) liaison: Option<String>,
     pub server_id: String,
 }
 
@@ -1113,7 +1115,7 @@ fn reseau(e: reqwest::Error) -> ErreurSite {
 
 /// Rafraîchit le jeton du compte après un 401, une fois. Rend le compte à
 /// jour, ou `None` si rien n'a pu être rafraîchi.
-async fn rafraichir(settings: &SettingsRepo) -> Option<Compte> {
+pub(crate) async fn rafraichir(settings: &SettingsRepo) -> Option<Compte> {
     use super::sso::{DEFAULT_CLIENT_ID, MozaikAuth};
     let rt = settings
         .get("mozaik_refresh_token")

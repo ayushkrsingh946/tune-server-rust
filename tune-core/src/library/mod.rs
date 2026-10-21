@@ -13,6 +13,7 @@ pub mod export;
 pub mod folder_playlists;
 pub mod full_text_search;
 pub mod genre_tree;
+pub mod genres_equivalents;
 /// Regrouper les exemplaires d'un même enregistrement entre sources, et
 /// choisir celui qu'on joue (#2264).
 pub mod groupes_versions;
@@ -25,6 +26,7 @@ pub mod mosaique;
 pub mod playlist_scan;
 /// La pochette d'un album face au disque : retrait et suivi (#5034).
 pub mod pochette_disque;
+pub mod pochette_visuelle;
 pub mod pont_roon;
 /// Appliquer un export du pont Roon (crédits, images) contre la base.
 pub mod pont_roon_import;

@@ -1580,7 +1580,14 @@ impl TrackImporter {
                 .get_or_create(
                     &album_artist_name,
                     album_artist_mbid,
-                    meta.album_artist_sort.as_deref(),
+                    // #6474 — ALBUMARTISTSORT, à défaut l'ARTISTSORT de la
+                    // piste quand elle est de l'artiste de l'album.
+                    tune_core::db::artist_repo::nom_de_tri_de_l_artiste_d_album(
+                        meta.album_artist_sort.as_deref(),
+                        meta.artist_sort.as_deref(),
+                        &album_artist_name,
+                        &track_artist_name,
+                    ),
                 )
                 .ok()
                 .map(Arc::new);
@@ -1603,7 +1610,9 @@ impl TrackImporter {
                     .get_or_create(
                         &track_artist_name,
                         meta.musicbrainz_artist_id.as_deref(),
-                        None,
+                        // #6474 — ARTISTSORT nourrit le nom de tri de
+                        // l'artiste de la piste (il restait vide).
+                        meta.artist_sort.as_deref(),
                     )
                     .ok()
                     .map(Arc::new);
@@ -3955,3 +3964,7 @@ mod pochettes_bornees_tests_5202;
 #[cfg(test)]
 #[path = "scan_import_majorite_tests_5454.rs"]
 mod majorite_tests_5454;
+
+#[cfg(test)]
+#[path = "scan_import_nom_de_tri_tests_6474.rs"]
+mod nom_de_tri_tests_6474;
