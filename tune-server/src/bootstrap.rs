@@ -97,6 +97,11 @@ pub async fn run_with(opts: RunOptions) {
         std::process::exit(0);
     }
 
+    // #6253 — `--sans-console` (Windows) : relancer sans fenêtre de terminal
+    // et sortir. Avant tout journal, port ou base : c'est le DÉTACHÉ qui les
+    // ouvre. Sans le drapeau, ou hors Windows, rend la main aussitôt.
+    crate::lancement_sans_console::appliquer_au_demarrage();
+
     // #5617 — mode ponctuel « premier accès » de Tune OS : appelé en root par
     // une unité de l'image, HORS du bac à sable de tune.service, il applique la
     // politique du mot de passe du compte `tune` puis sort. Même place que
@@ -408,6 +413,11 @@ pub async fn run_with(opts: RunOptions) {
     let state = AppState::new(&config.db_path, config.port, config.clone())
         .expect("failed to init app state");
 
+    // #5320 — la sonde du processeur est relevée en tâche de fond, une fois
+    // par seconde : l'écran et la garde thermique lisent une médiane, pas la
+    // pointe que provoque la requête qui les interroge.
+    tune_core::audio::thermal::demarrer_l_echantillonnage();
+
     crate::boot_status::set_phase("configuration");
     state.restore_tokens().await;
     // #5427 — anciennes copies de l'ARL, et `TUNE_DEEZER_ARL`. En tâche de
@@ -525,7 +535,16 @@ pub async fn run_with(opts: RunOptions) {
     // Sans effet pour le binaire standard : `RunOptions::default()` n'a aucun
     // fournisseur. C'est l'appel dont la disparition a casse l'integration
     // partenaire pendant deux versions (#1510).
-    crate::discovery_setup::spawn_output_providers(&state, opts.output_providers);
+    // #6542 — Devialet AIR, fournisseur DANS l'arbre, sur le même chemin.
+    // Option expérimentale désactivée par défaut : tant qu'elle l'est, le
+    // fournisseur n'ouvre aucune écoute et ne rend aucune sortie.
+    let mut fournisseurs = opts.output_providers;
+    fournisseurs.push(std::sync::Arc::new(
+        tune_core::outputs::devialet_air::FournisseurDevialetAir::new(
+            tune_core::outputs::devialet_air::ContexteAir::depuis_la_base(state.backend.clone()),
+        ),
+    ));
+    crate::discovery_setup::spawn_output_providers(&state, fournisseurs);
 
     // Background tasks: squeezebox poller, session GC, position poller,
     // token refresh, UPnP advertiser, Deezer proxy, alarms, notifications, memory diag
@@ -559,6 +578,10 @@ pub async fn run_with(opts: RunOptions) {
         "glibc_seuil_mmap"
     );
 
+    // #6452 — les deux dernières étapes avant que le routeur ne serve ont
+    // leur nom : un démarrage resté sur la page d'attente ne laissait voir
+    // que « découverte réseau », qui n'était plus l'étape en cours.
+    crate::boot_status::set_phase("Spotify Connect");
     routes::spotify_connect::auto_start(&state).await;
 
     // Clone before `state` is moved into the router — used to auto-resume local
@@ -572,6 +595,7 @@ pub async fn run_with(opts: RunOptions) {
     // Cloné AVANT que le routeur ne consomme `state` : l'arrêt propre en a
     // besoin pour replier le WAL.
     let shutdown_state = state.clone();
+    crate::boot_status::set_phase("routes");
     let app = routes::router_with_plugins(state, plugin_routers);
 
     // Le routeur est prêt : le répondeur de démarrage rend la socket. `stop()`

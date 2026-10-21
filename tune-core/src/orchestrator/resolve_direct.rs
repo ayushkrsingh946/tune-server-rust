@@ -639,6 +639,36 @@ impl PlaybackOrchestrator {
         let cover_url = req.cover_url.clone();
         let duration_ms = req.duration_ms;
         let source = source_apparente;
+        // #6471 (FabienM, fil 2302 point 17) — une PAGE de piste Bandcamp au
+        // lieu d'une URL de flux : c'est ce que nomme une version Bandcamp des
+        // « Autres versions ». On lit la page pour en tirer le flux du jour, et
+        // la page devient la référence qui permettra de le resigner. Si la
+        // page ne donne rien, on refuse en le disant : l'envoyer à la sortie
+        // lui ferait lire du HTML.
+        let flux_de_page: Option<(String, String)> = if source == "bandcamp"
+            && super::bandcamp_resignature::est_une_page_de_piste_bandcamp(audio_url)
+        {
+            match super::bandcamp_resignature::flux_de_la_page_de_piste(&self.services, audio_url)
+                .await
+            {
+                Ok(flux) => {
+                    info!(zone_id = req.zone_id, page = %audio_url, "bandcamp_page_de_piste_resolue");
+                    Some((flux, audio_url.to_string()))
+                }
+                Err(e) => {
+                    warn!(zone_id = req.zone_id, page = %audio_url, error = %e, "bandcamp_page_de_piste_illisible");
+                    return Err(format!(
+                        "Lecture impossible : la page Bandcamp {audio_url} ne donne pas de flux jouable ({e})"
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let audio_url: &str = flux_de_page
+            .as_ref()
+            .map(|(flux, _)| flux.as_str())
+            .unwrap_or(audio_url);
         // La qualité Bandcamp est LUE DANS L'URL, jamais déduite du nom du
         // service. L'écoute libre est du `mp3-128` ; un fichier ACHETÉ entre
         // par la même porte en `flac`, `alac` ou `mp3-320`, et l'étiqueter
@@ -686,6 +716,7 @@ impl PlaybackOrchestrator {
             req.album_ref
                 .clone()
                 .filter(|r| !r.trim().is_empty())
+                .or_else(|| flux_de_page.as_ref().map(|(_, page)| page.clone()))
                 .or_else(|| {
                     crate::db::reference_d_album::reference_d_album_bandcamp(&self.db, audio_url)
                 })
@@ -1547,19 +1578,29 @@ impl PlaybackOrchestrator {
         }
     }
 
-    async fn relayer_direct_au_navigateur(&self, req: &PlayRequest, d: Directe<'_>) -> FluxDirect {
-        let Directe {
-            audio_url,
-            mime_type,
-            duration_ms,
-            ..
-        } = d;
+    /// Relaie une URL distante TELLE QUELLE par une session du mandataire de
+    /// Tune, et rend l'adresse `http://` de Tune à jouer avec l'identifiant
+    /// de la session.
+    ///
+    /// Le chemin d'un flux direct vers un onglet (#2076, #2158), et celui
+    /// d'un épisode de podcast vers un renderer réseau (#6468) : un renderer
+    /// DLNA n'ouvre souvent pas le HTTPS d'un hébergeur, le mandataire si.
+    /// Aucun transcodage : les octets passent verbatim, le conteneur suit
+    /// l'URL et le MIME annoncé.
+    pub async fn relayer_un_flux_distant(
+        &self,
+        audio_url: &str,
+        mime_type: &str,
+        duration_ms: Option<i64>,
+        sample_rate: Option<u32>,
+        bit_depth: Option<u16>,
+    ) -> (String, String) {
         let conteneur = conteneur_depuis_url(audio_url, mime_type);
         let info = StreamInfo {
             format: conteneur.to_string(),
             mime_type: mime_type.to_string(),
-            sample_rate: req.sample_rate.unwrap_or(44_100),
-            bit_depth: req.bit_depth.unwrap_or(16),
+            sample_rate: sample_rate.unwrap_or(44_100),
+            bit_depth: bit_depth.unwrap_or(16),
             channels: 2,
             file_size: None,
             duration_ms: duration_ms.map(|d| d as u64),
@@ -1573,11 +1614,33 @@ impl PlaybackOrchestrator {
         let stream_url = self
             .streamer
             .get_stream_url(&session_id, &server_ip, conteneur);
-        info!(
-            url = %audio_url,
-            conteneur,
-            "direct_proxy_for_browser_output"
-        );
+        // L'hôte seul : le chemin ou la requête d'un flux privé ou payant porte
+        // souvent un jeton, qui n'a rien à faire au journal (#6468).
+        let hote = reqwest::Url::parse(audio_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        info!(hote = %hote, conteneur, stream_id = %session_id, "direct_proxy_session");
+        (stream_url, session_id)
+    }
+
+    async fn relayer_direct_au_navigateur(&self, req: &PlayRequest, d: Directe<'_>) -> FluxDirect {
+        let Directe {
+            audio_url,
+            mime_type,
+            duration_ms,
+            ..
+        } = d;
+        let (stream_url, session_id) = self
+            .relayer_un_flux_distant(
+                audio_url,
+                mime_type,
+                duration_ms,
+                req.sample_rate,
+                req.bit_depth,
+            )
+            .await;
+        info!(url = %audio_url, "direct_proxy_for_browser_output");
         (
             stream_url,
             Some(session_id),

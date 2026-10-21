@@ -70,6 +70,8 @@ pub mod faststart;
 /// Mémoire du volume d'avant l'armement du mode bit-perfect (#2395).
 pub mod fixed_volume;
 pub mod flac_vendeur;
+/// #6353 — flux Dolby d'un Matroska, reconnus sans décodage.
+pub mod flux_dolby;
 /// #2211 — le réglage de fondu d'une zone et la consigne de chaque frontière
 /// (même album, live, DSD) que l'orchestrateur remet à la sortie locale.
 pub mod fondu_de_zone;

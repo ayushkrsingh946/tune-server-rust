@@ -864,6 +864,7 @@ pub(super) fn libelle_de_transport(output_type: &str) -> &str {
     match output_type {
         "hqplayer" => "HQPlayer",
         "diretta" => "Diretta",
+        "devialet_air" => "Devialet AIR",
         autre => autre,
     }
 }
@@ -1813,15 +1814,28 @@ fn assembler_les_etapes_lang(
     // voies de la source, telles quelles — aucun mixage. Sans cette étape,
     // un FLAC 5.1 joué en 5.1 et un FLAC 5.1 replié en stéréo affichaient
     // le même chemin ; et c'est justement ce que Didier veut voir.
-    if let Some(t) = reel.filter(|t| !t.adaptation_canaux() && t.ouvert().canaux > 2) {
+    //
+    // #6057 — à nombre de canaux égal, la sortie peut RÉORDONNER les voies
+    // selon la disposition que le fichier déclare (un DFF dont la liste
+    // `CHNL` n'est pas dans l'ordre de la sortie). L'étape le dit, mesuré,
+    // au lieu d'annoncer des voies « telles quelles », et n'est plus
+    // bit-perfect : chaque échantillon a quitté sa voie.
+    if let Some(t) = reel
+        .filter(|t| !t.adaptation_canaux() && (t.ouvert().canaux > 2 || t.reorganisation_canaux()))
+    {
         let canaux = t.ouvert().canaux;
         let disposition = tune_core::audio::channels::channel_badge(canaux)
             .map(|badge| format!(" ({badge})"))
             .unwrap_or_default();
+        let (cle, intacte) = if t.reorganisation_canaux() {
+            ("channels_reordered", false)
+        } else {
+            ("multichannel", true)
+        };
         steps.push(json!({
             "name": "Canaux",
-            "description": fs(lang, "multichannel", &[&canaux.to_string(), &disposition]),
-            "bit_perfect": true,
+            "description": fs(lang, cle, &[&canaux.to_string(), &disposition]),
+            "bit_perfect": intacte,
         }));
     }
 
@@ -1918,8 +1932,12 @@ fn rendre_les_verdicts(
     // le verdict, quoi que les réglages aient prédit ; leur absence ne le
     // relève jamais — la sortie n'observe pas ce que fait l'orchestrateur
     // en amont (ReplayGain, repli mono, transcodage).
-    let transformation_reelle_declaree = transformations_reelles
-        .is_some_and(|reel| reel.dsp_actif() || reel.adaptation_canaux() || reel.fondu_enchaine());
+    let transformation_reelle_declaree = transformations_reelles.is_some_and(|reel| {
+        reel.dsp_actif()
+            || reel.adaptation_canaux()
+            || reel.reorganisation_canaux()
+            || reel.fondu_enchaine()
+    });
 
     // Overall bit-perfect: lossless source + no transcoding + no DSP + no
     // resampling + no ReplayGain. Volume is excluded — it's a user preference,
@@ -2078,6 +2096,7 @@ fn decrire_le_transport<'a>(
         is_lossless,
         is_dsd,
         bit_depth,
+        sample_rate,
         ..
     } = *source;
     let Forcages {
@@ -2185,6 +2204,15 @@ fn decrire_le_transport<'a>(
                 (true, transport, format_name)
             }
         }
+        // #6542 — Devialet AIR : PCM 24 bits, sans perte jusqu'à 96 kHz. Au-delà,
+        // la sortie rééchantillonne à 96 kHz (elle le déclare dans ses
+        // transformations réelles, d'où l'étape « Resampler ») ; une source
+        // DSD, avec perte ou plus profonde que 24 bits n'est pas bit-perfect.
+        "devialet_air" => (
+            is_lossless && !is_dsd && bit_depth <= 24 && sample_rate <= 96_000,
+            "Devialet AIR",
+            "PCM",
+        ),
         "browser" => (true, "Browser", format_name),
         "local" => {
             // #4172 — le contrat de signal (`runtime_signal_path`) n'est

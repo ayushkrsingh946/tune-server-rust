@@ -985,6 +985,50 @@ impl PositionPoller {
                 }
             };
 
+            // ── #6612 — plage hors fichier après une reprise : nouveau flux ──
+            //
+            // Le Yamaha R-N2000A rouvre le flux, au `Play` qui suit une pause,
+            // par une plage au-delà de la fin ; il reçoit un 416 et s'arrête.
+            // La session l'a noté : un renderer qui ne joue pas repart par un
+            // NOUVEAU flux, à la position de la reprise.
+            if let Some(sid) = zone_state
+                .now_playing
+                .as_ref()
+                .and_then(|np| np.stream_id.clone())
+            {
+                use crate::orchestrator::plage_hors_fichier_6612::{
+                    SuiteDePlageHorsFichier, suite_de_plage_hors_fichier,
+                };
+                let age = self
+                    .orchestrator
+                    .streamer
+                    .age_plage_hors_fichier(&sid)
+                    .await;
+                match suite_de_plage_hors_fichier(age, status.state) {
+                    SuiteDePlageHorsFichier::Rien | SuiteDePlageHorsFichier::Attendre => {}
+                    SuiteDePlageHorsFichier::Oublier => {
+                        self.orchestrator
+                            .streamer
+                            .oublier_plage_hors_fichier(&sid)
+                            .await;
+                    }
+                    SuiteDePlageHorsFichier::Reprendre => {
+                        self.orchestrator
+                            .streamer
+                            .oublier_plage_hors_fichier(&sid)
+                            .await;
+                        if self
+                            .orchestrator
+                            .reprendre_apres_plage_hors_fichier(zone_id, &device_id)
+                            .await
+                        {
+                            poll_states.remove(&zone_id);
+                            continue;
+                        }
+                    }
+                }
+            }
+
             // ── Fil 2125 (#5711) — le saut de la reprise a-t-il pris ? ──
             //
             // Jugé sur la position MESURÉE par la sortie, avant toute garde

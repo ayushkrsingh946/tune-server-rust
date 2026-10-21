@@ -75,6 +75,8 @@ pub mod scrobble;
 pub mod secret_envelope;
 pub mod secrets;
 pub mod sendspin;
+/// #6336 — substitution des programmes externes en construction de tests.
+pub mod services_factices;
 pub mod services_manager;
 pub mod skins;
 pub mod sleep_timer;
