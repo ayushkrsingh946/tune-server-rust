@@ -1431,7 +1431,9 @@ pub struct ResolvedStream {
     pub file_size: Option<u64>,
     /// Audio sample rate in Hz for the output stream (e.g. 176400 for DSD64->PCM).
     pub sample_rate: Option<u32>,
-    /// Output bit depth (e.g. 24 for DSD->PCM).
+    /// Output bit depth (e.g. 24 for DSD->PCM). #6334 — `None` for a lossy
+    /// service codec, even decoded to WAV: this is what the SOURCE announces.
+    /// What reaches an output's `PlayMedia` is `profondeur_du_fil`.
     pub bit_depth: Option<u32>,
     /// Number of audio channels.
     pub channels: Option<u32>,
@@ -1450,6 +1452,12 @@ pub struct ResolvedStream {
     /// et la règle écrite dans `tune-bandcamp` veut que ce débit soit
     /// « annoncé comme tel partout où il apparaît ».
     pub bitrate_kbps: Option<u32>,
+    /// #6334 — le codec que le SERVICE a livré (`aac`, `flac`…), en
+    /// minuscules, quand il le nomme. Distinct de `mime_type`, qui décrit le
+    /// CONTENEUR servi : un AAC décodé pour une sortie qui exige du WAV part
+    /// en `audio/wav`, et l'annonce ne doit pas en faire un WAV « CD ».
+    /// `None` hors services de streaming : la source y est nommée ailleurs.
+    pub format_source: Option<String>,
 }
 
 pub struct ResolvedQueueItem {
@@ -1889,7 +1897,10 @@ pub use bandcamp::*;
 mod bandcamp_resignature;
 
 mod qualite_pre_armee;
-pub(crate) use qualite_pre_armee::{QualitePreArmee, format_du_mime, format_nomme_par_la_source};
+pub(crate) use qualite_pre_armee::{
+    QualitePreArmee, debit_annonce_par_le_service, format_du_mime, format_livre_par_le_service,
+    format_nomme_par_la_source, profondeur_annoncee_par_le_service, profondeur_du_fil,
+};
 
 /// Ce qu'on ANNONCE au renderer pour une piste de serveur média : le MIME ne
 /// se devine plus dans la seule URL, qui pour un `<res>` de Tune ne porte
@@ -1947,7 +1958,8 @@ async fn arm_local_stream_consumer_watch(
             format = %session.info.format,
             mime_type = %session.info.mime_type,
             file_path = ?file_path,
-            proxy_url = ?proxy_url,
+            // L'hôte seul : l'URL amont d'un mandataire est souvent signée (#6468).
+            proxy_hote = ?proxy_url.as_deref().map(resolve_direct::hote_pour_le_journal),
             active_consumers,
             "local_stream_never_consumed"
         );
@@ -2043,6 +2055,8 @@ mod mesure_saut_cd_5079;
 /// FLAC (ou le catalogue) ; inconnue, elle est refusée par une erreur nommée.
 #[cfg(test)]
 mod qobuz_cadence_nulle_5283_tests;
+#[cfg(test)]
+mod tidal_aac_annonce_6334_tests;
 
 /// #6401 — le préchargement sans blanc et la sonde de niveaux après une
 /// avance sans blanc passent par le même repli Qobuz en 16/44,1 que la
