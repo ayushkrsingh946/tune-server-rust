@@ -103,14 +103,40 @@ fn maintenant() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// Remet l'indicateur à faux quand elle tombe : fin normale de la tâche,
+/// panique (le futur est lâché pendant le déroulement de la pile) ou tâche
+/// annulée à l'arrêt du runtime. Remis à la main en fin de tâche, il restait
+/// levé après une panique, et plus aucune lecture ne partait jusqu'au
+/// redémarrage : `/genre-tree/musicbrainz` répondait 202 pour toujours.
+struct BaisserALaFin(&'static AtomicBool);
+
+impl Drop for BaisserALaFin {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Lance `tache` si `indicateur` est baissé, et le lève pendant toute sa
+/// vie. Rend `None` si une tâche tient déjà l'indicateur.
+fn lancer_seule<F>(indicateur: &'static AtomicBool, tache: F) -> Option<tokio::task::JoinHandle<()>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    if indicateur.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    let garde = BaisserALaFin(indicateur);
+    Some(tokio::spawn(async move {
+        let _garde = garde;
+        tache.await;
+    }))
+}
+
 /// Lance la lecture de la liste des genres MusicBrainz si aucune n'est en
 /// cours. Rend `true` si elle vient d'être lancée.
 fn lancer_lecture_index(state: &AppState) -> bool {
-    if LECTURE_INDEX_EN_COURS.swap(true, Ordering::SeqCst) {
-        return false;
-    }
     let backend = state.backend.clone();
-    tokio::spawn(async move {
+    lancer_seule(&LECTURE_INDEX_EN_COURS, async move {
         match arbre_genres::lire_index_par(&arbre_genres::lire_page_de_genres).await {
             Ok(index) if !index.is_empty() => {
                 tracing::info!(genres = index.len(), "genres_musicbrainz_liste_lue_6001");
@@ -119,9 +145,8 @@ fn lancer_lecture_index(state: &AppState) -> bool {
             Ok(_) => tracing::warn!("genres_musicbrainz_liste_vide_6001"),
             Err(()) => tracing::warn!("genres_musicbrainz_liste_illisible_6001"),
         }
-        LECTURE_INDEX_EN_COURS.store(false, Ordering::SeqCst);
-    });
-    true
+    })
+    .is_some()
 }
 
 /// `GET /library/genre-tree/musicbrainz`

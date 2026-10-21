@@ -1367,6 +1367,61 @@ impl PlaybackOrchestrator {
     pub async fn rebatir_l_etage_casque_en_direct(&self, zone_id: i64) -> bool {
         self.pousser_le_crossfeed_en_direct(zone_id).await.is_some()
     }
+    /// #6256 — les zones dont l'étage casque utilise le greffon natif tiers
+    /// `id`, les seules qu'une désinstallation doit rebâtir : rebâtir une autre
+    /// zone qui joue ne lui retire rien et peut s'entendre (un petit
+    /// claquement). Une zone en est si elle le DEMANDE (greffon demandé, case
+    /// cochée sur la zone) ou si sa sortie locale le PORTE en ce moment.
+    ///
+    /// À lire AVANT de désinstaller : ensuite les drapeaux du greffon sont
+    /// baissés et ses réglages peut-être effacés, et plus aucune zone ne le
+    /// demanderait.
+    pub async fn zones_qui_utilisent_le_greffon_tiers(&self, id: &str) -> Vec<i64> {
+        let settings = crate::db::settings_repo::SettingsRepo::with_backend(self.db.clone());
+        let demande = crate::audio::natifs_tiers::demande(&settings, id);
+        let zones = ZoneRepo::with_backend(self.db.clone())
+            .list()
+            .unwrap_or_default();
+        let mut retenues = Vec::new();
+        for zone in zones {
+            let Some(zone_id) = zone.id else { continue };
+            let cochee = demande
+                && crate::audio::natifs_tiers::reglage_de_zone(&settings, zone_id, id)
+                    .and_then(|r| r.get("enabled").and_then(serde_json::Value::as_bool))
+                    == Some(true);
+            if cochee
+                || self
+                    .etage_casque_porte(zone.output_device_id.as_deref(), id)
+                    .await
+            {
+                retenues.push(zone_id);
+            }
+        }
+        retenues
+    }
+
+    /// La sortie locale `device_id` porte-t-elle un étage du greffon tiers ?
+    async fn etage_casque_porte(&self, device_id: Option<&str>, id: &str) -> bool {
+        #[cfg(not(feature = "local-audio"))]
+        {
+            let _ = (device_id, id);
+            false
+        }
+        #[cfg(feature = "local-audio")]
+        {
+            let Some(device_id) = device_id.filter(|d| d.starts_with("local:")) else {
+                return false;
+            };
+            let Some(output_arc) = ({ self.outputs.lock().await.get(device_id) }) else {
+                return false;
+            };
+            let output = output_arc.lock().await;
+            output
+                .as_any()
+                .downcast_ref::<crate::outputs::local::LocalOutput>()
+                .is_some_and(|local| local.crossfeed_porte_l_etage_tiers(id))
+        }
+    }
     /// [`Self::refresh_zone_crossfeed`], mais qui dit QUAND le réglage atteint
     /// le son, au lieu d'un booléen à plusieurs sens (#4680).
     ///
