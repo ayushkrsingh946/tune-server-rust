@@ -96,6 +96,8 @@ fn cede_tout(id: &str) -> bool {
         Tache::Empreintes.id(),
         Tache::PlageDynamique.id(),
         Tache::Acoustique.id(),
+        // #6285 — la passe des faux hi-res décode un extrait par piste.
+        Tache::FauxHiRes.id(),
     ]
     .contains(&id)
 }
@@ -113,6 +115,8 @@ fn retenue_par_la_chaleur(id: &str, gardes_chaudes: &[String]) -> bool {
         .contains(&id),
         "dynamic_range" => id == Tache::PlageDynamique.id(),
         "acoustique" => id == Tache::Acoustique.id(),
+        // #6285 — `faux_hires_passe` interroge la garde sous ce nom.
+        "faux_hires" => id == Tache::FauxHiRes.id(),
         _ => false,
     })
 }
@@ -180,6 +184,9 @@ fn avancement(state: &AppState, tache: Tache) -> Value {
             }
         }
         Tache::Acoustique => Value::Null,
+        // #6285 — la passe ne publie pas d'avancement sans requête (le
+        // nombre de candidats se compte en base).
+        Tache::FauxHiRes => Value::Null,
         Tache::Enrichissement | Tache::ImagesArtistes | Tache::Identification => state
             .background_tasks
             .snapshot()
@@ -343,6 +350,17 @@ mod tests {
         assert_eq!(a("acoustic", false, true, &[]), Activite::AuTravail);
         assert_eq!(a("acoustic", false, false, &[]), Activite::AuRepos);
         assert_eq!(a("replaygain", true, true, &[]), Activite::EnPause);
+        // #6285 — la passe des faux hi-res décode : elle CÈDE, et sa garde
+        // thermique `faux_hires` la retient.
+        let p_hires = priorite(true, vec!["hires_check"]);
+        assert_eq!(
+            activite_de("hires_check", false, true, &p_hires, &[]),
+            Activite::Cedee
+        );
+        assert_eq!(
+            a("hires_check", false, true, &["faux_hires".to_string()]),
+            Activite::Retenue
+        );
         let chaud = vec!["replaygain".to_string()];
         assert_eq!(a("fingerprints", false, true, &chaud), Activite::Retenue);
         assert_eq!(a("enrichment", false, true, &chaud), Activite::Ralentie);

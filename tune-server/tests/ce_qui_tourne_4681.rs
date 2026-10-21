@@ -64,6 +64,7 @@ async fn ce_qui_tourne_dit_les_passes_la_lecture_l_avancement_et_la_chaleur_4681
         "enrichment",
         "artist_images",
         "identification",
+        "hires_check",
         "scan",
     ];
     for id in attendues {
