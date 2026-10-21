@@ -54,6 +54,9 @@ mod replaygain;
 // recopier la règle au lieu de l'appeler — un test qui réplique le code ne le
 // garde pas. Les items du module restent `pub(crate)` sauf ceux exposés
 // expressément.
+/// « Ce qui tourne » : passes de fond, cession à la lecture, avancement,
+/// garde thermique (#4681).
+pub(crate) mod ce_qui_tourne;
 pub mod scan;
 /// Pause et reprise des traitements de fond (#4574) — voir le module.
 pub(crate) mod taches_de_fond;
@@ -140,6 +143,12 @@ pub fn router() -> Router<AppState> {
         )
         .route("/artist-split-preview", get(scan::artist_split_preview))
         .route("/background-tasks", get(enrich::background_tasks_status))
+        // #4681 — « ce qui tourne » : quelles passes tournent, lesquelles la
+        // lecture ralentit, leur avancement, et le bridage thermique.
+        .route(
+            "/background-tasks/running",
+            get(ce_qui_tourne::ce_qui_tourne_route),
+        )
         // Suspendre et reprendre les traitements de fond (#4574). Le scan avait
         // `/scan/cancel` ; le ReplayGain, la plage dynamique, l'analyse
         // acoustique, l'enrichissement et les images d'artistes n'avaient

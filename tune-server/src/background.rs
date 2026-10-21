@@ -35,6 +35,12 @@ pub async fn spawn_background_tasks(state: &AppState, config: &TuneConfig) {
     spawn_position_poller(state);
     spawn_token_refresher(state);
     spawn_tune_tested_refresher(state);
+    // #6285 — la passe des faux hi-res. Elle DORT tant que son réglage n'est
+    // pas armé (`analyse_faux_hires_active`), et sinon cède à la pause, à la
+    // chaleur, à la lecture et au créneau unique des analyses.
+    tokio::spawn(tune_core::audio::faux_hires_passe::courir(
+        state.backend.clone(),
+    ));
     spawn_upnp_advertiser(state, config).await;
     // Renderers UPnP par zone (#1750) : annonceur propre, relu à chaque
     // cycle — l'opt-in d'une zone prend effet sans redémarrage.
@@ -2241,6 +2247,14 @@ async fn refresh_account_premium(
             .await
             .ok();
         }
+        // Clé du serveur (#6603) : inscrite sur le compte si elle ne l'est
+        // pas encore — un serveur relié avant la version qui l'inscrit.
+        tune_core::cloud::cle_serveur::inscrire_depuis_les_reglages(
+            backend,
+            tune_core::http::client::shared(),
+        )
+        .await
+        .ok();
 
         // 🔴 C'est ICI que le défaut devenait permanent.
         //

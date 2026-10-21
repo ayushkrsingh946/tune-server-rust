@@ -37,6 +37,7 @@ pub(crate) use enrich::demarrer_enrich_all;
 /// #4907 — ordre des répertoires et répertoire préféré d'un album.
 mod exemplaires;
 mod facets;
+mod faux_hires;
 mod folder_facet;
 mod genres;
 // LA définition du genre, partagée avec `/dashboard/stats` (#4527) : une seule
@@ -547,6 +548,14 @@ pub fn router() -> Router<AppState> {
         .route("/artists/{id}/credits", get(credits::artist_credits))
         // #1572 — crédits d’un album : un aller-retour pour toute la fiche.
         .route("/albums/{id}/credits", get(credits::album_credits))
+        // #6285 — le verdict des faux hi-res de l'album et de ses pistes.
+        .route("/albums/{id}/hires", get(faux_hires::verdict_album))
+        // #6285 — l'état de la passe, et son interrupteur (désactivée par
+        // défaut). Segment statique : aucun conflit avec `/albums/{id}`.
+        .route(
+            "/hires-check",
+            get(faux_hires::etat).post(faux_hires::regler),
+        )
         // #6481 — les livrets PDF du dossier de l'album, et le fichier.
         .route("/albums/{id}/booklets", get(livrets::livrets_album))
         .route("/albums/{id}/booklets/{name}", get(livrets::livret_album))

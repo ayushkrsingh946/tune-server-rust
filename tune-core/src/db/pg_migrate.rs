@@ -245,6 +245,10 @@ const MIGRATION_TABLES_APRES_SCRIPTS: &[&str] = &[
 #[cfg_attr(not(test), allow(dead_code))]
 const TABLES_NON_COPIEES: &[(&str, &str)] = &[
     (
+        "hires_verifications",
+        "verdicts des faux hi-res (#6285) : mesures recalculables, la passe de fond les refait",
+    ),
+    (
         "_migrations",
         "tenue des versions du schema SQLite ; PostgreSQL a sa propre `schema_version`",
     ),
@@ -830,6 +834,12 @@ ALTER TABLE listen_history ADD COLUMN IF NOT EXISTS album_ref TEXT;
 -- L'artiste d'une piste de service chez son service (#6079, PG 087 / SQLite
 -- 122). En ALTER pour la même raison que juste au-dessus.
 ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS artist_ref TEXT;
+-- Le conteneur de chaque élément de file (#6466, PG 092 / SQLite 128).
+ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_type TEXT;
+ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_id TEXT;
+ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_source TEXT;
+ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_title TEXT;
+ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_cover TEXT;
 
 -- Etiquettes posees sur un objet de STREAMING (#3699). Une base creee par la
 -- bascule SQLite -> PostgreSQL enregistre `schema_version = 99` et ne rejoue

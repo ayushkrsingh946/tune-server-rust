@@ -66,6 +66,8 @@ pub const RACINE_EMBARQUEE: &str = "";
 pub const DOMAINE_DEFI_SESSION: &str = "tune-remote/session/v1";
 /// Préfixe du message que le serveur signe pour s'enregistrer sur le relais.
 pub const DOMAINE_DEFI_SERVEUR: &str = "tune-remote/serveur/v1";
+/// Préfixe du message que le serveur signe pour inscrire sa clé sur le compte.
+pub const DOMAINE_INSCRIPTION_SERVEUR: &str = "tune-remote/inscription/v1";
 
 /// Pourquoi un laissez-passer, un défi ou un jeu de clés est refusé.
 ///
@@ -534,6 +536,34 @@ pub fn verifier_defi_serveur(
     }
 }
 
+/// Le message que le serveur signe pour inscrire sa clé publique sur le
+/// compte : `tune-remote/inscription/v1 \n server_id \n clé publique`. Le
+/// site prouve ainsi que le serveur détient la clé qu'il inscrit.
+pub fn message_inscription_serveur(server_id: &str, cle_publique: &str) -> Vec<u8> {
+    format!("{DOMAINE_INSCRIPTION_SERVEUR}\n{server_id}\n{cle_publique}").into_bytes()
+}
+
+/// Vérifie la preuve d'une inscription de clé de serveur.
+pub fn verifier_inscription_serveur(
+    cle_serveur: &str,
+    server_id: &str,
+    preuve: &str,
+) -> Result<(), Refus> {
+    let octets = b64url(cle_serveur).ok_or(Refus::CleAppareil)?;
+    if octets.len() != 32 {
+        return Err(Refus::CleAppareil);
+    }
+    let cle = CleAppareil {
+        alg: AlgCle::Ed25519,
+        octets,
+    };
+    if cle.verifie(&message_inscription_serveur(server_id, cle_serveur), preuve) {
+        Ok(())
+    } else {
+        Err(Refus::Defi)
+    }
+}
+
 /// Clé Ed25519 du serveur : la paire qui l'identifie auprès du relais et du
 /// site (et, demain, son identité d'endpoint pair-à-pair).
 pub struct CleServeur {
@@ -576,6 +606,17 @@ impl CleServeur {
     pub fn signer(&self, message: &[u8]) -> String {
         URL_SAFE_NO_PAD.encode(self.paire.sign(message).as_ref())
     }
+}
+
+/// Un jeton aléatoire de 256 bits, base64url : jeton de session, défi.
+///
+/// `None` si le générateur du système fait défaut — l'appelant refuse alors
+/// d'ouvrir quoi que ce soit plutôt que de tirer un jeton faible.
+pub fn jeton_aleatoire() -> Option<String> {
+    use ring::rand::SecureRandom;
+    let mut octets = [0u8; 32];
+    ring::rand::SystemRandom::new().fill(&mut octets).ok()?;
+    Some(URL_SAFE_NO_PAD.encode(octets))
 }
 
 /// Décodage base64url STRICT : sans remplissage, sans bits de fin, sans

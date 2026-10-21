@@ -1847,6 +1847,9 @@ pub use dsp::PorteeDuReglage;
 // #5695 — PURE forcé : 100 % à l'appareil, sans trim, sur tous les chemins.
 #[cfg(test)]
 mod volume_pure_5695_tests;
+// #6541 — limites de sécurité et de confort, tenues sur tous les chemins.
+#[cfg(test)]
+mod volume_limites_6541_tests;
 // #4407 — l'égaliseur remplacé en vol dans un flux réseau fabriqué par Tune.
 mod eq_en_vol;
 #[cfg(test)]
@@ -2216,6 +2219,10 @@ mod seek_de_reprise_caduc_5476;
 mod seek_de_reprise_conditionnel_5050;
 // #5050 (fil 2236) — transfert depuis une zone en pause : la cible est posée
 // en pause sans rien recevoir.
+/// #6466 — l'historique par conteneurs : le conteneur de chaque élément de
+/// file, et le transfert de zone sans doublon.
+#[cfg(test)]
+mod historique_conteneurs_tests_6466;
 /// #6130 — quitter une radio sur une sortie DLNA : `Stop`, attente du départ
 /// du consommateur radio, puis `SetAVTransportURI`.
 #[cfg(test)]
