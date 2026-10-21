@@ -383,6 +383,13 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     // AUSSI, même raison : une base de bascule ne rejouera jamais la 087, alors
     // que l'écriture de la file nomme la colonne.
     "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS artist_ref TEXT",
+    // #6466 — le conteneur de chaque élément de file (PG 092). Ici AUSSI :
+    // une base de bascule ne rejouera jamais la 092.
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_type TEXT",
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_id TEXT",
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_source TEXT",
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_title TEXT",
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_cover TEXT",
     // Section « Live » — types secondaires MusicBrainz du disque (PG 081).
     // Ici AUSSI : une base de bascule ne rejouera jamais la 081, alors que la
     // fiche artiste nomme la colonne. NULL = inconnu.

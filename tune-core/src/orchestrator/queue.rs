@@ -635,6 +635,33 @@ impl PlaybackOrchestrator {
     }
 
     pub async fn play_from_queue(&self, zone_id: i64, position: i64) -> Result<PlayResult, String> {
+        self.play_from_queue_inner(zone_id, position, true).await
+    }
+
+    /// #6466 (fil 2302 point 15) — `play_from_queue` SANS écrire
+    /// l'historique : le transfert de zone relance sur la cible une piste que
+    /// la zone d'origine a déjà écrite. « La piste transférée est notée avec
+    /// la zone d'origine, pas la peine de la dupliquer avec la zone de
+    /// destination. Seuls les titres suivants seront notés avec la nouvelle
+    /// zone. »
+    ///
+    /// La relance passe par les étapes d'entrée de `play()` (plafond de
+    /// zones, re-tap) : seule l'écriture de l'historique est retirée — voir
+    /// [`play_transfere_sans_historique`](Self::play_transfere_sans_historique).
+    pub async fn play_from_queue_sans_historique(
+        &self,
+        zone_id: i64,
+        position: i64,
+    ) -> Result<PlayResult, String> {
+        self.play_from_queue_inner(zone_id, position, false).await
+    }
+
+    async fn play_from_queue_inner(
+        &self,
+        zone_id: i64,
+        position: i64,
+        historique: bool,
+    ) -> Result<PlayResult, String> {
         let queue_repo = PlayQueueRepo::with_backend(self.db.clone());
 
         let output_device_id = ZoneRepo::with_backend(self.db.clone())
@@ -761,7 +788,11 @@ impl PlaybackOrchestrator {
         self.playback
             .update_queue_info(zone_id, position, total)
             .await;
-        let result = self.play(req).await?;
+        let result = if historique {
+            self.play(req).await?
+        } else {
+            self.play_transfere_sans_historique(req).await?
+        };
         Ok(result)
     }
 
@@ -1003,6 +1034,8 @@ impl PlaybackOrchestrator {
         // est celui que la file vient réellement d'atteindre.
         if let Some((title, artist, album, cover, duration_ms)) = ecoute {
             let etat = self.playback.get_state(zone_id).await;
+            let contexte =
+                self.contexte_de_l_ecoute(&etat, advance_track_id, advance_source_id.as_deref());
             let album_id = advance_track_id.and_then(|track_id| {
                 TrackRepo::with_backend(self.db.clone())
                     .get(track_id)
@@ -1022,12 +1055,12 @@ impl PlaybackOrchestrator {
                 cover.as_deref(),
                 etat.session_profile_id,
                 ContexteEcoute {
-                    nature: etat.session_context_type.as_deref(),
-                    id: etat.session_context_id.as_deref(),
+                    nature: contexte.0.as_deref(),
+                    id: contexte.1.as_deref(),
                     rang: rang_a_retenir(etat.shuffle, etat.queue_position),
-                    service: etat.session_context_source.as_deref(),
-                    titre: etat.session_context_title.as_deref(),
-                    pochette: etat.session_context_cover.as_deref(),
+                    service: contexte.2.as_deref(),
+                    titre: contexte.3.as_deref(),
+                    pochette: contexte.4.as_deref(),
                 },
                 None,
             );
@@ -1339,6 +1372,8 @@ impl PlaybackOrchestrator {
             ),
         )
         .await;
+        // #6334 — vers `PlayMedia` (SetNext) : la profondeur du fil.
+        let profondeur_fil = profondeur_du_fil(&resolved);
         let raw_cover = cover.or(resolved.cover_url);
         Ok(ResolvedQueueItem {
             url: resolved.url,
@@ -1353,7 +1388,7 @@ impl PlaybackOrchestrator {
             duration_ms: resolved.duration_ms.map(|d| d as u64),
             stream_id: resolved.stream_id,
             sample_rate: resolved.sample_rate,
-            bit_depth: resolved.bit_depth,
+            bit_depth: profondeur_fil,
             channels: resolved.channels,
             file_size: resolved.file_size,
             file_path: None,

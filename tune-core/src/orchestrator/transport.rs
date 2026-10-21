@@ -243,6 +243,34 @@ pub(super) struct Habillage {
 
 impl PlaybackOrchestrator {
     pub async fn play(&self, req: PlayRequest) -> Result<PlayResult, String> {
+        // Public entry point: this is a *new* logical play, so it is recorded
+        // in the listen history.
+        self.play_par_l_entree(req, true).await
+    }
+
+    /// #6466 (fil 2302 point 15) — le transfert de zone : une lecture
+    /// NOUVELLE sur la cible, qui passe par TOUTES les étapes d'entrée de
+    /// [`play`](Self::play) (plafond de zones, dédoublonnage du re-tap), mais
+    /// qui n'écrit pas l'historique : la piste transférée a déjà son écoute,
+    /// écrite avec la zone d'origine.
+    ///
+    /// Ce n'est PAS [`play_without_history`](Self::play_without_history), qui
+    /// saute ces étapes exprès : elle recrée le flux d'une piste DÉJÀ en cours
+    /// (seek, relance radio, reconnexion) et n'active aucune zone.
+    pub async fn play_transfere_sans_historique(
+        &self,
+        req: PlayRequest,
+    ) -> Result<PlayResult, String> {
+        self.play_par_l_entree(req, false).await
+    }
+
+    /// Les étapes d'entrée de `play()`, puis `play_inner`. `historique` ne
+    /// commande QUE l'écriture de l'écoute.
+    async fn play_par_l_entree(
+        &self,
+        req: PlayRequest,
+        historique: bool,
+    ) -> Result<PlayResult, String> {
         // Free-tier zone cap, enforced at *activation* (a zone's first play).
         // This is the single choke point for every play entry point (direct
         // play, resume, streaming, transfer, alarms, AI) — gating here, rather
@@ -297,9 +325,7 @@ impl PlaybackOrchestrator {
             }
         }
 
-        // Public entry point: this is a *new* logical play, so it is recorded
-        // in the listen history.
-        self.play_inner(req, true).await
+        self.play_inner(req, historique).await
     }
 
     /// Free-tier gate: block *activating* a brand-new zone once the free active
@@ -1226,6 +1252,10 @@ impl PlaybackOrchestrator {
                 // codec de l'URL, #2074). Règle partagée avec l'armement
                 // gapless (#3365), pour que la piste 2 dise la même chose.
                 .or_else(|| format_nomme_par_la_source(&resolved.source, req.source_id.as_deref()))
+                // #6334 — le codec que le service a livré, et non le
+                // conteneur servi : un AAC Tidal décodé en WAV pour la sortie
+                // s'annonçait « WAV », donc sans perte, donc « CD ».
+                .or_else(|| resolved.format_source.clone())
                 // A media-server (UPnP/NAS) item has no local track row, so the
                 // codec the client read from the DIDL res@protocolInfo is the only
                 // authoritative source: audio/mp4 is ambiguous ALAC-vs-AAC, so
@@ -1363,7 +1393,9 @@ impl PlaybackOrchestrator {
                 file_size: resolved.file_size,
                 file_path: local_file_path.as_deref(),
                 sample_rate: resolved.sample_rate,
-                bit_depth: resolved.bit_depth,
+                // #6334 — la profondeur du FIL, pas celle de la source : un
+                // AAC décodé en WAV part bien en 16 bits.
+                bit_depth: profondeur_du_fil(&resolved),
                 channels: resolved.channels,
                 // Internet radio is an infinite live stream — mark it so the
                 // DLNA DIDL advertises live/senderPaced semantics instead of a
@@ -1778,13 +1810,9 @@ impl PlaybackOrchestrator {
             // position reellement atteinte, avance automatique comprise. En
             // aleatoire il reste vide — on re-tirera (#2441).
             let rang = rang_a_retenir(etat.shuffle, etat.queue_position);
-            let context = (
-                etat.session_context_type,
-                etat.session_context_id,
-                etat.session_context_source,
-                etat.session_context_title,
-                etat.session_context_cover,
-            );
+            // #6466 — le conteneur de l'ÉLÉMENT de file joué d'abord, celui de
+            // la session à défaut.
+            let context = self.contexte_de_l_ecoute(&etat, req.track_id, req.source_id.as_deref());
             self.record_listen(
                 &resolved.title,
                 resolved.artist.as_deref(),

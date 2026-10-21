@@ -1014,6 +1014,10 @@ path = "tests/contexte_de_session_6465.rs"
 [[test]]
 name = "podcast_sortie_reseau_6468"
 path = "tests/podcast_sortie_reseau_6468.rs"
+# #6466 — le conteneur de ce que `POST /zones/{id}/queue/add` insère.
+[[test]]
+name = "historique_conteneurs_6466"
+path = "tests/historique_conteneurs_6466.rs"
 # #2816 — la garde qui detecte la DERIVE des garde-fous : un fichier d'essais
 # que le compilateur n'atteint plus, un temoin qui ne s'execute plus que sous
 # une variable d'environnement que plus aucune etape ne pose. `autotests =
@@ -1355,6 +1359,12 @@ path = "tests/exemplaires_par_repertoire_4907.rs"
 name = "suppression_playlist_de_service"
 path = "tests/suppression_playlist_de_service.rs"
 
+# #6688 — le badge « Partagée avec un cercle » (`cercles` dans la liste et la
+# fiche des playlists). `autotests = false` : sans cette cible, jamais compilé.
+[[test]]
+name = "playlists_badge_cercle_6688"
+path = "tests/playlists_badge_cercle_6688.rs"
+
 # Le cloisonnement par profil du gestionnaire de playlists — dont la FUSION.
 # Le fichier existait depuis #3073, mais `autotests = false` plus haut le
 # laissait hors compilation : la garde qui interdit de fusionner la playlist
@@ -1609,6 +1619,13 @@ required-features = ["postgres"]
 name = "playlists_pistes_de_service"
 path = "tests/playlists_pistes_de_service.rs"
 
+# #6687 — retirer une piste désigne une LIGNE (rang affiché ou `entry_id`),
+# plus jamais la colonne `position`. `autotests = false` : sans cette cible,
+# jamais compilé.
+[[test]]
+name = "playlist_retrait_par_ligne_6687"
+path = "tests/playlist_retrait_par_ligne_6687.rs"
+
 # Favoris LOCAUX sur PostgreSQL (chasse PG du 25/09/2026) : `ProfileRepo` liait
 # `favorites.profile_id`/`item_id` en chaine alors que ces colonnes sont BIGINT
 # sur les deux naissances d'une base PG. PAS de `required-features` : la
@@ -1727,6 +1744,13 @@ name = "pg_balises_6124"
 path = "tests/pg_balises_6124.rs"
 required-features = ["postgres"]
 
+# #6287 — la requête textuelle des règles intelligentes sur PostgreSQL : la
+# négation (`NOT COALESCE`), les combinaisons et le crédit, par la vraie route.
+[[test]]
+name = "pg_requete_textuelle_6287"
+path = "tests/pg_requete_textuelle_6287.rs"
+required-features = ["postgres"]
+
 # #6336 — AirPlay 2, SMB, Qobuz, TIDAL et Deezer éprouvés par le vrai routeur
 # contre des faux locaux. Binaire à lui seul : les substitutions de programmes
 # (`tune_core::services_factices`) sont un état de PROCESSUS. `autotests =
@@ -1734,6 +1758,20 @@ required-features = ["postgres"]
 [[test]]
 name = "services_remplacables_6336"
 path = "tests/services_remplacables_6336.rs"
+
+# #4681 — « ce qui tourne » (`GET /system/background-tasks/running`) par le
+# vrai routeur. Binaire à lui seul : le témoin de lecture et l'avancement de
+# la cascade sont des états de PROCESSUS.
+[[test]]
+name = "ce_qui_tourne_4681"
+path = "tests/ce_qui_tourne_4681.rs"
+
+# #6336 (suite) — le battement de la licence et la liaison SSO du serveur au
+# compte, contre un faux mozaiklabs déclaré par `services_factices`
+# (`substituer_base`). Binaire à lui seul pour la même raison.
+[[test]]
+name = "licence_sso_remplacables_6336"
+path = "tests/licence_sso_remplacables_6336.rs"
 
 # #6454 — `GET /profiles` ne rend plus `200 []` sur une base en échec : un
 # 500 au code lisible, et une ligne ERROR au journal. Abonné `tracing` GLOBAL,
@@ -1743,3 +1781,11 @@ path = "tests/services_remplacables_6336.rs"
 [[test]]
 name = "profils_panne_de_base_6454"
 path = "tests/profils_panne_de_base_6454.rs"
+
+# #6212 / #6634 — la gravure du Dynamic Range cède à la lecture et n'écrit pas
+# dans le fichier joué, par la route montée. Binaire à lui seul : le témoin de
+# lecture et la politique des freins sont des états de PROCESSUS. `autotests =
+# false` plus haut : sans cette cible, le fichier ne serait JAMAIS compilé.
+[[test]]
+name = "gravure_dr_cede_a_la_lecture_6212"
+path = "tests/gravure_dr_cede_a_la_lecture_6212.rs"

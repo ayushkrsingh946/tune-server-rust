@@ -25,6 +25,7 @@ pub mod dashboard;
 pub mod db;
 pub mod db_backup;
 pub mod deezer_proxy;
+pub mod demarrage_inacheve;
 pub mod device_catalog;
 pub mod device_preconfig;
 pub mod digest;
@@ -52,6 +53,9 @@ pub mod lyrics;
 pub mod memoire_rendue;
 pub mod metadata;
 pub mod notifications;
+/// Flux Ogg Vorbis et Opus fabriqués pour les tests des radios Ogg.
+#[cfg(test)]
+pub(crate) mod ogg_factice;
 pub mod orchestrator;
 pub mod outputs;
 pub mod party_mode;

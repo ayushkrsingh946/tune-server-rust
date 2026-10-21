@@ -24,7 +24,7 @@ fn pont() -> (Arc<RelayState>, mpsc::Receiver<String>) {
     let state = Arc::new(RelayState::new());
     let (tx, rx) = mpsc::channel::<String>(16);
     state
-        .register_server("srv".into(), "Salon".into(), JETON.into(), tx)
+        .register_server("srv".into(), "Salon".into(), JETON.into(), None, tx)
         .unwrap();
     (state, rx)
 }
@@ -394,10 +394,10 @@ async fn chaque_serveur_a_ses_propres_comptes() {
     let (tx_a, _rx_a) = mpsc::channel::<String>(16);
     let (tx_b, _rx_b) = mpsc::channel::<String>(16);
     state
-        .register_server("a".into(), "A".into(), "ja".into(), tx_a)
+        .register_server("a".into(), "A".into(), "ja".into(), None, tx_a)
         .unwrap();
     state
-        .register_server("b".into(), "B".into(), "jb".into(), tx_b)
+        .register_server("b".into(), "B".into(), "jb".into(), None, tx_b)
         .unwrap();
     crate::ws_server::handle_server_message(&state, "a", "{\"type\":\"relay.pong\"}").await;
     crate::ws_server::handle_server_message(&state, "b", "{\"type\":\"relay.pong\"}").await;

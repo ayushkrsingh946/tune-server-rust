@@ -138,7 +138,7 @@ impl Dsp {
     /// `NativePcmRing` les tient — ce que `feed_windows_native_exclusive_leftover`
     /// poussait.
     fn avant_native(&self, octets: &[u8], spec: AudioSpec) -> (Vec<u8>, bool, bool) {
-        let prepared = prepare_windows_native_pcm(
+        let prepared = prepare_windows_native_pcm_a_voies_egales(
             octets,
             spec.profondeur().bits_declares(),
             spec.canaux(),

@@ -34,13 +34,16 @@ pub async fn proxy_stream(
     // requete accepte ici.
     let jeton = crate::api_proxy::extraire_jeton(&headers)
         .or_else(|| crate::api_proxy::jeton_de_requete(uri.query()));
-    let auth_ok = jeton
-        .as_deref()
-        .map(|t| state.server_for_token(t).as_deref() == Some(&*server_id))
-        .unwrap_or(false);
-
-    if !auth_ok {
-        return StatusCode::UNAUTHORIZED.into_response();
+    // Jeton de session (#6603) ou ancien jeton du pont : voir
+    // `RelayState::autoriser`. Un flux audio est ce qui fait d'une session
+    // une ECOUTE : c'est ici que s'applique la limite d'une ecoute a
+    // distance par compte.
+    let acces = match state.autoriser(jeton.as_deref(), &server_id) {
+        Ok(a) => a,
+        Err(rejet) => return rejet.en_reponse(),
+    };
+    if let crate::sessions::Acces::Session(s) = &acces {
+        state.sessions.audio(s);
     }
 
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -71,16 +74,19 @@ pub async fn proxy_stream(
 
     // Wait for the relay.stream_start response with headers/status
     match tokio::time::timeout(Duration::from_secs(30), rx).await {
-        Ok(Ok(resp)) => reponse_relayee_comptee(
-            resp,
-            Some(Comptage {
-                trafic: state.trafic.clone(),
-                serveur: compteurs,
-                categorie: Categorie::Audio,
-                cle: stream_path,
-                range,
-                debut,
-            }),
+        Ok(Ok(resp)) => crate::sessions::habiller(
+            reponse_relayee_comptee(
+                resp,
+                Some(Comptage {
+                    trafic: state.trafic.clone(),
+                    serveur: compteurs,
+                    categorie: Categorie::Audio,
+                    cle: stream_path,
+                    range,
+                    debut,
+                }),
+            ),
+            &acces,
         ),
         Ok(Err(_)) => {
             state.trafic.erreur(Erreur::CanalRompu);

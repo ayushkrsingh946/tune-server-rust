@@ -4685,7 +4685,7 @@ impl AlbumRepo {
 ///     découpe par `json_array_contains_lower`. Un contenu qui n'est pas un
 ///     tableau de chaînes ne rend rien, comme `json_each` sur une valeur
 ///     illisible.
-fn jetons_de_genre(genre: Option<&str>, genres_json: Option<&str>) -> Vec<String> {
+pub(crate) fn jetons_de_genre(genre: Option<&str>, genres_json: Option<&str>) -> Vec<String> {
     let mut jetons = Vec::new();
     if let Some(brut) = genre {
         let decoupe = brut
@@ -6682,6 +6682,45 @@ pub(crate) mod tests {
         ]);
         assert_eq!(vues, 5);
         assert_eq!(compte, Some(5));
+    }
+
+    /// #6222 — dans une compilation personnelle (un disque, numéros d'origine
+    /// en double), deux versions d'un même morceau portent le même numéro et
+    /// le même titre : « Yesterday » n° 13 des Beatles et sa reprise. L'écran
+    /// les montre toutes les deux (#6609) ; le compte doit en dire autant.
+    #[test]
+    fn dans_une_compilation_le_compte_suit_l_ecran_6222() {
+        let (compte, vues) = compte_et_lignes_vues(&[
+            (1, 13, "Yesterday", "flac"),
+            (1, 1, "Angie", "flac"),
+            (1, 13, "Yesterday", "flac"),
+            (1, 1, "Creep", "flac"),
+        ]);
+        assert_eq!(vues, 4, "l'écran montre les deux « Yesterday »");
+        assert_eq!(
+            compte,
+            Some(4),
+            "le compte enregistré doit dire la même chose que l'écran : \
+             la clé disque/numéro/titre replie les deux « Yesterday » en une"
+        );
+    }
+
+    /// #6222 — un coffret de deux disques n'est jamais en ordre de fichiers :
+    /// ses copies se replient à l'écran comme dans le compte.
+    #[test]
+    fn un_coffret_garde_le_repli_des_copies_dans_son_compte_6222() {
+        let (compte, vues) = compte_et_lignes_vues(&[
+            (1, 1, "Un", "flac"),
+            (1, 1, "Deux", "flac"),
+            (1, 2, "Trois", "aiff"),
+            (1, 2, "Trois", "aac"),
+            (2, 1, "Quatre", "flac"),
+        ]);
+        assert_eq!(
+            vues, 4,
+            "deux disques : les copies de « Trois » se replient"
+        );
+        assert_eq!(compte, Some(4));
     }
 
     #[test]

@@ -1491,6 +1491,60 @@ struct QueueAddRequest {
     /// règle que `PlayRequest.album_id_service`.
     album_id_service: Option<String>,
     artist_id_service: Option<String>,
+    /// #6466 — le CONTENEUR de ce qui est ajouté (« Lire ensuite » ou
+    /// « Ajouter à la file » depuis un album, une playlist, un artiste) :
+    /// même vocabulaire que `PlayRequest.context_type` (`CONTEXTES_CONNUS`).
+    context_type: Option<String>,
+    context_id: Option<String>,
+    /// Le service auquel `context_id` appartient ; à défaut `source`, puis
+    /// la bibliothèque.
+    context_source: Option<String>,
+}
+
+/// #6466 — le conteneur des lignes qu'un `POST /zones/{id}/queue/add` insère.
+///
+/// 1. Le contexte ÉNONCÉ par l'appelant (album, playlist, artiste, label).
+/// 2. Un album entier (`album_id`) : cet album.
+/// 3. UN titre ajouté seul : `track`, le premier niveau de l'historique
+///    (« si on ajoute à la file un titre qui n'appartient pas à l'objet
+///    conteneur joué alors il doit se retrouver en 1er niveau »).
+/// 4. Plusieurs titres sans contexte énoncé : `None` — les lignes suivent la
+///    session comme avant ; une liste nue peut venir d'un album comme d'une
+///    sélection, et une intention devinée est pire qu'une absente.
+fn contexte_d_ajout(
+    body: &QueueAddRequest,
+) -> Option<tune_core::db::contexte_de_file::ContexteDeFile> {
+    use tune_core::db::contexte_de_file::ContexteDeFile;
+    if let Some(t) = body
+        .context_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| CONTEXTES_CONNUS.contains(t))
+    {
+        return Some(ContexteDeFile {
+            nature: t.to_string(),
+            id: body.context_id.clone(),
+            service: body
+                .context_source
+                .clone()
+                .or_else(|| body.source.clone())
+                .or_else(|| Some("local".to_string())),
+            ..Default::default()
+        });
+    }
+    if let Some(id) = body.album_id {
+        return Some(ContexteDeFile {
+            nature: "album".to_string(),
+            id: Some(id.to_string()),
+            service: Some("local".to_string()),
+            ..Default::default()
+        });
+    }
+    let titres = body.track_ids.len()
+        + usize::from(body.track_id.is_some())
+        + usize::from(body.source.is_some() && body.source_id.is_some())
+        + body.tracks.len();
+    (titres == 1).then(ContexteDeFile::titre_seul)
 }
 
 #[derive(Deserialize)]
@@ -5149,6 +5203,10 @@ async fn queue_add(
     // la réponse « 190 ajoutées » là où la file en porte 3. Un compteur qui
     // ment est pire qu'un compteur absent (#2394) — on annonce donc ce qui est
     // ENTRÉ, et on nomme ce qui est tombé.
+    // #6466 — ce que l'ajout insère porte son conteneur : tout ce qui a un
+    // identifiant plus grand que le dernier d'avant l'insertion.
+    let dernier_avant =
+        tune_core::db::contexte_de_file::dernier_identifiant(&state.backend, zone_id);
     let bilan = match queue_repo.insert_at_bilan(zone_id, &inputs, body.position) {
         Ok(bilan) => bilan,
         Err(e) => {
@@ -5156,6 +5214,23 @@ async fn queue_add(
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
     };
+    if let Some(mut contexte) = contexte_d_ajout(&body) {
+        (contexte.titre, contexte.pochette) = nom_du_contexte(
+            &state,
+            Some(contexte.nature.as_str()),
+            contexte.id.as_deref(),
+            contexte.service.as_deref(),
+        )
+        .await;
+        if let Err(e) = tune_core::db::contexte_de_file::poser_apres(
+            &state.backend,
+            zone_id,
+            dernier_avant,
+            &contexte,
+        ) {
+            warn!(zone_id, error = %e, "queue_add_contexte_non_pose");
+        }
+    }
     let count = bilan.inserted();
     let start = bilan.start;
     if bilan.has_loss() {
@@ -6240,6 +6315,27 @@ async fn do_transfer(
     } else {
         streaming_items.len() as i64
     };
+
+    // #6466 (fil 2302 point 15) — le transfert ne sort plus les titres de leur
+    // conteneur : chaque ligne copiée garde le sien, et la cible reprend le
+    // contexte de SESSION de la source (le dernier « Lire »), que suivent les
+    // lignes qui n'en portent pas. Le profil propriétaire suit aussi.
+    tune_core::db::contexte_de_file::copier_les_contextes(&state.backend, from_zone, target_zone);
+    state
+        .playback
+        .set_session_context(
+            target_zone,
+            current.session_context_type.clone(),
+            current.session_context_id.clone(),
+            current.session_context_source.clone(),
+            current.session_context_title.clone(),
+            current.session_context_cover.clone(),
+        )
+        .await;
+    state
+        .playback
+        .set_session_profile(target_zone, current.session_profile_id)
+        .await;
 
     // Position et état AVANT de toucher quoi que ce soit : la piste doit
     // reprendre là où elle en était, pas redémarrer à zéro (point 17, revue
