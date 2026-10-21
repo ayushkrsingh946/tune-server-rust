@@ -1060,7 +1060,7 @@ async fn pg_6079_la_file_garde_l_artiste_de_service() {
     let _ = db.execute("DELETE FROM queue_items", &[]);
 }
 
-/// #6285 — la passe des faux hi-res sur PostgreSQL : la jumelle 091 se
+/// #6285 — la passe des faux hi-res sur PostgreSQL : la jumelle 093 se
 /// rejoue, les candidats se choisissent (sans perte, locaux, pas encore
 /// mesurés), et le verdict s'écrit puis se réécrit (`ON CONFLICT`).
 #[tokio::test(flavor = "multi_thread")]
@@ -1075,11 +1075,11 @@ async fn pg_6285_les_verdicts_des_faux_hires() {
     let url = std::env::var("TUNE_TEST_PG_URL").expect("posée : pg_or_skip l'a vérifié");
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     sqlx::raw_sql(include_str!(
-        "../../migrations/postgres/091_hires_verifications.sql"
+        "../../migrations/postgres/093_hires_verifications.sql"
     ))
     .execute(&pool)
     .await
-    .expect("la migration 091 doit se rejouer");
+    .expect("la migration 093 doit se rejouer");
     for (id, format) in [(1i64, "flac"), (2, "mp3"), (3, "wav")] {
         let chemin = format!("/m/{id}.{format}");
         let format = format.to_string();

@@ -3,7 +3,7 @@
 //! Elle décode un EXTRAIT de chaque piste locale sans perte (30 s, à 30 s du
 //! début quand la piste est assez longue), le mesure
 //! ([`super::faux_hires::mesurer`]) et range le verdict dans
-//! `hires_verifications` (migration SQLite 127 / PG 091).
+//! `hires_verifications` (migration SQLite 129 / PG 093).
 //!
 //! # Désactivée par défaut
 //!

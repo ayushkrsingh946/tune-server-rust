@@ -1,8 +1,8 @@
--- 091_hires_verifications.sql
+-- 093_hires_verifications.sql
 --
 -- #6285 : la détection des faux hi-res (CD gonflé en 24/96, MP3 converti en
 -- FLAC). Le verdict de chaque piste, la coupure spectrale et les bits
--- effectifs mesurés sur un extrait. Jumelle de la migration SQLite 127.
+-- effectifs mesurés sur un extrait. Jumelle de la migration SQLite 129.
 --
 -- La table naît VIDE : la passe de fond (désactivée par défaut) la remplit.
 -- Elle n'est pas recopiée à la bascule SQLite → PostgreSQL (mesures
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS hires_verifications (
 );
 CREATE INDEX IF NOT EXISTS idx_hires_verifications_verdict ON hires_verifications(verdict);
 
-INSERT INTO schema_version (version, name) VALUES (91, 'hires_verifications')
+INSERT INTO schema_version (version, name) VALUES (93, 'hires_verifications')
     ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

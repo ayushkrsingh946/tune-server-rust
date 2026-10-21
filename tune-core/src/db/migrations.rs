@@ -2542,12 +2542,14 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
     // naît VIDE : la passe de fond (désactivée par défaut) la remplit.
     // `ON DELETE CASCADE` : une piste retirée emporte sa mesure.
     //
-    // Numérotée 127 / PG 091 : la 126 / PG 090 (#6516) est la dernière sur
-    // `batch/bugs-rc7-20261015` le 20/10. ⚠️ La PR de #6466 (historique par
-    // conteneurs) tient AUSSI 127 / 091 : la seconde fusionnée se renumérote
-    // (règle de la 119). Jumelle PG : 091.
+    // Numérotée 129 / PG 093 à sa jonction avec `batch/bugs-rc7-20261015`
+    // (21/10) : la PR la tenait en 127 / 091, prises dans le lot par
+    // `tags_position` (#6257) ; 128 / 092 vont à la PR de #6466 (historique
+    // par conteneurs), qui entre avant celle-ci (ordre fixé par Bertrand :
+    // #6639, #6637, #6641, #6633). La garde de contiguïté exige donc que
+    // #6637 soit fusionnée d'abord. Jumelle PG : 093.
     Migration {
-        version: 127,
+        version: 129,
         name: "hires_verifications",
         up: "
 CREATE TABLE IF NOT EXISTS hires_verifications (
@@ -5377,12 +5379,12 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         "tags_position",
         include_str!("../../migrations/postgres/091_tags_position.sql"),
     ),
-    // Jumelle de la SQLite 127 (#6285) : `hires_verifications`, le verdict
+    // Jumelle de la SQLite 129 (#6285) : `hires_verifications`, le verdict
     // des faux hi-res par piste. Naît vide.
     (
-        91,
+        93,
         "hires_verifications",
-        include_str!("../../migrations/postgres/091_hires_verifications.sql"),
+        include_str!("../../migrations/postgres/093_hires_verifications.sql"),
     ),
 ];
 
@@ -8693,9 +8695,9 @@ mod tests {
         // Pose le lien des radios avec l'annuaire, que le rapprochement NOMME.
         // 91 : `tags_position` (#6257), jumelle de la SQLite 127. Pose
         // `tags.position`, que l'INSERT des etiquettes NOMME.
-        // 91 : `hires_verifications` (#6285), jumelle de la SQLite 127. Crée la
+        // 93 : `hires_verifications` (#6285), jumelle de la SQLite 129. Crée la
         // table des verdicts des faux hi-res, que la passe de fond NOMME.
-        assert_eq!(pg_latest_version(), 91, "latest PG migration must be 91");
+        assert_eq!(pg_latest_version(), 93, "latest PG migration must be 93");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),
