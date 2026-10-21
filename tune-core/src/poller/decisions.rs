@@ -955,13 +955,43 @@ pub fn natural_end(
 /// stored. A renderer that keeps reporting a stale default (Fabien's
 /// Devialet stuck at 50%) reports the same value every tick, so `prev`
 /// never differs from `device` and the user's saved volume is preserved.
+///
+/// Une zone dont la consigne est le SILENCE (au plus
+/// [`CONSIGNE_DE_SILENCE`]) n'adopte jamais une valeur plus haute : voir
+/// [`silence_rouvert_par_l_appareil`].
 pub fn should_adopt_device_volume(
     prev_device_vol: Option<f64>,
     device_vol: f64,
     db_vol: f64,
 ) -> bool {
-    prev_device_vol.is_some_and(|prev| (device_vol - prev).abs() > 0.02)
+    !silence_rouvert_par_l_appareil(device_vol, db_vol)
+        && prev_device_vol.is_some_and(|prev| (device_vol - prev).abs() > 0.02)
         && (device_vol - db_vol).abs() > 0.02
+}
+
+/// Plus haut volume de zone tenu pour une consigne de silence : la
+/// sourdine du client web pose exactement `0`.
+pub const CONSIGNE_DE_SILENCE: f64 = 0.001;
+
+/// La consigne de la zone est le silence, et l'appareil remonte un volume
+/// plus haut : le sondeur ne doit PAS l'adopter.
+///
+/// Eversolo DMP-A8 sur le .18, le 21/10 : la sourdine du client web envoie
+/// `SetVolume 0`, que l'appareil acquitte et applique (plus de son), mais
+/// une à quatre minutes plus tard il remonte de nouveau son ANCIEN volume
+/// (80) sans le rendre. Le sondeur l'adoptait (`volume_adopte_du_renderer
+/// ancien=0.0 nouveau=80.0`) : la zone affichait 80 %, non muette, sur un
+/// appareil muet. Ni la pause, ni la reprise (un `Play` seul), ni une
+/// nouvelle URI ne touchent au volume : le son ne revenait qu'au prochain
+/// coup de curseur, qui renvoie un `SetVolume`.
+///
+/// Garder la consigne de silence ne commande rien et ne monte jamais le
+/// son ; la zone dit la vérité de ce que Tune a commandé, et c'est le geste
+/// de l'auditeur (sourdine levée, curseur) qui rouvre le son. Le prix,
+/// assumé : un volume relevé sur l'appareil lui-même pendant que Tune est à
+/// zéro n'est pas recopié tant que la zone n'a pas quitté le silence.
+pub fn silence_rouvert_par_l_appareil(device_vol: f64, db_vol: f64) -> bool {
+    db_vol <= CONSIGNE_DE_SILENCE && device_vol > db_vol + 0.02
 }
 
 /// The renderer now reports a duration that differs from the current

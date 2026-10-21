@@ -131,9 +131,25 @@ impl Banc {
         .await
     }
 
-    async fn commandes_depuis(&self, deja: usize) -> Vec<f64> {
+    pub(super) async fn commandes_depuis(&self, deja: usize) -> Vec<f64> {
         self.avec_mock(async |m| m.volume_calls().await[deja..].to_vec())
             .await
+    }
+
+    /// Pause puis reprise par le VRAI orchestrateur, sur la sortie factice.
+    pub(super) async fn pause_puis_reprise(&self) {
+        let orch = self.poller.orchestrator.clone();
+        orch.pause(self.zone_id, Some(APPAREIL)).await.unwrap();
+        orch.resume(self.zone_id, Some(APPAREIL)).await.unwrap();
+    }
+
+    /// Le volume de la zone en mémoire (celui que le client lit).
+    pub(super) async fn volume_en_memoire(&self) -> f64 {
+        self.poller.playback.get_state(self.zone_id).await.volume
+    }
+
+    pub(super) fn base(&self) -> Arc<dyn crate::db::backend::DbBackend> {
+        self.db.clone()
     }
 
     /// Un tour de la vraie boucle, l'appareil en lecture qui avance.
