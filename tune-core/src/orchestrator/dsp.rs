@@ -2775,7 +2775,7 @@ impl PlaybackOrchestrator {
             1.0,
             device_id,
             true,
-            crate::audio::volume_limites::OrigineDuVolume::Imposee,
+            crate::audio::volume_limites::OrigineDuVolume::Absolue,
         )
         .await
     }
@@ -2815,19 +2815,20 @@ impl PlaybackOrchestrator {
         // Un trim de −1,6 dB faisait partir 0,83 vers le Devialet, que le
         // sondeur rapatriait ensuite en base : « Volume 83 % » sous PURE.
         let volume = if pure_force { 1.0 } else { volume };
-        // #6541 — les limites de la zone, au point de passage unique. La
-        // sécurité borne tout, y compris le 100 % de PURE verrouillé (le saut
-        // à 100 % de #2445 est précisément ce qu'elle doit empêcher) ; le
-        // confort ne retient qu'une montée absolue.
-        let limites = crate::audio::volume_limites::lire(&self.db, zone_id);
+        // #6541 — les limites de la zone, au point de passage unique : la
+        // sécurité borne toute consigne, le confort ne retient qu'une montée
+        // absolue. Décision du 21/10 : en PURE (verrouillé ou non) et à volume
+        // fixe, elles n'ont pas cours (`lire_effectives` les tait) ; le 100 %
+        // de PURE verrouillé part tel qu'avant. `pure_force` sans lecture : la
+        // route qui ARME PURE passe ici avant d'écrire le réglage.
+        let limites = if pure_force {
+            crate::audio::volume_limites::LimitesDeVolume::default()
+        } else {
+            crate::audio::volume_limites::lire_effectives(&self.db, zone_id)
+        };
         let volume = if limites.est_vide() {
             volume
         } else {
-            let origine = if pure_force {
-                crate::audio::volume_limites::OrigineDuVolume::Imposee
-            } else {
-                origine
-            };
             let actuel = self.playback.get_state(zone_id).await.volume;
             let retenu = limites.borner(volume, actuel, origine);
             if retenu < volume {
@@ -2842,7 +2843,7 @@ impl PlaybackOrchestrator {
             retenu
         };
         let device_volume = if pure_force {
-            volume
+            1.0
         } else {
             // Un trim positif ne fait pas passer la limite de sécurité.
             limites.borner_appareil(volume_avec_trim(
@@ -2987,17 +2988,10 @@ impl PlaybackOrchestrator {
             let output = { self.outputs.lock().await.get(did) };
             match output {
                 Some(output) => {
-                    // #6541 — la limite de sécurité tient aussi ici : le
-                    // volume fixe confirmé n'emporte pas l'appareil au-delà.
-                    let plein =
-                        crate::audio::volume_limites::lire(&self.db, zone_id).borner_appareil(1.0);
-                    info!(
-                        zone_id,
-                        device_id = did,
-                        volume = plein,
-                        "fixed_volume_arm_sending"
-                    );
-                    if let Err(error) = output.lock().await.checked_set_volume(plein).await {
+                    // #6541 — aucune limite ici (décision du 21/10) : sur
+                    // une zone à volume fixe, elles n'ont pas cours.
+                    info!(zone_id, device_id = did, "fixed_volume_arm_sending");
+                    if let Err(error) = output.lock().await.checked_set_volume(1.0).await {
                         warn!(zone_id, error = %error, "fixed_volume_arm_failed");
                         return Err(error);
                     }

@@ -128,10 +128,10 @@ async fn un_trim_positif_ne_franchit_pas_la_securite_6541() {
     assert!(proche(volume_en_base(&orch, zone_id), 70.0));
 }
 
-/// Le saut à 100 % de PURE verrouillé (#2445, des médiums grillés) est
-/// précisément ce que la sécurité doit empêcher.
+/// Décision du 21/10 : sous PURE verrouillé, une limite enregistrée est
+/// IGNORÉE — le 100 % part tel qu'avant #6541, sans être abaissé.
 #[tokio::test]
-async fn pure_verrouille_ne_franchit_pas_la_securite_6541() {
+async fn pure_verrouille_ignore_la_limite_enregistree_6541() {
     let (orch, zone_id) = zone_limitee(&[(
         "zone_{id}_audiophile",
         r#"{"enabled":true,"lock_volume":true}"#,
@@ -141,17 +141,59 @@ async fn pure_verrouille_ne_franchit_pas_la_securite_6541() {
     orch.set_volume_pure_force(zone_id, Some(APPAREIL))
         .await
         .unwrap();
-    assert_eq!(recus(&orch).await, vec![0.7, 0.7]);
+    assert_eq!(
+        recus(&orch).await,
+        vec![1.0, 1.0],
+        "PURE verrouillé : la limite de 70 % n'a pas cours, l'appareil reçoit 100 %"
+    );
 }
 
-/// L'armement du volume fixe commande l'appareil : borné lui aussi.
+/// L'armement du volume fixe part à 100 % : sur une zone à volume fixe, la
+/// limite n'a pas cours (décision du 21/10).
 #[tokio::test]
-async fn l_armement_du_volume_fixe_ne_franchit_pas_la_securite_6541() {
+async fn l_armement_du_volume_fixe_ignore_la_limite_6541() {
     let (orch, zone_id) = zone_limitee(&[]).await;
+    ZoneRepo::with_backend(orch.db.clone())
+        .update_fixed_volume(zone_id, true)
+        .unwrap();
     orch.arm_fixed_volume(zone_id, Some(APPAREIL))
         .await
         .unwrap();
-    assert_eq!(recus(&orch).await, vec![0.7]);
+    assert_eq!(recus(&orch).await, vec![1.0]);
+}
+
+/// Une limite posée AVANT le passage en PURE (non verrouillé) est ignorée tant
+/// que la zone y reste, puis reprend effet à la sortie — pour les gestes
+/// suivants, et jamais à la hausse.
+#[tokio::test]
+async fn une_limite_ignoree_en_pure_reprend_a_la_sortie_sans_monter_6541() {
+    let (orch, zone_id) = zone_limitee(&[(
+        "zone_{id}_audiophile",
+        r#"{"enabled":true,"lock_volume":false}"#,
+    )])
+    .await;
+    orch.set_volume(zone_id, 0.9, Some(APPAREIL)).await.unwrap();
+    assert_eq!(
+        recus(&orch).await,
+        vec![0.9],
+        "en PURE, ni le confort (30 %) ni la sécurité (70 %) ne retiennent le curseur"
+    );
+    SettingsRepo::with_backend(orch.db.clone())
+        .set(
+            &format!("zone_{zone_id}_audiophile"),
+            r#"{"enabled":false}"#,
+        )
+        .unwrap();
+    // Sortie de PURE : rien n'est envoyé de lui-même.
+    assert_eq!(recus(&orch).await, vec![0.9]);
+    // Le geste suivant est borné : 100 % demandé, 70 % reçus (une baisse).
+    orch.set_volume(zone_id, 1.0, Some(APPAREIL)).await.unwrap();
+    orch.set_volume_au_pas(zone_id, 0.95, Some(APPAREIL))
+        .await
+        .unwrap();
+    let recus = recus(&orch).await;
+    assert!(proche(recus[1], 0.7), "{recus:?}");
+    assert!(proche(recus[2], 0.7), "{recus:?}");
 }
 
 /// Au-dessus du confort (montée aux boutons), le curseur peut redescendre.

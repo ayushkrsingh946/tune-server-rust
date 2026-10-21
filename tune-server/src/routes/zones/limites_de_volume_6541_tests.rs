@@ -46,6 +46,19 @@ async fn appeler(
     )
 }
 
+/// `PUT /zones/{id}/volume-limits`, réponse attendue 200.
+async fn regler(app: &axum::Router, id: i64, corps: Value) -> Value {
+    let (statut, rendu) = appeler(
+        app,
+        "PUT",
+        &format!("/api/v1/zones/{id}/volume-limits"),
+        corps.clone(),
+    )
+    .await;
+    assert_eq!(statut, StatusCode::OK, "{corps} -> {rendu}");
+    rendu
+}
+
 async fn recus(state: &crate::state::AppState) -> Vec<f64> {
     let outputs = state.outputs.lock().await;
     let out = outputs.get(APPAREIL).unwrap();
@@ -132,6 +145,13 @@ async fn une_securite_sous_le_volume_courant_ramene_la_zone_6541() {
     .await;
     assert_eq!(statut, StatusCode::OK);
     assert_eq!(recus(&state).await, vec![0.9, 0.5]);
+    // Abaissée encore : ramenée encore, à la baisse.
+    regler(&app, id, json!({ "safety": 0.3 })).await;
+    assert_eq!(recus(&state).await, vec![0.9, 0.5, 0.3]);
+    // Un confort sous le volume courant ne commande rien : il ne retient que
+    // les montées du curseur.
+    regler(&app, id, json!({ "safety": 0.3, "comfort": 0.1 })).await;
+    assert_eq!(recus(&state).await, vec![0.9, 0.5, 0.3]);
     // GET de la zone : les limites sont publiées.
     let (_, zone) = appeler(&app, "GET", &format!("/api/v1/zones/{id}"), Value::Null).await;
     assert!(
@@ -187,4 +207,153 @@ async fn sans_limite_le_pas_par_defaut_est_de_deux_points_6541() {
     .await;
     assert!(proche(corps["volume"].as_f64().unwrap(), 0.18), "{corps}");
     assert_eq!(corps["limited"], false);
+}
+
+fn poser_pure(state: &crate::state::AppState, id: i64, verrou: bool) {
+    tune_core::db::settings_repo::SettingsRepo::with_backend(state.backend.clone())
+        .set(
+            &format!("zone_{id}_audiophile"),
+            &json!({ "enabled": true, "lock_volume": verrou }).to_string(),
+        )
+        .unwrap();
+}
+
+/// Décision du 21/10 : pas de limite sur une zone PURE, verrouillée en
+/// bit-perfect ou non. Refus 409 au code stable, rien d'écrit, rien envoyé.
+#[tokio::test]
+async fn une_limite_sur_une_zone_pure_est_refusee_6541() {
+    for verrou in [true, false] {
+        let (app, state, id) = serveur().await;
+        poser_pure(&state, id, verrou);
+        for corps in [json!({ "safety": 0.5 }), json!({ "comfort_db": -20.0 })] {
+            let (statut, rendu) = appeler(
+                &app,
+                "PUT",
+                &format!("/api/v1/zones/{id}/volume-limits"),
+                corps.clone(),
+            )
+            .await;
+            assert_eq!(
+                statut,
+                StatusCode::CONFLICT,
+                "verrou {verrou}, {corps}: {rendu}"
+            );
+            assert_eq!(rendu["error"], "limite_refusee_zone_pure", "{rendu}");
+            assert!(
+                rendu["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("PURE")),
+                "{rendu}"
+            );
+        }
+        let (_, limites) = appeler(
+            &app,
+            "GET",
+            &format!("/api/v1/zones/{id}/volume-limits"),
+            Value::Null,
+        )
+        .await;
+        assert!(limites["volume_limit_safety"].is_null(), "{limites}");
+        assert!(limites["volume_limit_comfort"].is_null(), "{limites}");
+        assert_eq!(limites["volume_limits_refusal"], "limite_refusee_zone_pure");
+        assert!(recus(&state).await.is_empty(), "{:?}", recus(&state).await);
+    }
+}
+
+/// Pas de limite sur une zone à volume fixe. C'est aussi le défaut de la
+/// relecture du 21/10 : sécurité 0,6 posée, zone passée en volume fixe, puis
+/// sécurité relevée à 0,9 — l'appareil montait de 0,6 à 0,9 sans geste. Le
+/// relèvement est refusé et l'appareil ne reçoit RIEN ; effacer reste permis
+/// et n'envoie rien non plus.
+#[tokio::test]
+async fn une_limite_sur_une_zone_a_volume_fixe_est_refusee_6541() {
+    let (app, state, id) = serveur().await;
+    regler(&app, id, json!({ "safety": 0.6 })).await;
+    ZoneRepo::with_backend(state.backend.clone())
+        .update_fixed_volume(id, true)
+        .unwrap();
+    let (statut, rendu) = appeler(
+        &app,
+        "PUT",
+        &format!("/api/v1/zones/{id}/volume-limits"),
+        json!({ "safety": 0.9 }),
+    )
+    .await;
+    assert_eq!(statut, StatusCode::CONFLICT, "{rendu}");
+    assert_eq!(rendu["error"], "limite_refusee_volume_fixe", "{rendu}");
+    assert!(
+        recus(&state).await.is_empty(),
+        "zone à volume fixe : aucune commande de volume, reçu {:?}",
+        recus(&state).await
+    );
+    let efface = regler(&app, id, json!({})).await;
+    assert!(efface["volume_limit_safety"].is_null(), "{efface}");
+    assert_eq!(
+        efface["volume_limits_refusal"],
+        "limite_refusee_volume_fixe"
+    );
+    assert!(recus(&state).await.is_empty(), "{:?}", recus(&state).await);
+}
+
+/// Une limite posée AVANT le passage en PURE est ignorée : elle ne commande
+/// rien, et le geste de l'utilisateur passe sans elle. Elle reste enregistrée
+/// et publiée, avec la raison pour laquelle elle n'a pas cours.
+#[tokio::test]
+async fn une_limite_existante_est_ignoree_en_pure_6541() {
+    let (app, state, id) = serveur().await;
+    regler(&app, id, json!({ "safety": 0.5, "comfort": 0.3 })).await;
+    assert!(
+        recus(&state).await.is_empty(),
+        "zone à 20 % : rien à ramener"
+    );
+    poser_pure(&state, id, false);
+    let (statut, _) = appeler(
+        &app,
+        "PUT",
+        &format!("/api/v1/zones/{id}/volume"),
+        json!({ "volume": 0.9 }),
+    )
+    .await;
+    assert_eq!(statut, StatusCode::NO_CONTENT);
+    assert_eq!(
+        recus(&state).await,
+        vec![0.9],
+        "en PURE, la limite ne retient ni ne commande rien : seul le geste part"
+    );
+    let (_, zone) = appeler(&app, "GET", &format!("/api/v1/zones/{id}"), Value::Null).await;
+    assert!(
+        proche(zone["volume_limit_safety"].as_f64().unwrap(), 0.5),
+        "{zone}"
+    );
+    assert_eq!(
+        zone["volume_limits_refusal"], "limite_refusee_zone_pure",
+        "{zone}"
+    );
+}
+
+/// Relever une limite (ou l'effacer) n'envoie JAMAIS rien à l'appareil : la
+/// nouvelle limite ne sert qu'aux gestes suivants.
+#[tokio::test]
+async fn relever_une_limite_n_envoie_aucune_commande_6541() {
+    let (app, state, id) = serveur().await;
+    regler(&app, id, json!({ "safety": 0.5 })).await;
+    // Curseur à 100 % : retenu à la sécurité.
+    appeler(
+        &app,
+        "PUT",
+        &format!("/api/v1/zones/{id}/volume"),
+        json!({ "volume": 1.0 }),
+    )
+    .await;
+    assert_eq!(recus(&state).await, vec![0.5]);
+    // Relevée au-dessus du volume courant : rien ne part.
+    regler(&app, id, json!({ "safety": 0.9 })).await;
+    regler(&app, id, json!({ "safety": 0.9, "comfort": 0.8 })).await;
+    regler(&app, id, json!({})).await;
+    assert_eq!(
+        recus(&state).await,
+        vec![0.5],
+        "relever ou effacer la limite ne doit commander aucun volume"
+    );
+    assert_eq!(state.playback.get_state(id).await.volume, 0.5);
 }

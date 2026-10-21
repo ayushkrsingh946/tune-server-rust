@@ -53,3 +53,21 @@ async fn sous_la_limite_le_volume_de_l_appareil_est_adopte_6541() {
     assert!((banc.volume_en_base() - 60.0).abs() < 1e-6);
     assert!(banc.commandes_depuis(deja).await.is_empty());
 }
+
+/// Décision du 21/10 : une limite posée avant le passage en PURE verrouillé
+/// est ignorée. L'appareil à 100 % (conforme à PURE) n'est ni ramené à la
+/// limite ni recommandé : AUCUNE commande de volume.
+#[tokio::test]
+async fn sous_pure_verrouille_la_limite_n_envoie_rien_6541() {
+    let mut banc = Banc::monter(true).await;
+    banc.poser_reglage(&cle_securite(banc.zone_id), "0.7");
+    let deja = banc.appareil_a(1.0).await;
+    banc.tic().await;
+    banc.tic().await;
+    assert_eq!(
+        banc.commandes_depuis(deja).await,
+        Vec::<f64>::new(),
+        "PURE verrouillé avec une limite de 70 % enregistrée : aucune commande de volume"
+    );
+    assert_eq!(banc.volume_en_base(), 100.0);
+}

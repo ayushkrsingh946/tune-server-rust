@@ -17,7 +17,8 @@
 //! Le cas « renderer à 100 % » de #5662 (Tune signale et n'impose rien,
 //! décision du 07/10) ne s'applique pas ici : la limite est un réglage que
 //! l'auditeur a posé lui-même sur cette zone, précisément pour que rien ne la
-//! dépasse. Sans limite, rien ne change.
+//! dépasse. Sans limite, rien ne change. En PURE ou à volume fixe, la limite
+//! est ignorée (`lire_effectives`) : PURE verrouillé garde son 100 %.
 use super::*;
 use crate::audio::volume_limites::{self, TOLERANCE_RENDERER};
 
@@ -27,7 +28,9 @@ impl PositionPoller {
     /// l'appareil au premier tour de chaque épisode (ou quand la valeur
     /// rapportée bouge).
     pub(super) async fn volume_plafond_reimpose(&self, zone_id: i64, rapporte: f64) -> bool {
-        let limites = volume_limites::lire(&self.db, zone_id);
+        // En PURE ou à volume fixe, la limite n'a pas cours (décision du
+        // 21/10) : ni recommande, ni adoption sautée.
+        let limites = volume_limites::lire_effectives(&self.db, zone_id);
         if !limites.depasse(rapporte) {
             if let Ok(mut vus) = self.volumes_plafonnes.lock() {
                 vus.remove(&zone_id);

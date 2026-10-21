@@ -334,10 +334,7 @@ fn inject_device_identity(
         .unwrap_or(0.0);
     obj.insert("gain_trim_db".into(), json!(trim));
     // #6541 — les limites de volume, toujours publiées (`null` = aucune).
-    tune_core::audio::volume_limites::inserer(
-        obj,
-        &tune_core::audio::volume_limites::lire(backend, zone_id),
-    );
+    tune_core::audio::volume_limites::publier(obj, backend, zone_id);
     let upnp_renderer = settings
         .get(&format!("zone_{zone_id}_upnp_renderer"))
         .ok()

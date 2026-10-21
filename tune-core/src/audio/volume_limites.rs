@@ -15,14 +15,24 @@
 //! rien.
 //!
 //! * La **sécurité** borne tout : la consigne, la valeur réellement envoyée à
-//!   l'appareil (trim de gain compris), le 100 % du mode PURE verrouillé et de
-//!   l'armement du volume fixe, la graine d'une sortie locale, et le volume
-//!   qu'un renderer remonte de lui-même (le sondeur le ramène sous la
+//!   l'appareil (trim de gain compris), la graine d'une sortie locale, et le
+//!   volume qu'un renderer remonte de lui-même (le sondeur le ramène sous la
 //!   limite au lieu de l'adopter).
 //! * Le **confort** ne borne que les consignes ABSOLUES (curseur, `PUT
 //!   /zones/{id}/volume`, PATCH…) qui MONTENT : au-dessus de lui, seul le pas
 //!   (`POST /zones/{id}/volume/step`, les boutons) fait monter. Une consigne
 //!   absolue qui descend passe toujours.
+//!
+//! ## Zones PURE et à volume fixe (décision de Bertrand, 21/10)
+//!
+//! Une limite ne se POSE pas sur une zone en mode PURE (verrouillé ou non
+//! en bit-perfect) ni sur une zone à volume fixe : la route la refuse avec un
+//! code stable ([`ModeSansLimite::code`]). Une limite déjà enregistrée sur une
+//! zone qui passe ENSUITE dans l'un de ces modes est IGNORÉE tant que la zone
+//! y reste ([`lire_effectives`]) : elle n'abaisse rien, ne commande rien, et
+//! le 100 % de PURE verrouillé ou du volume fixe part tel qu'avant #6541. Elle
+//! reprend effet quand la zone quitte le mode, pour les gestes suivants : elle
+//! ne fait jamais MONTER le niveau.
 //!
 //! ## Stockage
 //!
@@ -68,9 +78,55 @@ pub enum OrigineDuVolume {
     Absolue,
     /// Bouton + / − : borné par la seule sécurité.
     Pas,
-    /// Le 100 % imposé par PURE verrouillé ou le volume fixe : borné par la
-    /// seule sécurité (le confort ne parle que des gestes de l'auditeur).
-    Imposee,
+}
+
+/// Les modes d'une zone où une limite n'a pas cours : refusée à la pose,
+/// ignorée si elle existait déjà.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeSansLimite {
+    /// Mode PURE (`zone_{id}_audiophile.enabled`), verrou bit-perfect ou non.
+    ZonePure,
+    /// `zones.fixed_volume` : le DAC ou l'ampli tient le volume.
+    VolumeFixe,
+}
+
+impl ModeSansLimite {
+    /// Code stable de l'erreur rendue par la route, et publié dans la zone
+    /// (`volume_limits_refusal`) : le client s'en sert, pas du message.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ZonePure => "limite_refusee_zone_pure",
+            Self::VolumeFixe => "limite_refusee_volume_fixe",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::ZonePure => {
+                "Cette zone est en mode PURE : Tune n'y touche pas au volume, une limite de sécurité ou de confort n'y a pas cours. Quittez le mode PURE pour en poser une."
+            }
+            Self::VolumeFixe => {
+                "Cette zone est à volume fixe : le volume est tenu par l'ampli ou le DAC, une limite de sécurité ou de confort n'y a pas cours. Désactivez le volume fixe pour en poser une."
+            }
+        }
+    }
+}
+
+/// Le mode qui suspend les limites de `zone_id`, s'il y en a un. Le volume
+/// fixe passe avant PURE (il court-circuite déjà tout `set_volume`).
+pub fn mode_sans_limite(db: &Arc<dyn DbBackend>, zone_id: i64) -> Option<ModeSansLimite> {
+    let fixe = crate::db::zone_repo::ZoneRepo::with_backend(db.clone())
+        .get(zone_id)
+        .ok()
+        .flatten()
+        .is_some_and(|z| z.fixed_volume);
+    if fixe {
+        Some(ModeSansLimite::VolumeFixe)
+    } else if crate::audio::audiophile::zone_enabled(db, zone_id) {
+        Some(ModeSansLimite::ZonePure)
+    } else {
+        None
+    }
 }
 
 /// Les deux seuils d'une zone, en fraction linéaire 0..1. `None` = pas de
@@ -101,6 +157,17 @@ pub fn lire(db: &Arc<dyn DbBackend>, zone_id: i64) -> LimitesDeVolume {
     }
 }
 
+/// Les limites qui AGISSENT sur `zone_id` : aucune tant que la zone est en
+/// PURE ou à volume fixe ([`mode_sans_limite`]), celles enregistrées sinon.
+/// Tout chemin qui commande un appareil lit celle-ci, jamais [`lire`].
+pub fn lire_effectives(db: &Arc<dyn DbBackend>, zone_id: i64) -> LimitesDeVolume {
+    if mode_sans_limite(db, zone_id).is_some() {
+        LimitesDeVolume::default()
+    } else {
+        lire(db, zone_id)
+    }
+}
+
 /// La limite de sécurité la plus basse parmi les zones qui pilotent
 /// `device_id` — pour les routes qui commandent une SORTIE sans passer par
 /// une zone (pilotage Sonos direct, agent Tune distant).
@@ -110,7 +177,7 @@ pub fn securite_de_l_appareil(db: &Arc<dyn DbBackend>, device_id: &str) -> Optio
         .ok()?
         .into_iter()
         .filter(|z| z.output_device_id.as_deref() == Some(device_id))
-        .filter_map(|z| lire(db, z.id?).securite)
+        .filter_map(|z| lire_effectives(db, z.id?).securite)
         .reduce(f64::min)
 }
 
@@ -177,10 +244,25 @@ pub fn cible_du_pas_db(actuel: f64, delta_db: f64) -> f64 {
     }
 }
 
-/// Publie les limites dans un JSON de zone, en fraction et en dB (même
-/// convention que `volume` / `volume_db`). Les clés sont TOUJOURS présentes :
-/// leur présence dit au client que ce serveur connaît le réglage.
-pub fn inserer(obj: &mut serde_json::Map<String, serde_json::Value>, limites: &LimitesDeVolume) {
+/// Publie les limites ENREGISTRÉES de `zone_id` dans un JSON de zone, en
+/// fraction et en dB (même convention que `volume` / `volume_db`), et
+/// `volume_limits_refusal` : le code de [`ModeSansLimite`] quand la zone est
+/// en PURE ou à volume fixe (les limites y sont alors ignorées, et le client
+/// masque le réglage), `null` sinon. Les clés sont TOUJOURS présentes : leur
+/// présence dit au client que ce serveur connaît le réglage.
+pub fn publier(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    db: &Arc<dyn DbBackend>,
+    zone_id: i64,
+) {
+    inserer(obj, &lire(db, zone_id));
+    obj.insert(
+        "volume_limits_refusal".into(),
+        serde_json::json!(mode_sans_limite(db, zone_id).map(ModeSansLimite::code)),
+    );
+}
+
+fn inserer(obj: &mut serde_json::Map<String, serde_json::Value>, limites: &LimitesDeVolume) {
     use super::volume_scale::linear_to_db;
     obj.insert(
         "volume_limit_safety".into(),
@@ -215,11 +297,7 @@ mod tests {
             securite: Some(0.7),
             confort: None,
         };
-        for origine in [
-            OrigineDuVolume::Absolue,
-            OrigineDuVolume::Pas,
-            OrigineDuVolume::Imposee,
-        ] {
+        for origine in [OrigineDuVolume::Absolue, OrigineDuVolume::Pas] {
             assert_eq!(seule.borner(1.0, 0.69, origine), 0.7, "{origine:?}");
             // Une zone déjà au-dessus (base héritée) redescend à la limite.
             assert_eq!(SECU.borner(0.95, 0.9, origine), 0.7, "{origine:?}");
