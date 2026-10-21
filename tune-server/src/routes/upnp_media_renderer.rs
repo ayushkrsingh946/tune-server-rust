@@ -254,7 +254,9 @@ async fn snapshot(state: &AppState, zone_id: i64) -> RendererSnapshot {
     // dernier sondage : le contrôleur doit voir tout de suite la nouvelle
     // `CurrentURI`, pas la piste finie (ni STOPPED, que `zone_reprise_par_tune`
     // conclurait d'une URI qui ne correspond plus).
-    constater_l_avance_de_la_zone(zone_id, &ps);
+    if constater_l_avance_de_la_zone(zone_id, &ps) {
+        oublier_l_ancienne_courante(state, zone_id).await;
+    }
     let session = sessions()
         .lock()
         .map(|s| s.get(&zone_id).cloned())
@@ -569,7 +571,9 @@ async fn avtransport_control(
             // deux à jouer. Relancer ici coupait cette fin et recréait le
             // blanc. Voir `decider_le_next`.
             let ps = state.playback.get_state(zone_id).await;
-            constater_l_avance_de_la_zone(zone_id, &ps);
+            if constater_l_avance_de_la_zone(zone_id, &ps) {
+                oublier_l_ancienne_courante(&state, zone_id).await;
+            }
             let decision = sessions()
                 .lock()
                 .ok()
@@ -872,6 +876,49 @@ fn constater_l_avance_de_la_zone(zone_id: i64, ps: &tune_core::playback::ZoneSta
     true
 }
 
+/// #6335 (relecture rc7) — la zone a enchaîné sur la suivante confiée : la
+/// façade lui rend sa file. Restée `[courante, suivante]`, une répétition de
+/// toute la file (activée après la confiance) ramènerait la zone à la piste
+/// précédente à la fin de la suivante ; réduite à `[suivante]`, elle la
+/// rejouerait en boucle. Sans ligne `upnp`, la zone est dans l'état d'avant
+/// #6335 : à la fin de la dernière piste armée par le contrôleur, elle
+/// s'arrête — ou suit le contrôleur, dont le prochain `SetNext` réécrit la
+/// file (ou reste tenu par la façade si la répétition le refuse).
+///
+/// Seulement sur la file de la façade (`est_notre_file`), et seulement si sa
+/// deuxième ligne est bien la courante de la session : un `SetNext` arrivé
+/// entre-temps a réécrit `[courante, suivante]`, et rien n'est alors retiré.
+async fn oublier_l_ancienne_courante(state: &AppState, zone_id: i64) {
+    let Some(file) = sessions().lock().ok().and_then(|carte| {
+        carte
+            .get(&zone_id)
+            .filter(|session| {
+                session
+                    .file
+                    .as_ref()
+                    .is_some_and(|f| f.len() >= 2 && f[1] == session.uri)
+            })
+            .and_then(|session| session.file.clone())
+    }) else {
+        return;
+    };
+    let repo = tune_core::db::play_queue_repo::PlayQueueRepo::with_backend(state.backend.clone());
+    let Ok(lignes) = repo.get_ordered(zone_id) else {
+        return;
+    };
+    if !est_notre_file(&lignes, &file) || repo.clear(zone_id).is_err() {
+        return;
+    }
+    state.playback.update_queue_info(zone_id, 0, 0).await;
+    if let Ok(mut carte) = sessions().lock()
+        && let Some(session) = carte.get_mut(&zone_id)
+        && session.file.as_ref() == Some(&file)
+    {
+        session.file = None;
+    }
+    info!(zone_id, "upnp_renderer_file_rendue_apres_l_avance");
+}
+
 /// La file que la façade a écrite est-elle encore celle de la zone ? (#6335)
 ///
 /// Comparée ligne à ligne : mêmes URI, même ordre, toutes `upnp`. Une file
@@ -952,10 +999,16 @@ async fn confier_la_suivante_a_la_file(state: &AppState, zone_id: i64) -> bool {
         )
     };
     let (revision, uri_suivante, lignes) = plan;
+    // L'avance de la file doit choisir la suivante, PUIS s'arrêter après
+    // elle : avec la répétition de toute la file, la fin de la suivante
+    // reviendrait à l'ancienne courante au lieu de s'arrêter comme avant.
     let mut simulee = ps.clone();
     simulee.queue_position = 0;
     simulee.queue_length = 2;
-    if tune_core::poller::PositionPoller::next_position(&simulee) != Some(1) {
+    let choisit_la_suivante = tune_core::poller::PositionPoller::next_position(&simulee) == Some(1);
+    simulee.queue_position = 1;
+    let s_arrete_apres = tune_core::poller::PositionPoller::next_position(&simulee).is_none();
+    if !(choisit_la_suivante && s_arrete_apres) {
         info!(
             zone_id,
             repeat = ?ps.repeat,
@@ -1180,6 +1233,7 @@ fn spawn_gapless_watcher(state: AppState, zone_id: i64) {
             // #6335 — la zone a enchaîné d'elle-même : la session suit, rien
             // n'est relancé. Le tour suivant se libère ou attend la suivante.
             if constater_l_avance_de_la_zone(zone_id, &ps) {
+                oublier_l_ancienne_courante(&state, zone_id).await;
                 continue;
             }
             let mut file_perimee = None;

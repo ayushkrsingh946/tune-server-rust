@@ -697,3 +697,70 @@ async fn un_stop_n_efface_pas_la_suivante_chez_le_renderer() {
     assert!(b.file().is_empty());
     assert_eq!(renderer.effacements(), 0);
 }
+
+/// #6335 (relecture rc7, point 3) — répétition de TOUTE la file sur la zone :
+/// `[courante, suivante]` reviendrait à l'ancienne courante après la
+/// suivante. La suivante n'est pas confiée : la façade garde son
+/// enchaînement d'avant, et la zone s'arrête après la suivante comme avant.
+#[tokio::test]
+async fn la_repetition_de_toute_la_file_ne_confie_pas_la_suivante() {
+    let b = Banc::new().await;
+    b.state
+        .playback
+        .set_repeat(b.zone, tune_core::playback::RepeatMode::All)
+        .await;
+
+    b.courante_puis_suivante().await;
+
+    assert!(
+        b.file().is_empty(),
+        "#6335 : avec la répétition de toute la file, [courante, suivante] \
+         rejouerait l'ancienne courante après la suivante — la suivante ne \
+         doit pas être confiée à la file"
+    );
+    assert_eq!(b.ligne_que_le_sondeur_armerait().await, None);
+    assert_eq!(
+        snapshot(&b.state, b.zone).await.next_uri,
+        ARMEE,
+        "la suivante reste tenue par la façade"
+    );
+}
+
+/// 🔴 #6335 (relecture rc7, condition d'admission) — la répétition de toute
+/// la file activée APRÈS que la suivante a été confiée : une fois que la zone
+/// a enchaîné, elle ne doit jamais revenir à la piste précédente.
+#[tokio::test]
+async fn apres_l_enchainement_la_zone_ne_revient_jamais_a_la_piste_precedente() {
+    let b = Banc::new().await;
+    b.courante_puis_suivante().await;
+    assert_eq!(b.file().len(), 2, "suivante confiée (répétition coupée)");
+    b.state
+        .playback
+        .set_repeat(b.zone, tune_core::playback::RepeatMode::All)
+        .await;
+
+    b.vers_la_fin(DUREE_MS - 300).await;
+    b.la_zone_enchaine().await;
+    assert_eq!(snapshot(&b.state, b.zone).await.uri, ARMEE);
+
+    assert_eq!(
+        b.ligne_que_le_sondeur_armerait().await,
+        None,
+        "#6335 : à la fin de la dernière piste armée par le contrôleur, la \
+         zone doit s'arrêter — jamais revenir à la piste précédente, ni \
+         rejouer la dernière en boucle (file : {:?})",
+        b.file()
+    );
+
+    // Le contrôleur arme la piste d'après : la zone suit SON ordre.
+    b.controleur
+        .set_next_media(&media(AUTRE, "Piste 3"))
+        .await
+        .expect("la façade doit acquitter la suivante d'après");
+    assert_eq!(snapshot(&b.state, b.zone).await.next_uri, AUTRE);
+    assert_ne!(
+        b.ligne_que_le_sondeur_armerait().await.as_deref(),
+        Some(COURANTE),
+        "#6335 : la zone ne doit jamais revenir à la piste précédente"
+    );
+}
