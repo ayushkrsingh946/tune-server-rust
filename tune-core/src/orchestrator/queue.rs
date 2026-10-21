@@ -985,6 +985,11 @@ impl PlaybackOrchestrator {
         // pour un renderer qui se contredit et le curseur serait resté collé à
         // la fin de la piste précédente pendant tout un album enchaîné (#3229).
         self.playback.reset_position(zone_id, 0).await;
+        // #6230 — la piste enchaînée a sa propre règle de réaffectation
+        // (album, nombre de canaux) : la reposer sur la sortie locale, et la
+        // rouvrir si le nombre de voies change. Sans règle armée, rien ne
+        // bouge : le gapless ordinaire reste intact.
+        self.refresh_zone_reaffectation(zone_id).await;
         // Le déplacement éventuel appartenait à la piste d'avant : sa grâce ne
         // court pas sur celle-ci (#4682).
         self.playback.oublier_le_deplacement(zone_id).await;
@@ -1334,6 +1339,8 @@ impl PlaybackOrchestrator {
             ),
         )
         .await;
+        // #6334 — vers `PlayMedia` (SetNext) : la profondeur du fil.
+        let profondeur_fil = profondeur_du_fil(&resolved);
         let raw_cover = cover.or(resolved.cover_url);
         Ok(ResolvedQueueItem {
             url: resolved.url,
@@ -1348,7 +1355,7 @@ impl PlaybackOrchestrator {
             duration_ms: resolved.duration_ms.map(|d| d as u64),
             stream_id: resolved.stream_id,
             sample_rate: resolved.sample_rate,
-            bit_depth: resolved.bit_depth,
+            bit_depth: profondeur_fil,
             channels: resolved.channels,
             file_size: resolved.file_size,
             file_path: None,

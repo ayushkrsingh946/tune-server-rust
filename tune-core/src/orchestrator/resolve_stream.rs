@@ -511,10 +511,14 @@ impl PlaybackOrchestrator {
             .output_device_id
             .as_deref()
             .is_some_and(|id| id.starts_with("oaat:") || id.starts_with("oaat-group:"));
+        // #6370 — une sortie d'agent relancée à une position reçoit, comme
+        // une sortie locale, le WAV décodé à partir de `seek_ms` : le
+        // mandataire du CDN, lui, la servirait depuis l'octet 0.
         let is_local_stream = req
             .output_device_id
             .as_deref()
-            .is_some_and(|id| id.starts_with("local:"));
+            .is_some_and(|id| id.starts_with("local:"))
+            || agent_relance_a_la_position(req.output_device_id.as_deref(), req.seek_ms);
 
         // Local and OAAT outputs expect raw PCM in a WAV container.
         // Streaming services deliver compressed audio (FLAC, AAC, etc.)
@@ -664,10 +668,16 @@ impl PlaybackOrchestrator {
             // source poserait dans le `<res sampleFrequency>` du DIDL un
             // chiffre que le flux ne porte pas (#4759).
             sample_rate: Some(cadence_plafonnee.unwrap_or(stream_data.quality.sample_rate)),
-            bit_depth: Some(stream_data.quality.bit_depth as u32),
+            // #6334 — aucune profondeur pour un AAC : le « 16 bits » serait
+            // celui d'un FLAC CD.
+            bit_depth: profondeur_annoncee_par_le_service(
+                &stream_data.quality,
+                stream_data.quality.bit_depth,
+            ),
             channels: Some(2),
             origin_url,
-            bitrate_kbps: None,
+            bitrate_kbps: debit_annonce_par_le_service(&stream_data.quality),
+            format_source: format_livre_par_le_service(&stream_data.quality),
         })
     }
 
@@ -1468,10 +1478,14 @@ impl PlaybackOrchestrator {
                     stream_id: Some(session_id),
                     file_size: Some(file_size),
                     sample_rate: Some(sr_servie),
-                    bit_depth: Some(stream_data.quality.bit_depth as u32),
+                    bit_depth: profondeur_annoncee_par_le_service(
+                        &stream_data.quality,
+                        stream_data.quality.bit_depth,
+                    ),
                     channels: Some(2),
                     origin_url: None,
-                    bitrate_kbps: None,
+                    bitrate_kbps: debit_annonce_par_le_service(&stream_data.quality),
+                    format_source: format_livre_par_le_service(&stream_data.quality),
                 }));
             }
         }
@@ -1690,6 +1704,7 @@ impl PlaybackOrchestrator {
                 channels: Some(2),
                 origin_url: None,
                 bitrate_kbps: None,
+                format_source: None,
             }));
         }
         Ok(None)

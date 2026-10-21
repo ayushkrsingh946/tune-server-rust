@@ -647,6 +647,8 @@ pub(super) struct ArtistAlbumsQuery {
     sections: Option<String>,
 }
 
+use tune_core::metadata::release_type;
+
 pub(super) async fn artist_albums(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -683,10 +685,15 @@ pub(super) async fn artist_albums(
                     o.insert("release_secondary_types".into(), json!(types));
                 }
             }
-            (
-                types.is_some_and(|t| tune_core::metadata::release_type::est_live(t)),
-                v,
-            )
+            // #6464 — règle PROVISOIRE par le titre (« Live », « unplugged »),
+            // seulement quand aucun type secondaire n'est connu : une réponse
+            // explicite (`live` ou non) n'est jamais contredite par le titre.
+            let par_le_type = types.is_some_and(|t| release_type::est_live(t));
+            let par_le_titre = types.is_none() && release_type::titre_annonce_un_live(&a.title);
+            if par_le_titre && let Some(o) = v.as_object_mut() {
+                o.insert("live_by_title".into(), json!(true));
+            }
+            (par_le_type || par_le_titre, v)
         })
         .collect();
 

@@ -686,6 +686,8 @@ pub(super) async fn abandonner_la_session_de_transcodage(
     if let Some(tmp_path) = tmp_path {
         let _ = std::fs::remove_file(tmp_path);
     }
+    // #6658 — marquée AVANT le retrait : qui la voit morte la sait abandonnée.
+    streamer.marquer_abandonnee(session_id);
     streamer.remove_session(session_id).await;
     warn!(
         stream_id = session_id,

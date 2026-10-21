@@ -552,6 +552,7 @@ impl PlaybackOrchestrator {
             // captured through the proxy — and filed under `Stream/`.
             origin_url: prefetched.upstream_url,
             bitrate_kbps: None,
+            format_source: None,
             cover_url: cover_url.clone(),
             file_size: Some(file_size),
         })
@@ -668,6 +669,7 @@ impl PlaybackOrchestrator {
             // needs the service's own URL, not ours.
             origin_url: prefetched.upstream_url,
             bitrate_kbps: None,
+            format_source: None,
         })
     }
 
@@ -1360,6 +1362,68 @@ impl PlaybackOrchestrator {
             .await
             .unwrap_or(false)
     }
+    /// #6256 — rebâtit l'étage casque d'une sortie locale qui joue, et dit
+    /// seulement s'il l'a fait. `refresh_zone_crossfeed` rend `false` aussi
+    /// quand l'étage vient d'être VIDÉ ; une désinstallation, qui vide, a
+    /// besoin de savoir que la sortie l'a reçu.
+    pub async fn rebatir_l_etage_casque_en_direct(&self, zone_id: i64) -> bool {
+        self.pousser_le_crossfeed_en_direct(zone_id).await.is_some()
+    }
+    /// #6256 — les zones dont l'étage casque utilise le greffon natif tiers
+    /// `id`, les seules qu'une désinstallation doit rebâtir : rebâtir une autre
+    /// zone qui joue ne lui retire rien et peut s'entendre (un petit
+    /// claquement). Une zone en est si elle le DEMANDE (greffon demandé, case
+    /// cochée sur la zone) ou si sa sortie locale le PORTE en ce moment.
+    ///
+    /// À lire AVANT de désinstaller : ensuite les drapeaux du greffon sont
+    /// baissés et ses réglages peut-être effacés, et plus aucune zone ne le
+    /// demanderait.
+    pub async fn zones_qui_utilisent_le_greffon_tiers(&self, id: &str) -> Vec<i64> {
+        let settings = crate::db::settings_repo::SettingsRepo::with_backend(self.db.clone());
+        let demande = crate::audio::natifs_tiers::demande(&settings, id);
+        let zones = ZoneRepo::with_backend(self.db.clone())
+            .list()
+            .unwrap_or_default();
+        let mut retenues = Vec::new();
+        for zone in zones {
+            let Some(zone_id) = zone.id else { continue };
+            let cochee = demande
+                && crate::audio::natifs_tiers::reglage_de_zone(&settings, zone_id, id)
+                    .and_then(|r| r.get("enabled").and_then(serde_json::Value::as_bool))
+                    == Some(true);
+            if cochee
+                || self
+                    .etage_casque_porte(zone.output_device_id.as_deref(), id)
+                    .await
+            {
+                retenues.push(zone_id);
+            }
+        }
+        retenues
+    }
+
+    /// La sortie locale `device_id` porte-t-elle un étage du greffon tiers ?
+    async fn etage_casque_porte(&self, device_id: Option<&str>, id: &str) -> bool {
+        #[cfg(not(feature = "local-audio"))]
+        {
+            let _ = (device_id, id);
+            false
+        }
+        #[cfg(feature = "local-audio")]
+        {
+            let Some(device_id) = device_id.filter(|d| d.starts_with("local:")) else {
+                return false;
+            };
+            let Some(output_arc) = ({ self.outputs.lock().await.get(device_id) }) else {
+                return false;
+            };
+            let output = output_arc.lock().await;
+            output
+                .as_any()
+                .downcast_ref::<crate::outputs::local::LocalOutput>()
+                .is_some_and(|local| local.crossfeed_porte_l_etage_tiers(id))
+        }
+    }
     /// [`Self::refresh_zone_crossfeed`], mais qui dit QUAND le réglage atteint
     /// le son, au lieu d'un booléen à plusieurs sens (#4680).
     ///
@@ -1561,6 +1625,10 @@ impl PlaybackOrchestrator {
                 track_id,
                 local_output.current_format().map(|(_, ch)| u32::from(ch)),
             ));
+            // #6230 — une ouverture pilotée par la matrice (6 → 2) retrouve
+            // les voies de la source en entrant en PURE, et inversement : la
+            // réouverture a lieu plus bas, verrou de la sortie relâché.
+            let rouvrir_pour_les_voies = self.les_voies_imposent_de_rouvrir(zone_id, local_output);
             // Même raison pour la rampe (#1590) : `zone_soft_mute_ms` rend 0 en
             // PURE, donc une zone qui ENTRE en PURE doit la perdre dans le même
             // geste, et une zone qui en sort doit la retrouver — sans attendre
@@ -1580,6 +1648,10 @@ impl PlaybackOrchestrator {
                 replaygain = rg,
                 "zone_pure_dsp_refreshed_live"
             );
+            drop(output);
+            if rouvrir_pour_les_voies {
+                self.rouvrir_pour_les_voies(zone_id).await;
+            }
             true
         }
     }
@@ -2574,13 +2646,51 @@ impl PlaybackOrchestrator {
             );
             let armee = matrice.is_some();
             local_output.set_reaffectation(matrice);
+            // #6230 — une règle qui change le nombre de voies (6 → 6 devenue
+            // 6 → 2, ou retirée après une ouverture pilotée) rouvre la sortie.
+            let rouvrir = self.les_voies_imposent_de_rouvrir(zone_id, local_output);
             info!(
                 zone_id,
                 device_id = %device_id,
                 armee,
+                rouvrir,
                 "zone_reaffectation_refreshed_live"
             );
+            drop(output);
+            if rouvrir {
+                self.rouvrir_pour_les_voies(zone_id).await;
+            }
             true
+        }
+    }
+
+    /// #6230 — la matrice vient d'être reposée sur une sortie locale qui joue
+    /// : demande-t-elle un autre nombre de voies que l'ouverture en cours
+    /// ([`crate::outputs::local::LocalOutput::les_voies_imposent_de_rouvrir`]) ?
+    /// L'appelant tient le verrou de la sortie : il le relâche, puis appelle
+    /// [`Self::rouvrir_pour_les_voies`]. Sans règle armée, toujours non.
+    #[cfg(feature = "local-audio")]
+    pub(super) fn les_voies_imposent_de_rouvrir(
+        &self,
+        zone_id: i64,
+        local_output: &crate::outputs::local::LocalOutput,
+    ) -> bool {
+        local_output.les_voies_imposent_de_rouvrir()
+            && self.position_entretenue_par_le_sondeur(zone_id)
+    }
+
+    /// #6230 — rejouer la piste à la position courante, ce qui rouvre la
+    /// sortie sur les voies que la matrice demande. Verrou de la sortie
+    /// relâché par l'appelant.
+    #[cfg(feature = "local-audio")]
+    pub(super) async fn rouvrir_pour_les_voies(&self, zone_id: i64) {
+        let position_ms = self.playback.get_state(zone_id).await.position_ms.max(0) as u64;
+        match self
+            .replay_zone_at_position(zone_id, position_ms, "reaffectation_voies")
+            .await
+        {
+            Ok(()) => info!(zone_id, position_ms, "reaffectation_voies_rouvertes"),
+            Err(e) => warn!(zone_id, error = %e, "reaffectation_voies_reouverture_echouee"),
         }
     }
 

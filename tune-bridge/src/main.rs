@@ -5,6 +5,11 @@ mod morceau_binaire;
 mod protocol;
 #[cfg(test)]
 mod relais_par_url_tests;
+mod session_routes;
+mod sessions;
+#[cfg(test)]
+mod sessions_tests;
+mod site;
 mod state;
 mod stream_proxy;
 mod trafic;
@@ -20,7 +25,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::response::IntoResponse;
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -72,18 +77,11 @@ async fn main() {
     // Les minutes non acceptees attendent 24 h au plus sur le pont.
     tokio::spawn(trafic::boucle(state.trafic.clone()));
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/ws/server", get(ws_server_handler))
-        .route("/api/relay/{server_id}/{*path}", any(api_proxy::proxy_api))
-        .route("/ws/client/{server_id}", get(ws_client::ws_client_handler))
-        .route(
-            "/stream/relay/{server_id}/{*stream_path}",
-            get(stream_proxy::proxy_stream),
-        )
-        // Tune Circle T4 (#5327) : l'ecoute chez un contact, par billet
-        // seulement. Voir `circle.rs`.
-        .route("/stream/circle/{ticket}", get(circle::flux_de_cercle));
+    // Ecoute a distance par laissez-passer (#6603) : jeu de cles du site,
+    // battement de toutes les sessions chaque minute.
+    tokio::spawn(state.sessions.clone().boucle());
+
+    let app = routes();
     // Le client web, s'il est fourni. Monte APRES les routes du relais : axum
     // fait primer les segments statiques (`/api`, `/ws`, `/stream`, `/health`)
     // sur le segment dynamique `{server_id}`, mais l'ordre rend l'intention
@@ -119,6 +117,28 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");
+}
+
+/// La table des routes du relais, sans le client web ni les couches : celle
+/// que les tests de bout en bout montent aussi.
+pub(crate) fn routes() -> Router<Arc<RelayState>> {
+    Router::new()
+        .route("/health", get(health))
+        // Sessions d'ecoute a distance (#6603). `renouveler` et `defi` sont
+        // des segments statiques : axum les fait primer sur `{server_id}`.
+        .route("/session/defi/{server_id}", get(session_routes::defi))
+        .route("/session/renouveler", post(session_routes::renouveler))
+        .route("/session/{server_id}", post(session_routes::ouvrir))
+        .route("/ws/server", get(ws_server_handler))
+        .route("/api/relay/{server_id}/{*path}", any(api_proxy::proxy_api))
+        .route("/ws/client/{server_id}", get(ws_client::ws_client_handler))
+        .route(
+            "/stream/relay/{server_id}/{*stream_path}",
+            get(stream_proxy::proxy_stream),
+        )
+        // Tune Circle T4 (#5327) : l'ecoute chez un contact, par billet
+        // seulement. Voir `circle.rs`.
+        .route("/stream/circle/{ticket}", get(circle::flux_de_cercle))
 }
 
 async fn health() -> &'static str {
