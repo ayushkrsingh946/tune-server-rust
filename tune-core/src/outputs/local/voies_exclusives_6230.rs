@@ -388,6 +388,38 @@ fn la_frontiere_exclusive_suit_les_voies_de_la_grille_6230() {
     );
 }
 
+/// Relecture rc7 — grille armée, étage ouvert au FORMAT SOURCE : c'est ce que
+/// font les trois bras exclusifs tant que l'étape 2 n'est pas faite (ils
+/// ouvrent encore aux canaux de la source). La frontière garde alors la règle
+/// « à format égal » d'avant : la piste 5.1 suivante s'enchaîne dans le flux
+/// ouvert sur 6 voies, au lieu de rouvrir le périphérique à chaque piste (un
+/// trou ou un clic entre les pistes d'un album 5.1).
+#[test]
+fn grille_armee_etage_ouvert_au_format_source_on_enchaine_comme_avant_6230() {
+    let zone = Zone::au_repos();
+    let creneau = creneau_6_vers_2();
+    let spec = cinq_un(ProfondeurPcm::Entier16);
+    assert!(
+        zone.etage_natif(spec, 6, &creneau)
+            .enchainer_la_piste(spec, &pcm_5_1_16_bits(64))
+            .is_ok(),
+        "WASAPI : grille armée, étage ouvert au format source : on enchaîne"
+    );
+    assert!(
+        zone.etage_asio(spec, 6, &creneau)
+            .enchainer_a_format_egal(spec, &pcm_5_1_16_bits(64))
+            .is_ok(),
+        "ASIO : grille armée, étage ouvert au format source : on enchaîne"
+    );
+    let disposition: CreneauDisposition = std::sync::Mutex::new(None);
+    assert!(
+        zone.etage_coreaudio(spec, 6, &creneau, &disposition)
+            .enchainer_a_format_egal(spec, &pcm_5_1_16_bits(64))
+            .is_ok(),
+        "CoreAudio : grille armée, étage ouvert au format source : on enchaîne"
+    );
+}
+
 /// La décision des voies qu'un transport exclusif ouvre : la grille quand elle
 /// pilote, la source sinon. Sans grille, le format source (rien ne change).
 #[test]

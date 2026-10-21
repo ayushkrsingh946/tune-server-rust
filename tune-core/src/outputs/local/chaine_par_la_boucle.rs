@@ -395,12 +395,19 @@ impl FrontiereExclusive for EtageDeConversion<'_> {
         if self.needs_resample {
             return Err(EnchainementNatif::Rouvrir);
         }
-        let voies = self.pcm.reaffectation.voies_a_ouvrir_en_exclusif(
-            suivante,
-            amorce,
-            self.pcm.pure_bypass.load(Ordering::Relaxed),
-            self.pcm.dop_active.load(Ordering::Relaxed),
-        );
+        // Comme l'étage natif : la grille ne compte que si l'ouverture en
+        // cours est pilotée. Ouvert au format source (le bras « hog »
+        // d'aujourd'hui), une grille armée garde la règle « à format égal ».
+        let voies = if self.sortie.canaux != self.spec.canaux() {
+            self.pcm.reaffectation.voies_a_ouvrir_en_exclusif(
+                suivante,
+                amorce,
+                self.pcm.pure_bypass.load(Ordering::Relaxed),
+                self.pcm.dop_active.load(Ordering::Relaxed),
+            )
+        } else {
+            suivante.canaux()
+        };
         match decider_l_enchainement_natif_vers(self.spec, self.sortie, suivante, voies) {
             EnchainementNatif::Rouvrir => Err(EnchainementNatif::Rouvrir),
             EnchainementNatif::Enchainer => {

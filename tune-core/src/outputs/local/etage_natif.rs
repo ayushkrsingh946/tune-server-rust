@@ -358,14 +358,21 @@ impl<'a> EtageNatif<'a> {
         amorce: &[u8],
     ) -> Result<(), super::enchainement_exclusif::EnchainementNatif> {
         use super::enchainement_exclusif::{EnchainementNatif, decider_l_enchainement_natif_vers};
+        // Les voies de la grille ne comptent que si l'ouverture EN COURS est
+        // pilotée (étage ouvert sur d'autres voies que la source). Tant que
+        // les bras ouvrent au format source (étape 2 de #6230 non faite), une
+        // grille armée laisse la règle « à format égal » entière : l'album
+        // 5.1 s'enchaîne comme avant, sans rouvrir le périphérique à chaque
+        // piste.
         let voies = match self.adaptation {
-            Some((reaffectation, _)) => reaffectation.voies_a_ouvrir_en_exclusif(
-                suivante,
-                amorce,
-                self.pure_bypass.load(Ordering::Relaxed),
-                false,
-            ),
-            None => suivante.canaux(),
+            Some((reaffectation, _)) if self.sortie.canaux != self.spec.canaux() => reaffectation
+                .voies_a_ouvrir_en_exclusif(
+                    suivante,
+                    amorce,
+                    self.pure_bypass.load(Ordering::Relaxed),
+                    false,
+                ),
+            _ => suivante.canaux(),
         };
         match decider_l_enchainement_natif_vers(self.spec, self.sortie, suivante, voies) {
             EnchainementNatif::Rouvrir => Err(EnchainementNatif::Rouvrir),
