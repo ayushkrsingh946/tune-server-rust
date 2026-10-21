@@ -271,6 +271,15 @@ jobs:
           TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
         run: cargo test --no-fail-fast -p tune-core --lib --no-default-features --features postgres pg_4853 -- --nocapture
 
+      # #6332 — le débit de la piste (`tracks.bitrate_kbps`, PG 094) sur une
+      # VRAIE base : écrit à l'insertion, relu, puis complété au rescan pour
+      # une piste existante (FLAC relu, DSF calculé en SQL). Le témoin vide
+      # `tracks` : il tourne seul, dans sa propre étape.
+      - name: Débit de la piste sur PostgreSQL (#6332)
+        env:
+          TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test
+        run: cargo test --no-fail-fast -p tune-core --lib --no-default-features --features postgres pg_le_debit_aller_retour_et_complement_6332 -- --nocapture --test-threads=1
+
       - name: Titres de service dans les playlists sur PostgreSQL (#4889)
         env:
           TUNE_TEST_PG_URL: postgresql://tune:tune@localhost:5432/tune_test

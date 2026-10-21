@@ -215,6 +215,10 @@ pub struct TrackMetadata {
     /// note, ou une valeur qu'aucune échelle connue ne produit.
     #[serde(default)]
     pub rating: Option<u8>,
+    /// #6332 — le débit moyen du fichier en kbit/s (lofty `audio_bitrate`).
+    /// Lu jusqu'ici pour le seul contrôle de durée des MP3, puis jeté.
+    #[serde(default)]
+    pub bitrate_kbps: Option<u32>,
     /// Le tag « compilation » du fichier — `TCMP` en ID3, `COMPILATION` en
     /// VorbisComment, `cpil` en MP4, tous trois rendus par
     /// `ItemKey::FlagCompilation`.
@@ -2253,6 +2257,12 @@ fn dsf_dff_fallback_complete(
             .as_ref()
             .and_then(Id3v2Tags::note)
             .or_else(|| tag_lofty.and_then(|t| note_de_la_balise(t, path))),
+        // #6332 — un flux DSD est à débit constant : 1 bit par échantillon et
+        // par canal (DSD64 stéréo : 5 645 kbit/s).
+        bitrate_kbps: sample_rate
+            .zip(channels)
+            .map(|(sr, ch)| sr.saturating_mul(u32::from(ch)) / 1000)
+            .filter(|b| *b > 0),
         compilation,
         label,
         catalog_number,
@@ -2347,6 +2357,7 @@ fn m4a_fallback(path: &Path) -> Option<TrackMetadata> {
         credits: vec![],
         comment: None,
         rating: None,
+        bitrate_kbps: None,
     })
 }
 
@@ -2781,6 +2792,7 @@ fn tagless_fallback(path: &Path, props: &lofty::properties::FileProperties) -> T
         credits: vec![],
         comment: None,
         rating: None,
+        bitrate_kbps: None,
     }
 }
 
@@ -2891,6 +2903,7 @@ fn matroska_metadata(path: &Path) -> Result<TrackMetadata, String> {
         credits: vec![],
         comment: balises.comment,
         rating: None,
+        bitrate_kbps: None,
     })
 }
 
@@ -2969,6 +2982,7 @@ pub fn tagless_fallback_no_props(path: &Path) -> TrackMetadata {
         credits: vec![],
         comment: None,
         rating: None,
+        bitrate_kbps: None,
     }
 }
 
@@ -4132,6 +4146,10 @@ fn try_read_metadata_unsanitized(path: &Path) -> Result<TrackMetadata, String> {
             .or_else(|| crate::audio::iso9660::taille_et_mtime(path).map(|(t, _)| t)),
         bpm,
         rating: note_de_la_balise(tag, path),
+        // #6332 — le débit moyen que lofty calcule (en-tête de trame pour un
+        // MP3 CBR, Xing/VBRI pour un VBR, taille du flux sur durée sinon). Lu
+        // jusqu'ici pour le seul contrôle de durée des MP3, puis jeté.
+        bitrate_kbps: props.audio_bitrate().filter(|b| *b > 0),
         compilation,
         label: label_du_tag(&get),
         catalog_number: get(ItemKey::CatalogNumber),

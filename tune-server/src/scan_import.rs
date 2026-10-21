@@ -256,6 +256,8 @@ pub fn build_track_row(
     track.bpm = meta.bpm;
     // #6123 — la note du fichier, déjà ramenée sur 0 à 5 (`metadata::note`).
     track.rating = meta.rating.map(i32::from);
+    // #6332 — le débit moyen du fichier, lu au scan et jusqu'ici jeté.
+    track.bitrate_kbps = meta.bitrate_kbps.and_then(|b| i32::try_from(b).ok());
     track.label = meta.label.clone();
     track.isrc = meta.isrc.clone();
     track.musicbrainz_recording_id = meta.musicbrainz_recording_id.clone();
@@ -2421,6 +2423,7 @@ mod tests {
             year: Some(1959),
             bpm: Some(136.0),
             rating: Some(4),
+            bitrate_kbps: Some(1_411),
             label: Some("Columbia".into()),
             isrc: Some("USSM15900001".into()),
             musicbrainz_recording_id: Some("rec-1".into()),
@@ -2466,6 +2469,11 @@ mod tests {
             track.rating,
             Some(4),
             "la note des balises n'atteint pas la ligne (#6123)"
+        );
+        assert_eq!(
+            track.bitrate_kbps,
+            Some(1_411),
+            "le débit lu au scan n'atteint pas la ligne (#6332)"
         );
         assert_eq!(track.isrc.as_deref(), Some("USSM15900001"));
         assert_eq!(track.comments.as_deref(), Some("remaster"));

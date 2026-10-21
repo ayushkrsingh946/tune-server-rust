@@ -1310,9 +1310,19 @@ impl PlaybackOrchestrator {
             // qui manquait au 128 kbit/s de Bandcamp : annoncé sur l'écran de
             // découverte, il disparaissait dès que la piste partait en zone —
             // le chemin du signal ne montrait plus qu'un « MP3 » qu'aucun
-            // auditeur ne peut distinguer d'un 320 (#2074). Une piste locale
-            // n'en porte pas : sa résolution réelle est lue au scan.
-            bitrate_kbps: resolved.bitrate_kbps,
+            // auditeur ne peut distinguer d'un 320 (#2074).
+            //
+            // #6332 — une piste LOCALE porte désormais le sien, lu au scan
+            // (`tracks.bitrate_kbps`) : c'est le débit du FICHIER, pas celui du
+            // flux servi (qui peut être un WAV transcodé), comme la résolution
+            // ci-dessus.
+            bitrate_kbps: resolved.bitrate_kbps.or_else(|| {
+                track_meta
+                    .as_ref()
+                    .and_then(|t| t.bitrate_kbps)
+                    .and_then(|b| u32::try_from(b).ok())
+                    .filter(|b| *b > 0)
+            }),
             // #5336 : resolved.channels décrit la SORTIE (potentiellement
             // repliée). Seule la ligne source fait autorité ici. Les radios
             // décodées sont complétées à la lecture de leur observation.

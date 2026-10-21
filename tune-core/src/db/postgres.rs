@@ -368,6 +368,9 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     // l'INSERT et l'UPDATE des pistes la NOMMENT. Sans effet sur une colonne
     // déjà là, TEXT de bascule comprise : c'est la 088 qui la convertit.
     "ALTER TABLE tracks ADD COLUMN IF NOT EXISTS rating BIGINT",
+    // #6332 — le débit moyen du fichier (PG 094). Ici AUSSI, même raison que
+    // `rating` : l'INSERT et l'UPDATE des pistes le NOMMENT.
+    "ALTER TABLE tracks ADD COLUMN IF NOT EXISTS bitrate_kbps BIGINT",
     // #6516 — le lien des radios avec l'annuaire (PG 090). Ici AUSSI : une
     // base de bascule ne rejoue pas la 090, et le rapprochement NOMME la
     // colonne. L'index JUSTE APRÈS la colonne.

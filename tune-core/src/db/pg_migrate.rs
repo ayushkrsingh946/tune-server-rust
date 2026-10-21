@@ -423,7 +423,10 @@ CREATE TABLE IF NOT EXISTS tracks (
     cue_end_ms BIGINT,
     -- Note de la piste (#6123). TEXT ici comme les autres colonnes numeriques :
     -- la copie lie tout en texte ; la migration 088 la convertit en BIGINT.
-    rating TEXT
+    rating TEXT,
+    -- Debit moyen du fichier (#6332). TEXT pour la copie, comme `rating` ;
+    -- la migration 094 le convertit en BIGINT.
+    bitrate_kbps TEXT
 );
 
 CREATE TABLE IF NOT EXISTS track_credits (
@@ -1323,6 +1326,9 @@ CREATE INDEX IF NOT EXISTS idx_tracks_audio_pcm_key ON tracks(audio_pcm_key);
 -- tracks: note de la piste lue dans ses balises (SQLite migration v124 / PG
 -- 088, #6123). TEXT pour la copie ; la 088, rejouee juste apres, la convertit.
 ALTER TABLE tracks ADD COLUMN IF NOT EXISTS rating TEXT;
+-- tracks: debit moyen du fichier en kbit/s (SQLite migration v130 / PG 094,
+-- #6332). TEXT pour la copie ; la 094, rejouee juste apres, le convertit.
+ALTER TABLE tracks ADD COLUMN IF NOT EXISTS bitrate_kbps TEXT;
 -- radio_stations: lien avec la fiche de l'annuaire (SQLite migration v126 /
 -- PG 090, #6516). TEXT des deux côtés : la copie texte n'a rien à convertir.
 ALTER TABLE radio_stations ADD COLUMN IF NOT EXISTS external_id TEXT;
