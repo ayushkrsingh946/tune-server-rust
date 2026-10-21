@@ -1,8 +1,8 @@
--- 091_tracks_bitrate_kbps.sql
+-- 094_tracks_bitrate_kbps.sql
 --
 -- #6332 (fil forum 2269) : le DEBIT MOYEN du fichier en kbit/s, lu au scan
 -- (lofty `audio_bitrate`) et affiche dans « Lecture en cours ».
--- Jumelle de la migration SQLite 127.
+-- Jumelle de la migration SQLite 130.
 --
 -- BIGINT, comme les autres entiers de `tracks` cote PostgreSQL ; INTEGER cote
 -- SQLite, meme famille. NULL pour les lignes existantes : le rescan ordinaire
@@ -32,11 +32,11 @@ BEGIN
         ALTER TABLE tracks ALTER COLUMN bitrate_kbps TYPE BIGINT USING (
             CASE WHEN bitrate_kbps::text ~ '^[0-9]+$' THEN bitrate_kbps::text::bigint END
         );
-        RAISE NOTICE 'migration 091 : tracks.bitrate_kbps % -> bigint', typ;
+        RAISE NOTICE 'migration 094 : tracks.bitrate_kbps % -> bigint', typ;
     END IF;
 END $debit_de_piste$;
 
-INSERT INTO schema_version (version, name) VALUES (91, 'tracks_bitrate_kbps')
+INSERT INTO schema_version (version, name) VALUES (94, 'tracks_bitrate_kbps')
     ON CONFLICT (version) DO NOTHING;
 
 COMMIT;

@@ -341,7 +341,7 @@ pub struct Track {
     pub rating: Option<i32>,
     /// #6332 — le débit MOYEN du fichier, en kbit/s, tel que le lecteur de
     /// balises le calcule au scan (lofty `audio_bitrate`) — `tracks.bitrate_kbps`.
-    /// `None` : pas encore lu (piste antérieure à la migration 127, complétée
+    /// `None` : pas encore lu (piste antérieure à la migration 130, complétée
     /// au rescan suivant) ou débit inconnu.
     #[serde(default)]
     pub bitrate_kbps: Option<i32>,

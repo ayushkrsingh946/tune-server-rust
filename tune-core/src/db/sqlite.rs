@@ -739,7 +739,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     -- Note de la piste lue dans ses balises, 0 a 5 (#6123, migration 124).
     -- NULL = le fichier n'en porte pas. Echelle : `metadata::note`.
     rating INTEGER,
-    -- Debit moyen du fichier en kbit/s, lu au scan (#6332, migration 127).
+    -- Debit moyen du fichier en kbit/s, lu au scan (#6332, migration 130).
     -- NULL = pas encore lu (complete au rescan) ou inconnu.
     bitrate_kbps INTEGER
 );

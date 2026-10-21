@@ -200,7 +200,7 @@ fn la_lecture_des_proprietes_rend_le_debit_d_un_vrai_fichier_6332() {
     assert_eq!(lire_debit_kbps(&dir.path().join("absent.wav")), None);
 }
 
-/// La même chose sur PostgreSQL, migrations comprises (091). Saute sans
+/// La même chose sur PostgreSQL, migrations comprises (094). Saute sans
 /// `TUNE_TEST_PG_URL`.
 #[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread")]
@@ -252,7 +252,7 @@ async fn pg_le_debit_aller_retour_et_complement_6332() {
     .unwrap();
     assert_eq!(
         typ, "bigint",
-        "PG 091 : `tracks.bitrate_kbps` doit être BIGINT"
+        "PG 094 : `tracks.bitrate_kbps` doit être BIGINT"
     );
 }
 

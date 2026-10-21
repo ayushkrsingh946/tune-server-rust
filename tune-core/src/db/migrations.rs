@@ -2545,16 +2545,19 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
     // relecture complète (`library::debit_des_pistes`), par une lecture des
     // seules propriétés audio des fichiers inchangés encore sans débit.
     //
-    // Numérotée 127 / PG 091 : la 126 / PG 090 (#6516) est la dernière sur
-    // `batch/bugs-rc7-20261015` le 20/10, et aucune PR ouverte vers ce lot ne
-    // touche aux migrations ce jour-là. ⚠️ `chantier/ordre-etiquettes` tient
-    // 126 / 090 : il se renumérote à sa jonction avec le lot (règle de la 119).
+    // Numérotée 130 / PG 094 à sa jonction avec `batch/bugs-rc7-20261015`
+    // (21/10) : la PR la tenait en 127 / 091, prises dans le lot par
+    // `tags_position` (#6257) ; 128 / 092 vont à la PR de #6466 (historique
+    // par conteneurs) et 129 / 093 à celle de #6285 (faux hi-res), qui
+    // entrent avant celle-ci (ordre fixé par Bertrand : #6639, #6637, #6641,
+    // #6633). La garde de contiguïté exige donc qu'elles soient fusionnées
+    // d'abord.
     //
     // Colonne posée par `add_column_if_missing` dans le bloc de version et
     // dans la passe finale, PAS dans `up` : même règle qu'à la 124 — l'INSERT
-    // et l'UPDATE des pistes la NOMMENT. Jumelle PG : 091.
+    // et l'UPDATE des pistes la NOMMENT. Jumelle PG : 094.
     Migration {
-        version: 127,
+        version: 130,
         name: "tracks_bitrate_kbps",
         up: "",
     },
@@ -3883,7 +3886,7 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
             // NULL = le fichier n'en porte pas, ou pas encore relu.
             add_column_if_missing(db, "tracks", "rating", "INTEGER");
         }
-        if migration.version == 127 {
+        if migration.version == 130 {
             // Le débit moyen du fichier (#6332). Sans défaut : NULL = pas
             // encore lu (le rescan le complète) ou inconnu.
             add_column_if_missing(db, "tracks", "bitrate_kbps", "INTEGER");
@@ -4493,9 +4496,9 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     // et l'UPDATE des pistes la NOMMENT, et une base arrivée sans elle ne
     // pourrait plus rien scanner. PG : migration 088.
     add_column_if_missing(db, "tracks", "rating", "INTEGER");
-    // Le débit moyen du fichier (migration 127, #6332) — posé ICI aussi, même
+    // Le débit moyen du fichier (migration 130, #6332) — posé ICI aussi, même
     // raison que la note : l'INSERT et l'UPDATE des pistes le NOMMENT.
-    // PG : migration 091.
+    // PG : migration 094.
     add_column_if_missing(db, "tracks", "bitrate_kbps", "INTEGER");
     // Le lien des radios avec l'annuaire (migration 126, #6516) — posé ICI
     // aussi : le rapprochement le NOMME. PG : migration 090.
@@ -5381,12 +5384,12 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         "tags_position",
         include_str!("../../migrations/postgres/091_tags_position.sql"),
     ),
-    // Jumelle de la SQLite 127 (#6332) : `tracks.bitrate_kbps`, le débit moyen
+    // Jumelle de la SQLite 130 (#6332) : `tracks.bitrate_kbps`, le débit moyen
     // du fichier, NULL pour l'existant (complété au rescan).
     (
-        91,
+        94,
         "tracks_bitrate_kbps",
-        include_str!("../../migrations/postgres/091_tracks_bitrate_kbps.sql"),
+        include_str!("../../migrations/postgres/094_tracks_bitrate_kbps.sql"),
     ),
 ];
 
@@ -7509,14 +7512,14 @@ mod tests {
         );
     }
 
-    /// #6332 — la migration 127 pose `tracks.bitrate_kbps` (le débit moyen du
-    /// fichier), sur une base NEUVE comme sur une base MONTÉE en 126 avec une
+    /// #6332 — la migration 130 pose `tracks.bitrate_kbps` (le débit moyen du
+    /// fichier), sur une base NEUVE comme sur une base MONTÉE en 129 avec une
     /// piste ; NULLABLE, l'existant reste NULL (le rescan le complète) ; la
     /// jumelle PG 091 existe, est enregistrée, marque le bon numéro, convertit
     /// une colonne TEXT de bascule, et le schéma de bascule comme
     /// `ENSURE_COLUMNS` la portent.
     #[test]
-    fn la_migration_127_pose_le_debit_de_la_piste_6332() {
+    fn la_migration_130_pose_le_debit_de_la_piste_6332() {
         let colonne = |db: &SqliteDb| -> Option<(String, bool)> {
             let conn = db.connection().lock().unwrap();
             let mut stmt = conn.prepare("PRAGMA table_info(tracks)").unwrap();
@@ -7550,15 +7553,15 @@ mod tests {
         montee
             .execute_batch(
                 "ALTER TABLE tracks DROP COLUMN bitrate_kbps;
-                 DELETE FROM _migrations WHERE version >= 127;
+                 DELETE FROM _migrations WHERE version >= 130;
                  INSERT INTO tracks (title, file_path) VALUES ('Piste', '/m/a.mp3');",
             )
             .unwrap();
         assert_eq!(colonne(&montee), None, "préparation : colonne retirée");
-        assert_eq!(current_version(&montee).unwrap(), 126);
+        assert_eq!(current_version(&montee).unwrap(), 129);
         run_migrations(&montee).unwrap();
         assert_eq!(current_version(&montee).unwrap(), latest_version());
-        assert!(latest_version() >= 127);
+        assert!(latest_version() >= 130);
         assert_eq!(
             colonne(&montee),
             attendu,
@@ -7581,11 +7584,11 @@ mod tests {
         }
 
         let racine = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let fichier = "091_tracks_bitrate_kbps.sql";
+        let fichier = "094_tracks_bitrate_kbps.sql";
         let sql_pg =
             std::fs::read_to_string(racine.join("migrations/postgres").join(fichier)).unwrap();
         assert!(
-            sql_pg.contains("VALUES (91, 'tracks_bitrate_kbps')"),
+            sql_pg.contains("VALUES (94, 'tracks_bitrate_kbps')"),
             "le script PG marque un autre numéro dans schema_version"
         );
         assert!(
@@ -8798,9 +8801,9 @@ mod tests {
         // Pose le lien des radios avec l'annuaire, que le rapprochement NOMME.
         // 91 : `tags_position` (#6257), jumelle de la SQLite 127. Pose
         // `tags.position`, que l'INSERT des etiquettes NOMME.
-        // 91 : `tracks_bitrate_kbps` (#6332), jumelle de la SQLite 127. Pose
+        // 94 : `tracks_bitrate_kbps` (#6332), jumelle de la SQLite 130. Pose
         // `tracks.bitrate_kbps`, que l'INSERT et l'UPDATE des pistes NOMMENT.
-        assert_eq!(pg_latest_version(), 91, "latest PG migration must be 91");
+        assert_eq!(pg_latest_version(), 94, "latest PG migration must be 94");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),

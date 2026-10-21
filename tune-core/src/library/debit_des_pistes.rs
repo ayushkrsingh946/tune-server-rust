@@ -2,7 +2,7 @@
 //!
 //! Fil forum 2269 : « Serait-il possible d'ajouter le débit binaire aux
 //! informations affichées à la lecture en cours ? ». Le débit moyen est lu au
-//! scan (`TrackMetadata::bitrate_kbps`) et stocké depuis la migration 127
+//! scan (`TrackMetadata::bitrate_kbps`) et stocké depuis la migration 130
 //! (`tracks.bitrate_kbps`). Mais un scan incrémental ne relit JAMAIS un fichier
 //! inchangé : sans ce module, une bibliothèque existante n'aurait de débit que
 //! pour les fichiers modifiés, ou après un « Scan complet » qui relit tout
