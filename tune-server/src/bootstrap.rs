@@ -97,6 +97,11 @@ pub async fn run_with(opts: RunOptions) {
         std::process::exit(0);
     }
 
+    // #6253 — `--sans-console` (Windows) : relancer sans fenêtre de terminal
+    // et sortir. Avant tout journal, port ou base : c'est le DÉTACHÉ qui les
+    // ouvre. Sans le drapeau, ou hors Windows, rend la main aussitôt.
+    crate::lancement_sans_console::appliquer_au_demarrage();
+
     // #5617 — mode ponctuel « premier accès » de Tune OS : appelé en root par
     // une unité de l'image, HORS du bac à sable de tune.service, il applique la
     // politique du mot de passe du compte `tune` puis sort. Même place que
@@ -407,6 +412,11 @@ pub async fn run_with(opts: RunOptions) {
     ));
     let state = AppState::new(&config.db_path, config.port, config.clone())
         .expect("failed to init app state");
+
+    // #5320 — la sonde du processeur est relevée en tâche de fond, une fois
+    // par seconde : l'écran et la garde thermique lisent une médiane, pas la
+    // pointe que provoque la requête qui les interroge.
+    tune_core::audio::thermal::demarrer_l_echantillonnage();
 
     crate::boot_status::set_phase("configuration");
     state.restore_tokens().await;
