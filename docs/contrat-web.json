@@ -2566,7 +2566,8 @@
         "dynamic_range",
         "play_count",
         "last_played_at",
-        "banned"
+        "banned",
+        "entry_id"
       ]
     },
     {
