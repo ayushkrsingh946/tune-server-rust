@@ -547,8 +547,6 @@ impl PlaybackOrchestrator {
         }
     }
 
-    // Un argument par colonne écrite ; une structure changerait tous les appelants pour un gain de forme (clippy 1.98).
-    #[allow(clippy::too_many_arguments)]
     /// #6466 — le conteneur d'UNE écoute : celui que porte l'élément de file
     /// joué (`queue_items.context_*`, posé par « Lire ensuite », « Ajouter à
     /// la file » et le transfert de zone), et à défaut celui de la SESSION de
@@ -578,6 +576,8 @@ impl PlaybackOrchestrator {
         )
     }
 
+    // Un argument par colonne écrite ; une structure changerait tous les appelants pour un gain de forme (clippy 1.98).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn record_listen(
         &self,
         title: &str,

@@ -243,6 +243,34 @@ pub(super) struct Habillage {
 
 impl PlaybackOrchestrator {
     pub async fn play(&self, req: PlayRequest) -> Result<PlayResult, String> {
+        // Public entry point: this is a *new* logical play, so it is recorded
+        // in the listen history.
+        self.play_par_l_entree(req, true).await
+    }
+
+    /// #6466 (fil 2302 point 15) — le transfert de zone : une lecture
+    /// NOUVELLE sur la cible, qui passe par TOUTES les étapes d'entrée de
+    /// [`play`](Self::play) (plafond de zones, dédoublonnage du re-tap), mais
+    /// qui n'écrit pas l'historique : la piste transférée a déjà son écoute,
+    /// écrite avec la zone d'origine.
+    ///
+    /// Ce n'est PAS [`play_without_history`](Self::play_without_history), qui
+    /// saute ces étapes exprès : elle recrée le flux d'une piste DÉJÀ en cours
+    /// (seek, relance radio, reconnexion) et n'active aucune zone.
+    pub async fn play_transfere_sans_historique(
+        &self,
+        req: PlayRequest,
+    ) -> Result<PlayResult, String> {
+        self.play_par_l_entree(req, false).await
+    }
+
+    /// Les étapes d'entrée de `play()`, puis `play_inner`. `historique` ne
+    /// commande QUE l'écriture de l'écoute.
+    async fn play_par_l_entree(
+        &self,
+        req: PlayRequest,
+        historique: bool,
+    ) -> Result<PlayResult, String> {
         // Free-tier zone cap, enforced at *activation* (a zone's first play).
         // This is the single choke point for every play entry point (direct
         // play, resume, streaming, transfer, alarms, AI) — gating here, rather
@@ -297,9 +325,7 @@ impl PlaybackOrchestrator {
             }
         }
 
-        // Public entry point: this is a *new* logical play, so it is recorded
-        // in the listen history.
-        self.play_inner(req, true).await
+        self.play_inner(req, historique).await
     }
 
     /// Free-tier gate: block *activating* a brand-new zone once the free active

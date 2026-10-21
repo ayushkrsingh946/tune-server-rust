@@ -64,7 +64,7 @@ impl PlaybackOrchestrator {
         // avec la zone d'origine : la relancer sur la cible ne la réécrit pas.
         // Les titres suivants, eux, s'écriront avec la zone cible.
         let lancement = if direct {
-            self.play_without_history(super::PlayRequest {
+            self.play_transfere_sans_historique(super::PlayRequest {
                 zone_id,
                 output_device_id: Some(did.to_string()),
                 source: Some(np.source.clone()),

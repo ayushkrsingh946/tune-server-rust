@@ -644,6 +644,10 @@ impl PlaybackOrchestrator {
     /// la zone d'origine, pas la peine de la dupliquer avec la zone de
     /// destination. Seuls les titres suivants seront notés avec la nouvelle
     /// zone. »
+    ///
+    /// La relance passe par les étapes d'entrée de `play()` (plafond de
+    /// zones, re-tap) : seule l'écriture de l'historique est retirée — voir
+    /// [`play_transfere_sans_historique`](Self::play_transfere_sans_historique).
     pub async fn play_from_queue_sans_historique(
         &self,
         zone_id: i64,
@@ -787,7 +791,7 @@ impl PlaybackOrchestrator {
         let result = if historique {
             self.play(req).await?
         } else {
-            self.play_without_history(req).await?
+            self.play_transfere_sans_historique(req).await?
         };
         Ok(result)
     }

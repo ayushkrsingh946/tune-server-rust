@@ -62,6 +62,12 @@ struct Banc {
 
 impl Banc {
     async fn monter() -> Self {
+        Self::monter_avec_un_plafond(None).await
+    }
+
+    /// `plafond` : la limite de zones d'un compte gratuit, câblée comme en
+    /// production (`orch.license`). `None` : pas de licence, pas de plafond.
+    async fn monter_avec_un_plafond(plafond: Option<i64>) -> Self {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
         run_migrations(&db).unwrap();
@@ -79,14 +85,21 @@ impl Banc {
                 MockOutput::new(ENFANTS, "Enfants").with_type("dlna"),
             ));
         }
-        let orch = Arc::new(PlaybackOrchestrator::new(
+        let mut orch = PlaybackOrchestrator::new(
             db.clone(),
             Arc::new(PlaybackManager::new()),
             Arc::new(AudioStreamer::new(0)),
             Arc::new(Mutex::new(ServiceRegistry::new())),
             outputs,
             None,
-        ));
+        );
+        if let Some(limite) = plafond {
+            orch.license = Some(Arc::new(crate::license::LicenseManager::new_with_limit(
+                db.clone(),
+                limite,
+            )));
+        }
+        let orch = Arc::new(orch);
         orch.sources_url().inscrire(SOURCE, Arc::new(Fournisseur));
         Self {
             orch,
@@ -94,6 +107,18 @@ impl Banc {
             salon,
             enfants,
         }
+    }
+
+    /// Les lancements (`play_media`) reçus par l'appareil de la zone cible.
+    async fn lancements_sur_enfants(&self) -> usize {
+        let outputs = self.orch.outputs.lock().await;
+        let sortie = outputs.get(ENFANTS).expect("sortie enregistrée");
+        let garde = sortie.lock().await;
+        let mock = garde
+            .as_any()
+            .downcast_ref::<MockOutput>()
+            .expect("sortie factice");
+        mock.play_call_count().await
     }
 
     /// « Lire » l'album 1 : la session de la zone EST l'album, les lignes
@@ -304,6 +329,86 @@ async fn le_transfert_garde_les_conteneurs_et_n_ecrit_pas_de_doublon_6466() {
         "après le transfert, la suite de l'album reste dans l'album, avec la zone \
          cible, et le titre seul reste au premier niveau — {h:?}"
     );
+}
+
+/// Relecture rc7 de #6637, point 1 — le transfert ne retire QUE l'écriture
+/// de l'historique : il passe par les étapes d'entrée de `play()`. Témoin : le
+/// plafond de zones d'un compte gratuit. Une cible jamais activée, au-delà du
+/// plafond, est refusée sur les DEUX chemins du transfert (la file, et le flux
+/// direct d'une radio) : rien n'atteint son appareil, rien n'entre dans
+/// l'historique. `play_without_history`, qui saute ces étapes, la lançait.
+#[tokio::test]
+async fn le_transfert_passe_par_les_etapes_d_entree_de_play_6466() {
+    let b = Banc::monter_avec_un_plafond(Some(1)).await;
+    b.lire_l_album(b.salon).await;
+    b.jouer(b.salon, 0).await;
+    // Le salon est LA zone active du compte gratuit (plafond : 1).
+    b.db.execute(
+        &format!("UPDATE zones SET last_track_id = 1 WHERE id = {}", b.salon),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(b.historique().len(), 1);
+    PlayQueueRepo::with_backend(b.db.clone())
+        .append(
+            b.enfants,
+            &[
+                piste("a:1", "Even Thieves Come Clean"),
+                piste("a:2", "Release My Heart"),
+            ],
+        )
+        .unwrap();
+    let np = b
+        .orch
+        .playback
+        .get_state(b.salon)
+        .await
+        .now_playing
+        .expect("le salon joue");
+
+    // Chemin de la file.
+    b.orch
+        .transferer_sur_l_appareil(b.enfants, ENFANTS, 0, &np, 0, false)
+        .await
+        .expect("un lancement refusé n'est que journalisé");
+    // Chemin direct : une radio ne vit pas dans la file.
+    let mut radio = np.clone();
+    radio.source = "radio".into();
+    radio.source_id = Some("r:6466".into());
+    b.orch
+        .transferer_sur_l_appareil(b.enfants, ENFANTS, 0, &radio, 0, false)
+        .await
+        .expect("un lancement refusé n'est que journalisé");
+    assert_eq!(
+        b.lancements_sur_enfants().await,
+        0,
+        "le plafond de zones de `play()` doit refuser la cible jamais activée, \
+         sur les deux chemins du transfert"
+    );
+    assert_eq!(b.historique().len(), 1);
+
+    // Contrôle : la même cible, une fois activée, reçoit le transfert — le
+    // refus venait bien du plafond. Et toujours aucune écoute de plus.
+    b.db.execute(
+        &format!(
+            "UPDATE zones SET last_track_id = 1 WHERE id = {}",
+            b.enfants
+        ),
+        &[],
+    )
+    .unwrap();
+    b.orch
+        .transferer_sur_l_appareil(b.enfants, ENFANTS, 0, &np, 0, false)
+        .await
+        .expect("le transfert doit aboutir");
+    assert_eq!(b.lancements_sur_enfants().await, 1);
+    let h = b.historique();
+    assert_eq!(
+        h.len(),
+        1,
+        "la piste transférée n'est pas réécrite avec la zone cible — {h:?}"
+    );
+    assert_eq!(h[0].1, b.salon);
 }
 
 /// L'appariement de la copie : une piste présente deux fois garde ses deux
