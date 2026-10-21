@@ -3669,7 +3669,21 @@ fn windows_update_bat(
     err_file: &str,
     exe_name: &str,
     exe_name_new: &str,
+    sans_console: bool,
 ) -> String {
+    // #6253 — un serveur lancé sans fenêtre revient sans fenêtre. Le script
+    // hérite de l'environnement du détaché : il en retire le marqueur, sans
+    // quoi le nouveau processus se croirait déjà détaché et servirait dans la
+    // console (réduite) qui le lance.
+    let relance = if sans_console {
+        format!(
+            "set \"{marqueur}=\"\r\nstart \"\" /min \"{exe}\" {drapeau}",
+            marqueur = crate::lancement_sans_console::MARQUEUR_ENFANT,
+            drapeau = crate::lancement_sans_console::DRAPEAU,
+        )
+    } else {
+        format!("start \"\" \"{exe}\"")
+    };
     format!(
         "@echo off\r\n\
          setlocal enabledelayedexpansion\r\n\
@@ -3698,7 +3712,7 @@ fn windows_update_bat(
          rename \"{new}\" \"{exe_name}\"\r\n\
          echo Starting updated server...\r\n\
          set \"TUNE_OPEN_BROWSER=0\"\r\n\
-         start \"\" \"{exe}\"\r\n\
+         {relance}\r\n\
          exit /b 0\r\n\
          :swap_failed\r\n\
          echo Tune update failed: could not replace {exe_name}.> \"{err_file}\"\r\n\
@@ -3707,7 +3721,7 @@ fn windows_update_bat(
          echo completely, delete {exe_name}, then rename {exe_name_new} to {exe_name}.>> \"{err_file}\"\r\n\
          echo Update failed - old binary locked. Details written to {err_file}\r\n\
          set \"TUNE_OPEN_BROWSER=0\"\r\n\
-         start \"\" \"{exe}\"\r\n"
+         {relance}\r\n"
     )
 }
 
@@ -3782,6 +3796,7 @@ fn install_windows(
             .file_name()
             .unwrap_or_default()
             .to_string_lossy(),
+        crate::lancement_sans_console::est_l_enfant_detache(),
     );
 
     // A stale failure marker from a previous attempt would be misleading — clear it.
@@ -5895,7 +5910,57 @@ mod windows_update_bat_tests {
             r"C:\Program Files\Tune\tune-update-failed.txt",
             "tune-server.exe",
             "tune-server.new.exe",
+            false,
         )
+    }
+
+    fn script_sans_console() -> String {
+        windows_update_bat(
+            4242,
+            r"C:\Program Files\Tune\tune-server.exe",
+            r"C:\Program Files\Tune\tune-server.new.exe",
+            r"C:\Program Files\Tune\tune-update-failed.txt",
+            "tune-server.exe",
+            "tune-server.new.exe",
+            true,
+        )
+    }
+
+    /// #6253 — sans fenêtre au départ, sans fenêtre au retour : les DEUX
+    /// relances (mise à jour réussie, binaire verrouillé) passent par
+    /// `--sans-console`, après avoir retiré le marqueur hérité du détaché.
+    #[test]
+    fn un_serveur_sans_fenetre_revient_sans_fenetre_6253() {
+        let s = script_sans_console();
+        let relance = "start \"\" /min \"C:\\Program Files\\Tune\\tune-server.exe\" --sans-console";
+        assert_eq!(s.matches(relance).count(), 2, "{s}");
+        assert_eq!(
+            s.matches("set \"TUNE_SANS_CONSOLE_ENFANT=\"").count(),
+            2,
+            "le marqueur hérité doit être retiré avant chaque relance : {s}"
+        );
+        for (i, _) in s.match_indices(relance) {
+            let avant = &s[..i];
+            let dernier_retrait = avant.rfind("set \"TUNE_SANS_CONSOLE_ENFANT=\"");
+            assert!(
+                dernier_retrait.is_some(),
+                "relance sans retrait du marqueur : {s}"
+            );
+        }
+    }
+
+    /// #6253 — un serveur lancé dans sa console revient comme avant.
+    #[test]
+    fn un_serveur_en_console_revient_comme_avant_6253() {
+        let s = script();
+        assert!(!s.contains("--sans-console"), "{s}");
+        assert!(!s.contains("TUNE_SANS_CONSOLE_ENFANT"), "{s}");
+        assert_eq!(
+            s.matches("start \"\" \"C:\\Program Files\\Tune\\tune-server.exe\"")
+                .count(),
+            2,
+            "{s}"
+        );
     }
 
     /// Le script ne doit JAMAIS s'effacer lui-même.
