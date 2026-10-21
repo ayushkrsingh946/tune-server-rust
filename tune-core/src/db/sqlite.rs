@@ -739,7 +739,10 @@ CREATE TABLE IF NOT EXISTS tracks (
     cue_end_ms INTEGER,
     -- Note de la piste lue dans ses balises, 0 a 5 (#6123, migration 124).
     -- NULL = le fichier n'en porte pas. Echelle : `metadata::note`.
-    rating INTEGER
+    rating INTEGER,
+    -- Debit moyen du fichier en kbit/s, lu au scan (#6332, migration 130).
+    -- NULL = pas encore lu (complete au rescan) ou inconnu.
+    bitrate_kbps INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS track_credits (
@@ -894,6 +897,9 @@ CREATE TABLE IF NOT EXISTS zones (
 -- `artist_ref` : l'artiste chez le service (`StreamTrack.artist_id`), pour
 -- « Aller à l'artiste » depuis la file (#6079). Jumelle de la migration
 -- SQLite 123 et de la PG 087.
+-- `context_*` : le conteneur (album, playlist, artiste, ou `track` pour un
+-- titre ajouté seul) dont l'élément a été enfilé (#6466). NULL = le contexte
+-- de session de la zone. Jumelle de la migration SQLite 128 et de la PG 092.
 CREATE TABLE IF NOT EXISTS queue_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     zone_id INTEGER NOT NULL REFERENCES zones(id) ON DELETE CASCADE,
@@ -910,7 +916,12 @@ CREATE TABLE IF NOT EXISTS queue_items (
     track_number INTEGER,
     disc_number INTEGER,
     album_ref TEXT,
-    artist_ref TEXT
+    artist_ref TEXT,
+    context_type TEXT,
+    context_id TEXT,
+    context_source TEXT,
+    context_title TEXT,
+    context_cover TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_track_credits_track_id ON track_credits(track_id);

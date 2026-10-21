@@ -497,7 +497,7 @@ mod tests {
     fn serveur_connecte(state: &RelayState) -> mpsc::Receiver<String> {
         let (tx, rx) = mpsc::channel::<String>(16);
         state
-            .register_server("srv".into(), "Salon".into(), JETON_DE_PONT.into(), tx)
+            .register_server("srv".into(), "Salon".into(), JETON_DE_PONT.into(), None, tx)
             .unwrap();
         rx
     }

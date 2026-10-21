@@ -451,6 +451,10 @@ fn main() {
             "defi": defi_srv,
             "signature": serveur.signer_defi(SERVEUR, defi_srv),
             "signature_autre_serveur": serveur.signer_defi(AUTRE_SERVEUR, defi_srv),
+            "inscription": {
+                "description": "Preuve d'inscription de la clé sur le compte. Message : « tune-remote/inscription/v1\\n<server_id>\\n<clé publique> ».",
+                "preuve": serveur.signer(&tune_laissez_passer::message_inscription_serveur(SERVEUR, &serveur.cle_publique())),
+            },
         }),
     );
     ecrire(

@@ -585,6 +585,10 @@ where
             "/{service}/genres/{genre_id}/albums",
             get(service_genre_albums),
         )
+        .route(
+            "/{service}/genres/{genre_id}/search",
+            get(service_genre_search),
+        )
         .route("/{service}/favorites/{fav_type}", get(service_favorites))
         .route(
             "/{service}/favorites/{fav_type}/{item_id}",
@@ -966,6 +970,31 @@ async fn service_genre_albums(
     }
 }
 
+#[derive(Deserialize)]
+struct GenreSearchQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+/// #6231 — chercher dans le catalogue du service, restreint à un genre
+/// (`tune_core::streaming::RechercheDansUnGenre`). 501 pour un service qui ne
+/// dit pas le genre de ses albums : l'écran le DIT, au lieu de filtrer en
+/// silence les seules nouveautés.
+async fn service_genre_search(
+    State(state): State<StreamingHttpState>,
+    Path((service, genre_id)): Path<(String, String)>,
+    Query(q): Query<GenreSearchQuery>,
+) -> Response {
+    let query = q.q.trim().to_string();
+    if query.is_empty() {
+        return (StatusCode::BAD_REQUEST, "q is required").into_response();
+    }
+    let limit = q.limit.unwrap_or(50);
+    with_svc!(&state, &service, |svc| svc
+        .search_genre_albums(&genre_id, &query, limit)
+        .await)
+}
+
 async fn service_featured_sections(
     State(state): State<StreamingHttpState>,
     Path(service): Path<String>,
@@ -1338,7 +1367,10 @@ async fn service_logout(
     state.save_tokens().await;
     // Le compte change : ses listes ne doivent pas survivre à la session.
     purge_contenu_utilisateur(&service);
-    Json(json!({ "service": service, "status": "logged_out" })).into_response()
+    // #6173 — `disconnectStreaming` (web) lit `disconnected` ; `status` reste
+    // pour les clients qui le lisaient déjà.
+    Json(json!({ "service": service, "status": "logged_out", "disconnected": true }))
+        .into_response()
 }
 
 /// Nombre de titres rendus par défaut par « Plus comme ça » sur un titre de
@@ -1644,7 +1676,8 @@ async fn service_enable(
     settings
         .set(&format!("streaming_{service}_enabled"), "true")
         .ok();
-    Json(json!({"service": service, "enabled": true})).into_response()
+    // #6173 — `enableStreamingService` (web) lit `status`.
+    Json(json!({"service": service, "enabled": true, "status": "enabled"})).into_response()
 }
 
 async fn service_disable(
@@ -1660,7 +1693,8 @@ async fn service_disable(
     settings
         .set(&format!("streaming_{service}_enabled"), "false")
         .ok();
-    Json(json!({"service": service, "enabled": false})).into_response()
+    // #6173 — `disableStreamingService` (web) lit `status`.
+    Json(json!({"service": service, "enabled": false, "status": "disabled"})).into_response()
 }
 
 async fn service_auth_url(
@@ -3129,6 +3163,40 @@ mod temoin_statut_du_refus_i859 {
             .await
             .expect("corps lisible");
         String::from_utf8_lossy(&octets).into_owned()
+    }
+
+    /// #6231 — la recherche dans un genre existe, et un service qui ne dit pas
+    /// le genre de ses albums répond 501 (défaut du trait), que l'écran affiche.
+    #[tokio::test]
+    async fn recherche_dans_un_genre_6231_route_501_et_400() {
+        use tower::ServiceExt;
+        let (state, name) = etat("genre-6231", Humeur::Refuse);
+        let app = Router::new().nest("/api/v1/streaming", router().with_state(state));
+        let appel = |chemin: String| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .uri(chemin)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let r = appel(format!("/api/v1/streaming/{name}/genres/80/search?q=roxy")).await;
+        assert_eq!(
+            r.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "#6231 : sans recherche par genre, 501 et non 404 ni une liste vide"
+        );
+        let r = appel(format!("/api/v1/streaming/{name}/genres/80/search?q=%20")).await;
+        assert_eq!(
+            r.status(),
+            StatusCode::BAD_REQUEST,
+            "#6231 : saisie vide refusée"
+        );
     }
 
     #[derive(Clone, Default)]

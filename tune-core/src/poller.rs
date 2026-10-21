@@ -218,6 +218,16 @@ const STALL_DECLINE_MAX_TICKS: u8 = 10;
 /// advanced once, so slow starts and renderers with no position support remain
 /// outside its scope.
 const PLAYING_STALL_THRESHOLD: u8 = 30;
+/// 🔴 #6702 — le plancher en SECONDES du seuil ci-dessus, comme
+/// [`STOPPED_FAILURE_MIN_SECS`] pour le bras « arrêté » (#4480).
+///
+/// Après un tour bloqué, `tokio::time::interval` rattrape les tours manqués en
+/// rafale : sur le .18 le 21/10, trente tours « figés » en 247 ms, position du
+/// renderer égale au temps écoulé (204 s pour 204 s), renderer encore en train
+/// de jouer — et la zone coupée. La position d'un renderer DLNA avance à la
+/// seconde : des tours espacés de quelques millisecondes la voient forcément
+/// figée.
+const PLAYING_STALL_MIN_SECS: u64 = 30;
 /// Grace period (seconds) after a seek during which the poller does not
 /// overwrite the in-memory position with the value reported by the output.
 /// This prevents the progress bar from snapping back to the pre-seek
@@ -594,6 +604,9 @@ pub struct PositionPoller {
     /// une fois (voir `volume_pure_concilie`). Une zone en sort dès qu'elle
     /// est vue hors verrou, pour que le prochain armement soit rattrapé.
     volumes_pure_concilies: std::sync::Mutex<std::collections::HashSet<i64>>,
+    /// #6541 — dernier volume rapporté au-dessus de la limite de sécurité,
+    /// par zone : la consigne n'est recommandée qu'une fois par valeur.
+    volumes_plafonnes: std::sync::Mutex<std::collections::HashMap<i64, f64>>,
     /// #5662 — zones dont le renderer annonce 100 % sans que Tune l'adopte :
     /// l'épisode est dit une fois (`volume_100_ignore_constate`).
     volumes_100_ignores: std::sync::Mutex<std::collections::HashSet<i64>>,
@@ -641,6 +654,7 @@ impl PositionPoller {
             zones_a_position_prouvee: std::sync::Mutex::new(std::collections::HashSet::new()),
             volumes_pure_reimposes: std::sync::Mutex::new(std::collections::HashSet::new()),
             volumes_pure_concilies: std::sync::Mutex::new(std::collections::HashSet::new()),
+            volumes_plafonnes: std::sync::Mutex::new(std::collections::HashMap::new()),
             volumes_100_ignores: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -1046,6 +1060,11 @@ mod demarrage_fige_5522;
 #[cfg(test)]
 mod demarrage_fige_5522_tests;
 
+/// #6541 — au-dessus de la limite de sécurité, le volume du renderer n'est
+/// pas adopté : il est ramené sous la limite.
+mod volume_plafond_6541;
+#[cfg(test)]
+mod volume_plafond_6541_tests;
 /// #5695 — sous PURE verrouillé, réimposer 100 % au lieu d'adopter le volume
 /// du renderer.
 mod volume_pure_5695;
@@ -1067,6 +1086,11 @@ mod tests;
 
 #[cfg(test)]
 mod status_timeout_tests;
+
+/// Sourdine par zéro (Eversolo DMP-A8) : le silence commandé n'est pas
+/// rouvert par le volume que l'appareil remonte.
+#[cfg(test)]
+mod volume_sourdine_zero_tests;
 
 /// #3318 — l'instant où l'anneau audio se vide, et le silence que le DAC
 /// reçoit alors. La comptabilité pure, et son branchement dans `tick()`.

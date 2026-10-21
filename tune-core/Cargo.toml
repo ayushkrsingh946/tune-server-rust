@@ -43,6 +43,9 @@ async-stream = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
+# Ecoute a distance par laissez-passer (#6603) : cle Ed25519 du serveur et
+# messages signes, la meme regle que le relais.
+tune-laissez-passer = { path = "../tune-laissez-passer" }
 thiserror = { workspace = true }
 urlencoding = { workspace = true }
 cpal = { path = "../vendor/cpal", version = "0.17.3", optional = true }

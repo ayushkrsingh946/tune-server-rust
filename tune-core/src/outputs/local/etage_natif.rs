@@ -86,9 +86,10 @@ pub(super) struct ReliquatForceBrut {
 pub(super) struct EtageNatif<'a> {
     /// Le format de la SOURCE : celui dans lequel `en_attente` se lit.
     spec: AudioSpec,
-    /// Le format réellement OUVERT par le périphérique. WASAPI exclusif ouvre
-    /// au format source ; le type le dit quand même, pour
-    /// [`EtageNatif::transformations`].
+    /// Le format réellement OUVERT par le périphérique : la cadence de la
+    /// source, et ses canaux — sauf quand la grille de réaffectation pilote
+    /// les voies (#6230 : une grille 6 → 2 ouvre 2 voies). Les blocs livrés
+    /// au puits portent ces voies-là ([`EtageNatif::spec_du_puits`]).
     sortie: FormatOuvert,
     /// Octets reçus de l'amont, pas encore alignés sur une trame source — ou
     /// en quarantaine 24 bits tant que la première sonde DoP n'a pas ses
@@ -162,10 +163,16 @@ impl<'a> EtageNatif<'a> {
         self.spec
     }
 
-    /// Le format des blocs livrés au puits : `Entier32` à la cadence et aux
-    /// canaux de la source (voir l'en-tête du module).
+    /// Le format des blocs livrés au puits : `Entier32` à la cadence de la
+    /// source, sur les voies OUVERTES — celles de la source, sauf grille qui
+    /// pilote les voies (#6230). Voir l'en-tête du module.
     pub(super) fn spec_du_puits(&self) -> AudioSpec {
-        spec_du_puits_natif(self.spec)
+        spec_du_puits_natif_vers(self.spec, self.sortie.canaux)
+    }
+
+    /// #6230 — les voies ouvertes diffèrent-elles des canaux de la source ?
+    fn voies_pilotees(&self) -> bool {
+        self.sortie.canaux != self.spec.canaux()
     }
 
     /// La décision DoP est-elle verrouillée ?
@@ -221,6 +228,7 @@ impl<'a> EtageNatif<'a> {
             &self.en_attente[..aligned_len],
             self.bit_depth(),
             self.spec.canaux(),
+            self.sortie.canaux,
             self.must_classify_24_bit,
             self.dop_latched,
             self.volume.load(Ordering::SeqCst),
@@ -277,7 +285,13 @@ impl<'a> EtageNatif<'a> {
             return true;
         }
         let volume_factor = self.volume.load(Ordering::SeqCst) as f32 / 1000.0;
-        let mut queue = queue;
+        // #6230 — la queue sort aux canaux de la source : elle passe par la
+        // même adaptation que le corps de la piste avant d'entrer au puits.
+        let mut queue = if self.voies_pilotees() {
+            self.adapter_hors_bloc(queue)
+        } else {
+            queue
+        };
         if volume_factor != 1.0 {
             for sample in &mut queue {
                 *sample *= volume_factor;
@@ -300,7 +314,14 @@ impl<'a> EtageNatif<'a> {
         }
         let frame_bytes = self.spec.octets_par_trame();
         let aligned = (self.en_attente.len() / frame_bytes) * frame_bytes;
-        let native = pcm_bytes_to_native_i32(&self.en_attente[..aligned], self.bit_depth());
+        // #6230 — sur des voies pilotées, rien ne part brut : le reliquat est
+        // porté aux voies ouvertes, à l'unité, comme le corps de la piste.
+        let native = if self.voies_pilotees() {
+            let float = pcm_bytes_to_f32(&self.en_attente[..aligned], self.bit_depth());
+            f32_to_native_i32(&self.adapter_hors_bloc(float), self.bit_depth())
+        } else {
+            pcm_bytes_to_native_i32(&self.en_attente[..aligned], self.bit_depth())
+        };
         let _ = self.pousser_les_mots(&native, puits);
         self.en_attente.drain(..aligned);
         Some(ReliquatForceBrut {
@@ -310,7 +331,8 @@ impl<'a> EtageNatif<'a> {
     }
 
     /// #5204 — **la frontière d'une piste enchaînée** sur un transport natif
-    /// exclusif, qui n'a ni rééchantillonneur ni adaptation de canaux.
+    /// exclusif, qui n'a ni rééchantillonneur ni adaptation de canaux de son
+    /// propre chef.
     ///
     /// `Err(Rouvrir)` : le format change, on n'enchaîne PAS. Rien n'a été
     /// touché — ni l'étage ni le puits : la piste courante se termine comme si
@@ -324,12 +346,35 @@ impl<'a> EtageNatif<'a> {
     /// précédente — moins d'une trame — est jeté, comme le chemin partagé le
     /// jette ; l'appelant a déjà forcé brut un reliquat de quarantaine par
     /// [`EtageNatif::vider`].
+    ///
+    /// #6230 — `amorce` : le début du PCM de la suivante. Les voies que la
+    /// suivante ouvrirait se décident comme à l'ouverture
+    /// ([`CreneauReaffectation::voies_a_ouvrir_en_exclusif`]) : une grille
+    /// 6 → 2 ouverte sur 2 voies enchaîne la piste 5.1 suivante dans le même
+    /// flux ; sans grille, la règle « à format égal » reste entière.
     pub(super) fn enchainer_la_piste(
         &mut self,
         suivante: AudioSpec,
+        amorce: &[u8],
     ) -> Result<(), super::enchainement_exclusif::EnchainementNatif> {
-        use super::enchainement_exclusif::{EnchainementNatif, decider_l_enchainement_natif};
-        match decider_l_enchainement_natif(self.spec, self.sortie, suivante) {
+        use super::enchainement_exclusif::{EnchainementNatif, decider_l_enchainement_natif_vers};
+        // Les voies de la grille ne comptent que si l'ouverture EN COURS est
+        // pilotée (étage ouvert sur d'autres voies que la source). Tant que
+        // les bras ouvrent au format source (étape 2 de #6230 non faite), une
+        // grille armée laisse la règle « à format égal » entière : l'album
+        // 5.1 s'enchaîne comme avant, sans rouvrir le périphérique à chaque
+        // piste.
+        let voies = match self.adaptation {
+            Some((reaffectation, _)) if self.sortie.canaux != self.spec.canaux() => reaffectation
+                .voies_a_ouvrir_en_exclusif(
+                    suivante,
+                    amorce,
+                    self.pure_bypass.load(Ordering::Relaxed),
+                    false,
+                ),
+            _ => suivante.canaux(),
+        };
+        match decider_l_enchainement_natif_vers(self.spec, self.sortie, suivante, voies) {
             EnchainementNatif::Rouvrir => Err(EnchainementNatif::Rouvrir),
             EnchainementNatif::Enchainer => {
                 self.en_attente.clear();
@@ -340,10 +385,36 @@ impl<'a> EtageNatif<'a> {
         }
     }
 
-    /// Ce que l'étage a réellement fait au signal : aucun rééchantillonnage ni
-    /// adaptation de canaux (le format ouvert est le format source), et le
-    /// DSP tel que `local_dsp_runtime_state` le décrit — appliqué, ou
-    /// contourné par DoP, par le bypass pur, ou inactif.
+    /// #6230 — porter des flottants hors bloc (queue du DSP, reliquat) des
+    /// canaux de la source aux voies ouvertes, par la même décision que les
+    /// blocs (`adaptation_retenue_pour`), sans noter le créneau.
+    fn adapter_hors_bloc(&self, float: Vec<f32>) -> Vec<f32> {
+        let (canaux, voies) = (self.spec.canaux(), self.sortie.canaux);
+        let (matrice, declaree) = match self.adaptation {
+            Some((reaffectation, disposition)) => adaptation_retenue_pour(
+                reaffectation,
+                disposition,
+                canaux,
+                voies,
+                false,
+                self.pure_bypass.load(Ordering::Relaxed),
+            ),
+            None => (None, None),
+        };
+        adapter_les_voies_natives(
+            float,
+            canaux,
+            voies,
+            matrice.as_deref(),
+            declaree.as_deref(),
+        )
+    }
+
+    /// Ce que l'étage a réellement fait au signal : aucun rééchantillonnage,
+    /// pas d'adaptation de canaux sauf voies pilotées par la grille (#6230,
+    /// que `TransformationsReelles` lit dans le format ouvert), et le DSP tel
+    /// que `local_dsp_runtime_state` le décrit — appliqué, ou contourné par
+    /// DoP, par le bypass pur, ou inactif.
     pub(super) fn transformations(&self) -> TransformationsReelles {
         let dsp_actif = local_dsp_runtime_state(
             self.eq,
@@ -359,7 +430,7 @@ impl<'a> EtageNatif<'a> {
         let reaffecte = self.adaptation.is_some_and(|(reaffectation, _)| {
             !self.dop_latched
                 && !self.pure_bypass.load(Ordering::Relaxed)
-                && reaffectation.pour(canaux, canaux).is_some()
+                && reaffectation.pour(canaux, self.sortie.canaux).is_some()
         });
         // #6057 — la disposition déclarée qui réordonne des voies à nombre
         // égal (`prepare_windows_native_pcm` l'applique au même endroit).
@@ -380,8 +451,15 @@ impl<'a> EtageNatif<'a> {
 
 /// Le format des blocs que l'étage natif livre pour une source donnée.
 pub(super) fn spec_du_puits_natif(source: AudioSpec) -> AudioSpec {
-    AudioSpec::nouvelle(source.cadence(), ProfondeurPcm::Entier32, source.canaux())
-        .expect("la source a au moins un canal : c'est l'invariant d'AudioSpec")
+    spec_du_puits_natif_vers(source, source.canaux())
+}
+
+/// #6230 — le format des blocs de l'étage natif quand le transport est
+/// ouvert sur `voies` voies (celles de la grille de réaffectation qui pilote
+/// l'ouverture, ou celles de la source).
+pub(super) fn spec_du_puits_natif_vers(source: AudioSpec, voies: u16) -> AudioSpec {
+    AudioSpec::nouvelle(source.cadence(), ProfondeurPcm::Entier32, voies.max(1))
+        .expect("au moins une voie : c'est l'invariant d'AudioSpec")
 }
 
 /// Les mots natifs d'un bloc `Entier32` : l'inverse exact de

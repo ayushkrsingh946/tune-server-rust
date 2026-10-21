@@ -782,10 +782,11 @@ pub mod sql {
         // whose files carry no ALBUMARTIST tag (Bilou). The column keeps its
         // position, so row parsing is unchanged.
         //
-        // `t.rating` (#6123) ferme la liste, au rang 34 : une projection qui
-        // s'arrête avant rend `rating = None`, jamais un décalage.
+        // `t.rating` (#6123) au rang 34, puis `t.bitrate_kbps` (#6332) qui ferme
+        // la liste au rang 35 : une projection qui s'arrête avant rend `None`,
+        // jamais un décalage.
         format!(
-            "SELECT t.id, t.title, t.album_id, al.title, t.artist_id, ar.name, COALESCE(NULLIF(t.album_artist, ''), aal.name), t.disc_number, t.disc_subtitle, t.track_number, t.duration_ms, t.file_path, t.format, t.sample_rate, t.bit_depth, t.channels, t.file_mtime, t.file_size, t.audio_hash, t.source, t.source_id, t.isrc, t.genre, t.composer, t.year, t.bpm, t.label, t.musicbrainz_recording_id, COALESCE(t.cover_path, al.cover_path), t.genres, t.comments, t.cue_media_path, t.cue_start_ms, t.cue_end_ms, t.rating{}",
+            "SELECT t.id, t.title, t.album_id, al.title, t.artist_id, ar.name, COALESCE(NULLIF(t.album_artist, ''), aal.name), t.disc_number, t.disc_subtitle, t.track_number, t.duration_ms, t.file_path, t.format, t.sample_rate, t.bit_depth, t.channels, t.file_mtime, t.file_size, t.audio_hash, t.source, t.source_id, t.isrc, t.genre, t.composer, t.year, t.bpm, t.label, t.musicbrainz_recording_id, COALESCE(t.cover_path, al.cover_path), t.genres, t.comments, t.cue_media_path, t.cue_start_ms, t.cue_end_ms, t.rating, t.bitrate_kbps{}",
             track_from()
         )
     }
@@ -856,11 +857,11 @@ pub mod sql {
         )
     }
 
-    const INSERT_COLS: &str = "title, album_id, artist_id, album_artist, disc_number, disc_subtitle, track_number, duration_ms, file_path, format, sample_rate, bit_depth, channels, file_mtime, file_size, audio_hash, source, source_id, isrc, genre, genres, composer, year, bpm, label, musicbrainz_recording_id, comments, cover_path, cue_media_path, cue_start_ms, cue_end_ms, rating";
+    const INSERT_COLS: &str = "title, album_id, artist_id, album_artist, disc_number, disc_subtitle, track_number, duration_ms, file_path, format, sample_rate, bit_depth, channels, file_mtime, file_size, audio_hash, source, source_id, isrc, genre, genres, composer, year, bpm, label, musicbrainz_recording_id, comments, cover_path, cue_media_path, cue_start_ms, cue_end_ms, rating, bitrate_kbps";
 
     /// Combien de colonnes `INSERT_COLS` porte — la seule source de vérité du
     /// nombre de paramètres liés, pour les deux moteurs.
-    pub const NB_COLONNES_INSERT: usize = 32;
+    pub const NB_COLONNES_INSERT: usize = 33;
 
     pub fn insert<D: SqlDialect>(d: &D) -> String {
         let placeholders: Vec<String> =
@@ -895,8 +896,8 @@ pub mod sql {
     ];
 
     /// Le nombre de valeurs liées par [`update`] et [`update_du_scan`] : leurs
-    /// 26 colonnes, puis l'`id`.
-    pub const NB_PARAMS_UPDATE: usize = 27;
+    /// 27 colonnes, puis l'`id`.
+    pub const NB_PARAMS_UPDATE: usize = 28;
 
     /// `UPDATE tracks …` qui ÉCRASE tout, y compris ce que le scan ignore.
     ///
@@ -1041,6 +1042,17 @@ pub mod sql {
                 brut(26, "rating")
             } else {
                 format!("rating = COALESCE({}, rating)", d.placeholder(26))
+            },
+            // #6332 — le débit moyen du fichier : même règle que la note. Le
+            // scan l'écrit tel que le fichier le dit ; les autres écritures,
+            // qui reconstruisent la ligne sans relire le fichier, le gardent.
+            if conserver {
+                brut(27, "bitrate_kbps")
+            } else {
+                format!(
+                    "bitrate_kbps = COALESCE({}, bitrate_kbps)",
+                    d.placeholder(27)
+                )
             },
         ];
         format!(
@@ -2454,6 +2466,7 @@ impl TrackRepo {
             &track.cue_start_ms,
             &track.cue_end_ms,
             &track.rating,
+            &track.bitrate_kbps,
         ];
         // Capture the new track id atomically, BEFORE the file_first_seen
         // insert below — otherwise `last_insert_rowid()` at the end returns that
@@ -2527,6 +2540,7 @@ impl TrackRepo {
             &track.comments,
             &track.isrc,
             &track.rating,
+            &track.bitrate_kbps,
             &id,
         ];
         // #4546 : figer la date d'ajout AVANT que `file_mtime` ne soit récrit.
@@ -3832,6 +3846,7 @@ impl TrackRepo {
                 &track.cue_start_ms,
                 &track.cue_end_ms,
                 &track.rating,
+                &track.bitrate_kbps,
             ];
             row_params.push(params.iter().map(|p| p.to_sql_value()).collect());
         }
@@ -3996,6 +4011,7 @@ impl TrackRepo {
                 &track.comments,
                 &track.isrc,
                 &track.rating,
+                &track.bitrate_kbps,
                 &id,
             ];
             row_params.push(params.iter().map(|p| p.to_sql_value()).collect());
@@ -4624,6 +4640,7 @@ fn row_to_track(cols: &Vec<SqlValue>) -> Track {
         cue_start_ms: cols.get(32).and_then(|v| v.as_i64()),
         cue_end_ms: cols.get(33).and_then(|v| v.as_i64()),
         rating: cols.get(34).and_then(|v| v.as_i64()).map(|n| n as i32),
+        bitrate_kbps: cols.get(35).and_then(|v| v.as_i64()).map(|n| n as i32),
     }
 }
 
@@ -6845,7 +6862,8 @@ mod tests {
     }
 
     /// Les deux moteurs partagent le même texte : l'ISRC y est la 25e valeur
-    /// liée, la note la 26e (#6123), l'`id` la 27e — pour SQLite comme pour
+    /// liée, la note la 26e (#6123), le débit la 27e (#6332), l'`id` la 28e —
+    /// pour SQLite comme pour
     /// PostgreSQL.
     #[test]
     fn le_sql_de_mise_a_jour_porte_l_isrc_sur_les_deux_moteurs_5463() {
@@ -6860,8 +6878,16 @@ mod tests {
                     "la note doit être la 26e valeur : {sql}"
                 );
                 assert!(
-                    sql.ends_with(&format!("WHERE id = {}", d.placeholder(27))),
-                    "l'id doit être la 27e valeur : {sql}"
+                    sql.contains(&format!("bitrate_kbps = {}", d.placeholder(27)))
+                        || sql.contains(&format!(
+                            "bitrate_kbps = COALESCE({}, bitrate_kbps)",
+                            d.placeholder(27)
+                        )),
+                    "le débit doit être la 27e valeur : {sql}"
+                );
+                assert!(
+                    sql.ends_with(&format!("WHERE id = {}", d.placeholder(28))),
+                    "l'id doit être la 28e valeur : {sql}"
                 );
             }
         }
@@ -6915,12 +6941,13 @@ mod tests {
             "ordre inversé : la valeur stockée serait figée pour toujours"
         );
         // Les paramètres restent à leur rang, dans les deux formes : 26
-        // depuis que `isrc` est écrit (#5463), 27 avec `rating` (#6123).
+        // depuis que `isrc` est écrit (#5463), 27 avec `rating` (#6123), 28
+        // avec `bitrate_kbps` (#6332).
         for forme in [sql::update(&SqliteDialect), sql] {
             assert_eq!(
                 forme.matches('?').count(),
                 sql::NB_PARAMS_UPDATE,
-                "27 paramètres liés, ni plus ni moins : {forme}"
+                "28 paramètres liés, ni plus ni moins : {forme}"
             );
         }
     }
@@ -7013,7 +7040,9 @@ mod tests {
             sql.contains("rating = $26,") || sql.contains("rating = $26 "),
             "{sql}"
         );
-        assert!(sql.ends_with("WHERE id = $27"), "{sql}");
+        // #6332 — et le débit tel que le fichier le dit.
+        assert!(sql.contains("bitrate_kbps = $27 "), "{sql}");
+        assert!(sql.ends_with("WHERE id = $28"), "{sql}");
     }
 }
 

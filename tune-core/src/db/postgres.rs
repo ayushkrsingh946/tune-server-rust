@@ -368,6 +368,9 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     // l'INSERT et l'UPDATE des pistes la NOMMENT. Sans effet sur une colonne
     // déjà là, TEXT de bascule comprise : c'est la 088 qui la convertit.
     "ALTER TABLE tracks ADD COLUMN IF NOT EXISTS rating BIGINT",
+    // #6332 — le débit moyen du fichier (PG 094). Ici AUSSI, même raison que
+    // `rating` : l'INSERT et l'UPDATE des pistes le NOMMENT.
+    "ALTER TABLE tracks ADD COLUMN IF NOT EXISTS bitrate_kbps BIGINT",
     // #6516 — le lien des radios avec l'annuaire (PG 090). Ici AUSSI : une
     // base de bascule ne rejoue pas la 090, et le rapprochement NOMME la
     // colonne. L'index JUSTE APRÈS la colonne.
@@ -387,6 +390,13 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     // AUSSI, même raison : une base de bascule ne rejouera jamais la 087, alors
     // que l'écriture de la file nomme la colonne.
     "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS artist_ref TEXT",
+    // #6466 — le conteneur de chaque élément de file (PG 092). Ici AUSSI :
+    // une base de bascule ne rejouera jamais la 092.
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_type TEXT",
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_id TEXT",
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_source TEXT",
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_title TEXT",
+    "ALTER TABLE queue_items ADD COLUMN IF NOT EXISTS context_cover TEXT",
     // Section « Live » — types secondaires MusicBrainz du disque (PG 081).
     // Ici AUSSI : une base de bascule ne rejouera jamais la 081, alors que la
     // fiche artiste nomme la colonne. NULL = inconnu.

@@ -3369,6 +3369,17 @@ async fn spawn_library_scan_avec_lecteur(
 
         event_bus.emit("library.scan.completed", rapport_scan);
 
+        // #6332 — le débit des pistes déjà en base, inchangées, que ce scan
+        // n'a pas relues : complété dans un fil à part, APRÈS que ce scan a
+        // rendu le droit de scanner, et interrompu par le scan suivant. Rien
+        // ici n'attend la passe (ni le rapport, ni un nouveau scan).
+        if !scan_cancel_requested() {
+            tune_core::library::debit_des_pistes::lancer_en_fond(
+                db.clone(),
+                crate::routes::system::scan::droit_de_scanner_tenu,
+            );
+        }
+
         // Launch batch artwork enrichment as a background task
         // This fetches covers from MusicBrainz Cover Art Archive for albums
         // that don't have embedded cover art.

@@ -2536,6 +2536,80 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "tags_position",
         up: "",
     },
+    // #6466 (FabienM, fil 2302 points 10, 11, 15) — le CONTENEUR d'un élément
+    // de file : l'album, la playlist ou l'artiste dont il a été enfilé, ou
+    // `track` pour un titre ajouté seul. L'historique l'écrit à l'écoute ; à
+    // défaut (ligne d'avant, NULL), c'est le contexte de SESSION de la zone,
+    // comme avant.
+    //
+    // Numérotée 128 / PG 092 à sa jonction avec `batch/bugs-rc7-20261015`
+    // (21/10) : la PR la tenait en 127 / 091, prises dans le lot par
+    // `tags_position` (#6257, entrée la première sur décision de Bertrand) ;
+    // la garde de contiguïté exige la suivante. ⚠️ Les PR de #6285 (faux
+    // hi-res) et de #6332 (débit des pistes) tenaient AUSSI 127 / 091 :
+    // elles se renumérotent à leur tour (règle de la 119).
+    //
+    // Colonnes posées dans le bloc de version et dans la passe finale, PAS
+    // dans `up` : même règle qu'à la 119. Jumelle PG : 092.
+    Migration {
+        version: 128,
+        name: "queue_items_contexte",
+        up: "",
+    },
+    // #6285 — la détection des faux hi-res : le verdict de chaque piste
+    // (`verifie`, `conforme`, `douteux` + raison, `non_concluant`), la
+    // coupure spectrale et les bits effectifs mesurés sur un extrait. La table
+    // naît VIDE : la passe de fond (désactivée par défaut) la remplit.
+    // `ON DELETE CASCADE` : une piste retirée emporte sa mesure.
+    //
+    // Numérotée 129 / PG 093 à sa jonction avec `batch/bugs-rc7-20261015`
+    // (21/10) : la PR la tenait en 127 / 091, prises dans le lot par
+    // `tags_position` (#6257) ; 128 / 092 vont à la PR de #6466 (historique
+    // par conteneurs), qui entre avant celle-ci (ordre fixé par Bertrand :
+    // #6639, #6637, #6641, #6633). La garde de contiguïté exige donc que
+    // #6637 soit fusionnée d'abord. Jumelle PG : 093.
+    Migration {
+        version: 129,
+        name: "hires_verifications",
+        up: "
+CREATE TABLE IF NOT EXISTS hires_verifications (
+    track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    verdict TEXT NOT NULL,
+    raison TEXT,
+    coupure_hz REAL,
+    bits_effectifs INTEGER,
+    sample_rate INTEGER,
+    bits_declares INTEGER,
+    mesure_le TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_hires_verifications_verdict ON hires_verifications(verdict);
+",
+    },
+    // #6332 (fil 2269, go de Bertrand du 20/10) — le DÉBIT MOYEN du fichier
+    // en kbit/s, que lofty calcule au scan (`audio_bitrate`) et que Tune
+    // jetait après le seul contrôle de durée des MP3 : `tracks.bitrate_kbps`.
+    // « Lecture en cours » l'affiche (`NowPlaying.bitrate_kbps`).
+    //
+    // NULL pour les lignes existantes : le rescan ordinaire les COMPLÈTE sans
+    // relecture complète (`library::debit_des_pistes`), par une lecture des
+    // seules propriétés audio des fichiers inchangés encore sans débit.
+    //
+    // Numérotée 130 / PG 094 à sa jonction avec `batch/bugs-rc7-20261015`
+    // (21/10) : la PR la tenait en 127 / 091, prises dans le lot par
+    // `tags_position` (#6257) ; 128 / 092 vont à la PR de #6466 (historique
+    // par conteneurs) et 129 / 093 à celle de #6285 (faux hi-res), qui
+    // entrent avant celle-ci (ordre fixé par Bertrand : #6639, #6637, #6641,
+    // #6633). La garde de contiguïté exige donc qu'elles soient fusionnées
+    // d'abord.
+    //
+    // Colonne posée par `add_column_if_missing` dans le bloc de version et
+    // dans la passe finale, PAS dans `up` : même règle qu'à la 124 — l'INSERT
+    // et l'UPDATE des pistes la NOMMENT. Jumelle PG : 094.
+    Migration {
+        version: 130,
+        name: "tracks_bitrate_kbps",
+        up: "",
+    },
     // #6474, point 2 — d'où vient le nom de tri d'un artiste :
     // `artists.sort_name_source`, `'musicbrainz'` quand il a été tiré du
     // `sort-name` MusicBrainz, NULL sinon (balise ARTISTSORT /
@@ -2567,6 +2641,23 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
 fn tags_position(db: &SqliteDb) -> Result<(), String> {
     add_column_if_missing(db, "tags", "position", "INTEGER NOT NULL DEFAULT 0");
     Ok(())
+}
+
+/// Les colonnes de la migration 128 (#6466) : le conteneur d'un élément de
+/// file, dans le vocabulaire de `listen_history.context_*`.
+pub(crate) const COLONNES_CONTEXTE_DE_FILE: [&str; 5] = [
+    "context_type",
+    "context_id",
+    "context_source",
+    "context_title",
+    "context_cover",
+];
+
+/// Pose les colonnes de la migration 128 (#6466). Idempotent.
+fn contexte_des_elements_de_file(db: &SqliteDb) {
+    for colonne in COLONNES_CONTEXTE_DE_FILE {
+        add_column_if_missing(db, "queue_items", colonne, "TEXT");
+    }
 }
 
 /// SQL de la migration 125 (#6179) — voir son entree dans `MIGRATIONS`.
@@ -3878,10 +3969,20 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
             // défaut : NULL = INCONNU pour toute ligne existante.
             add_column_if_missing(db, "queue_items", "artist_ref", "TEXT");
         }
+        if migration.version == 128 {
+            // Le conteneur de chaque élément de file (#6466). Sans défaut :
+            // NULL = l'élément suit le contexte de session de la zone.
+            contexte_des_elements_de_file(db);
+        }
         if migration.version == 124 {
             // La note de la piste lue dans ses balises (#6123). Sans défaut :
             // NULL = le fichier n'en porte pas, ou pas encore relu.
             add_column_if_missing(db, "tracks", "rating", "INTEGER");
+        }
+        if migration.version == 130 {
+            // Le débit moyen du fichier (#6332). Sans défaut : NULL = pas
+            // encore lu (le rescan le complète) ou inconnu.
+            add_column_if_missing(db, "tracks", "bitrate_kbps", "INTEGER");
         }
         if migration.version == 109 {
             // #4889 — titres de service dans les playlists Tune. Erreur
@@ -4493,6 +4594,13 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     // et l'UPDATE des pistes la NOMMENT, et une base arrivée sans elle ne
     // pourrait plus rien scanner. PG : migration 088.
     add_column_if_missing(db, "tracks", "rating", "INTEGER");
+    // Le conteneur des éléments de file (migration 128, #6466) — posé ICI
+    // aussi : l'écriture de la file et l'historique le NOMMENT. PG : 092.
+    contexte_des_elements_de_file(db);
+    // Le débit moyen du fichier (migration 130, #6332) — posé ICI aussi, même
+    // raison que la note : l'INSERT et l'UPDATE des pistes le NOMMENT.
+    // PG : migration 094.
+    add_column_if_missing(db, "tracks", "bitrate_kbps", "INTEGER");
     // Le lien des radios avec l'annuaire (migration 126, #6516) — posé ICI
     // aussi : le rapprochement le NOMME. PG : migration 090.
     lien_des_radios_avec_l_annuaire(db);
@@ -5379,6 +5487,27 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         91,
         "tags_position",
         include_str!("../../migrations/postgres/091_tags_position.sql"),
+    ),
+    // Jumelle de la SQLite 128 (#6466) : le conteneur de chaque élément de
+    // file (`queue_items.context_*`), NULL pour l'existant.
+    (
+        92,
+        "queue_items_contexte",
+        include_str!("../../migrations/postgres/092_queue_items_contexte.sql"),
+    ),
+    // Jumelle de la SQLite 129 (#6285) : `hires_verifications`, le verdict
+    // des faux hi-res par piste. Naît vide.
+    (
+        93,
+        "hires_verifications",
+        include_str!("../../migrations/postgres/093_hires_verifications.sql"),
+    ),
+    // Jumelle de la SQLite 130 (#6332) : `tracks.bitrate_kbps`, le débit moyen
+    // du fichier, NULL pour l'existant (complété au rescan).
+    (
+        94,
+        "tracks_bitrate_kbps",
+        include_str!("../../migrations/postgres/094_tracks_bitrate_kbps.sql"),
     ),
     // Jumelle de la SQLite 131 (#6474) : `artists.sort_name_source`, la
     // provenance du nom de tri (`'musicbrainz'` ou NULL).
@@ -7508,6 +7637,107 @@ mod tests {
         );
     }
 
+    /// #6332 — la migration 130 pose `tracks.bitrate_kbps` (le débit moyen du
+    /// fichier), sur une base NEUVE comme sur une base MONTÉE en 129 avec une
+    /// piste ; NULLABLE, l'existant reste NULL (le rescan le complète) ; la
+    /// jumelle PG 091 existe, est enregistrée, marque le bon numéro, convertit
+    /// une colonne TEXT de bascule, et le schéma de bascule comme
+    /// `ENSURE_COLUMNS` la portent.
+    #[test]
+    fn la_migration_130_pose_le_debit_de_la_piste_6332() {
+        let colonne = |db: &SqliteDb| -> Option<(String, bool)> {
+            let conn = db.connection().lock().unwrap();
+            let mut stmt = conn.prepare("PRAGMA table_info(tracks)").unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                })
+                .unwrap();
+            rows.map(|r| r.unwrap())
+                .find(|(nom, _, _)| nom == "bitrate_kbps")
+                .map(|(_, ty, non_nul)| (ty, non_nul != 0))
+        };
+        let attendu = Some(("INTEGER".to_string(), false));
+
+        let neuve = SqliteDb::open_in_memory().unwrap();
+        neuve.init_schema().unwrap();
+        run_migrations(&neuve).unwrap();
+        assert_eq!(
+            colonne(&neuve),
+            attendu,
+            "base neuve : `tracks.bitrate_kbps` doit exister, INTEGER et nullable"
+        );
+
+        let montee = SqliteDb::open_in_memory().unwrap();
+        montee.init_schema().unwrap();
+        run_migrations(&montee).unwrap();
+        montee
+            .execute_batch(
+                "ALTER TABLE tracks DROP COLUMN bitrate_kbps;
+                 DELETE FROM _migrations WHERE version >= 130;
+                 INSERT INTO tracks (title, file_path) VALUES ('Piste', '/m/a.mp3');",
+            )
+            .unwrap();
+        assert_eq!(colonne(&montee), None, "préparation : colonne retirée");
+        assert_eq!(current_version(&montee).unwrap(), 129);
+        run_migrations(&montee).unwrap();
+        assert_eq!(current_version(&montee).unwrap(), latest_version());
+        assert!(latest_version() >= 130);
+        assert_eq!(
+            colonne(&montee),
+            attendu,
+            "base montée : `tracks.bitrate_kbps` doit exister, INTEGER et nullable"
+        );
+        {
+            let conn = montee.connection().lock().unwrap();
+            let (lignes, avec): (i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*), COUNT(bitrate_kbps) FROM tracks",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (lignes, avec),
+                (1, 0),
+                "la piste survit, sans débit inventé"
+            );
+        }
+
+        let racine = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fichier = "094_tracks_bitrate_kbps.sql";
+        let sql_pg =
+            std::fs::read_to_string(racine.join("migrations/postgres").join(fichier)).unwrap();
+        assert!(
+            sql_pg.contains("VALUES (94, 'tracks_bitrate_kbps')"),
+            "le script PG marque un autre numéro dans schema_version"
+        );
+        assert!(
+            sql_pg.contains("ADD COLUMN IF NOT EXISTS bitrate_kbps BIGINT")
+                && sql_pg.contains("TYPE BIGINT USING"),
+            "la jumelle PG ne pose pas `tracks.bitrate_kbps` en BIGINT, ou ne convertit pas \
+             la colonne TEXT d'une bascule"
+        );
+        assert!(
+            include_str!("migrations.rs").contains(fichier),
+            "{fichier} n'est pas enregistrée"
+        );
+        assert!(
+            include_str!("pg_migrate.rs")
+                .contains("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS bitrate_kbps TEXT"),
+            "pg_migrate.rs ne pose pas `tracks.bitrate_kbps`"
+        );
+        assert!(
+            include_str!("postgres.rs")
+                .contains("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS bitrate_kbps BIGINT"),
+            "ENSURE_COLUMNS ne pose pas `tracks.bitrate_kbps`"
+        );
+    }
+
     /// #6123 — la migration 124 pose `tracks.rating` (la note de la piste lue
     /// dans ses balises), sur une base NEUVE comme sur une base MONTÉE en 123
     /// avec une piste ; la colonne est NULLABLE et l'existant reste NULL ; la
@@ -8696,6 +8926,12 @@ mod tests {
         // Pose le lien des radios avec l'annuaire, que le rapprochement NOMME.
         // 91 : `tags_position` (#6257), jumelle de la SQLite 127. Pose
         // `tags.position`, que l'INSERT des etiquettes NOMME.
+        // 92 : `queue_items_contexte` (#6466), jumelle de la SQLite 128. Pose
+        // le conteneur de chaque élément de file, que l'historique NOMME.
+        // 93 : `hires_verifications` (#6285), jumelle de la SQLite 129. Crée la
+        // table des verdicts des faux hi-res, que la passe de fond NOMME.
+        // 94 : `tracks_bitrate_kbps` (#6332), jumelle de la SQLite 130. Pose
+        // `tracks.bitrate_kbps`, que l'INSERT et l'UPDATE des pistes NOMMENT.
         // 95 : `artists_sort_name_source` (#6474), jumelle de la SQLite 131.
         // Pose la provenance du nom de tri, que le scan et l'enrichissement
         // NOMMENT. Les 92 à 94 sont celles de #6637, #6641 et #6633, à

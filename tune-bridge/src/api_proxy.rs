@@ -51,10 +51,13 @@ pub async fn proxy_api(
             .then(|| jeton_de_requete(uri.query()))
             .flatten()
     });
-    let token = match token {
-        Some(t) if state.server_for_token(&t).as_deref() == Some(&server_id) => t,
-        _ => return StatusCode::UNAUTHORIZED.into_response(),
+    // Jeton de session d'ecoute a distance (#6603), ou ancien jeton du pont
+    // pendant la coexistence. Voir `RelayState::autoriser`.
+    let acces = match state.autoriser(token.as_deref(), &server_id) {
+        Ok(a) => a,
+        Err(rejet) => return rejet.en_reponse(),
     };
+    let token = token.unwrap_or_default();
     // Le jeton ne doit JAMAIS atteindre le serveur (journaux d'acces,
     // historiques) : on retire les parametres qui le portent, et eux seuls.
     let requete = requete_sans_jeton(uri.query(), &token);
@@ -62,7 +65,10 @@ pub async fn proxy_api(
     let request_id = uuid::Uuid::new_v4().to_string();
 
     // Build relay headers (forward relevant ones)
-    let relay_headers = entetes_a_relayer(&headers);
+    let mut relay_headers = entetes_a_relayer(&headers);
+    if let crate::sessions::Acces::Session(s) = &acces {
+        ajouter_appareil_distant(&mut relay_headers, s);
+    }
 
     let body_str = if body.is_empty() {
         None
@@ -109,16 +115,19 @@ pub async fn proxy_api(
 
     // Wait for response with timeout
     match tokio::time::timeout(Duration::from_secs(30), rx).await {
-        Ok(Ok(resp)) => crate::stream_proxy::reponse_relayee_comptee(
-            resp,
-            Some(crate::stream_proxy::Comptage {
-                trafic: state.trafic.clone(),
-                serveur: compteurs,
-                categorie: Categorie::Api,
-                cle: path,
-                range: None,
-                debut,
-            }),
+        Ok(Ok(resp)) => crate::sessions::habiller(
+            crate::stream_proxy::reponse_relayee_comptee(
+                resp,
+                Some(crate::stream_proxy::Comptage {
+                    trafic: state.trafic.clone(),
+                    serveur: compteurs,
+                    categorie: Categorie::Api,
+                    cle: path,
+                    range: None,
+                    debut,
+                }),
+            ),
+            &acces,
         ),
         Ok(Err(_)) => {
             state.trafic.erreur(Erreur::CanalRompu);
@@ -185,6 +194,45 @@ pub fn entetes_a_relayer(headers: &HeaderMap) -> serde_json::Map<String, serde_j
         relayes.insert(key.to_string(), serde_json::Value::String(v.to_string()));
     }
     relayes
+}
+
+/// En-tetes que le RELAIS pose vers le serveur pour une session ouverte par
+/// laissez-passer (#6603) : l'appareil connecte a distance, pour que le
+/// serveur l'affiche. Information, pas controle. Hors de
+/// [`ENTETES_RELAYES`] : un navigateur ne peut pas les poser lui-meme.
+pub const ENTETE_APPAREIL_ID: &str = "x-tune-appareil-distant";
+pub const ENTETE_APPAREIL_NOM: &str = "x-tune-appareil-distant-nom";
+
+/// Pose les en-tetes de l'appareil distant. Le nom, choisi par
+/// l'utilisateur, est encode en pourcent : un en-tete n'est pas de l'UTF-8.
+pub fn ajouter_appareil_distant(
+    relayes: &mut serde_json::Map<String, serde_json::Value>,
+    session: &crate::sessions::Session,
+) {
+    relayes.insert(
+        ENTETE_APPAREIL_ID.to_string(),
+        serde_json::Value::String(session.did.clone()),
+    );
+    if let Some(nom) = session.nom_appareil() {
+        relayes.insert(
+            ENTETE_APPAREIL_NOM.to_string(),
+            serde_json::Value::String(encoder_pourcent(&nom)),
+        );
+    }
+}
+
+/// Encode en pourcent tout ce qui n'est pas alphanumerique ASCII, `-`, `_`,
+/// `.` ou `~`.
+pub fn encoder_pourcent(texte: &str) -> String {
+    let mut sortie = String::with_capacity(texte.len());
+    for o in texte.bytes() {
+        if o.is_ascii_alphanumeric() || matches!(o, b'-' | b'_' | b'.' | b'~') {
+            sortie.push(o as char);
+        } else {
+            sortie.push_str(&format!("%{o:02X}"));
+        }
+    }
+    sortie
 }
 
 /// Noms des parametres d'URL qui peuvent porter le jeton de pont.

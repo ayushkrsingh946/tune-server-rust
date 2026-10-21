@@ -701,12 +701,40 @@ mod tests {
     }
 }
 
-/// Nanoseconds since UNIX epoch (controller clock domain for OAAT PTS).
+/// Horloge OAAT du contrôleur, en nanosecondes depuis l'epoch UNIX.
+///
+/// Un simple appel à `oaat_core::time::now_ns()` (oaat #34) : une horloge
+/// monotone, ancrée une seule fois sur l'horloge murale, partagée par tout le
+/// processus. Les PTS, les heures de départ (`stream_start_ns`) et les
+/// estampilles `t2`/`t3` du répondeur d'horloge de Tune sont ainsi dans le
+/// domaine où `clock_sync_once` et `clock_responder` d'oaat mesurent l'écart.
+/// Avec `SystemTime`, un saut de l'horloge murale (NTP, réglage manuel, sortie
+/// de veille) décalait d'autant l'heure de départ envoyée à l'endpoint.
 pub(crate) fn now_ns() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64
+    oaat_core::time::now_ns()
+}
+
+#[cfg(test)]
+mod horloge_unique_oaat_tests {
+    use super::now_ns;
+
+    /// Témoin : l'horloge de Tune EST celle d'oaat. Chaque lecture de
+    /// `now_ns()` tombe entre deux lectures de `oaat_core::time::now_ns()`.
+    /// Une horloge à part (`SystemTime`, ou une epoch propre à Tune) en
+    /// sortirait dès que les deux domaines divergent.
+    #[test]
+    fn l_horloge_de_tune_est_l_horloge_monotone_d_oaat() {
+        for _ in 0..10_000 {
+            let avant = oaat_core::time::now_ns();
+            let tune = now_ns();
+            let apres = oaat_core::time::now_ns();
+            assert!(
+                avant <= tune && tune <= apres,
+                "helpers::now_ns() = {tune} hors de [{avant}, {apres}] : \
+                 Tune et oaat datent dans deux domaines d'horloge"
+            );
+        }
+    }
 }
 
 /// Base de temps du cadencement OAAT.

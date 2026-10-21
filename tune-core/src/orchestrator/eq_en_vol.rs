@@ -44,8 +44,9 @@ pub(crate) struct EqEnVol {
     /// l'égaliseur de départ : la relève ne la recalcule pas.
     pub(crate) compensation_cuite: bool,
     /// #6211 — le porteur sert un flux SANS FIN (radio) : aucune piste
-    /// suivante ne relaiera le préampli gardé d'un égaliseur coupé, qui
-    /// s'éteint donc en fondu (`EqProcessor::eteindre_le_preampli_garde`).
+    /// suivante ne relaiera le préampli gardé d'un égaliseur coupé : sa part
+    /// supérieure à 1 s'éteint dès la coupure, jamais de hausse (décision du
+    /// 21/10, `EqProcessor::eteindre_le_preampli_garde`).
     pub(crate) flux_sans_fin: bool,
 }
 
@@ -267,12 +268,14 @@ mod tests {
         );
     }
 
-    /// #6211 (décision de Bertrand du 19/10) — sur une RADIO (flux sans
-    /// fin), couper l'égaliseur en vol ne garde pas la réserve à vie : le
-    /// préampli s'éteint en fondu, et le RMS revient à celui d'avant
-    /// l'égaliseur, sans marche ni relance de la station (fil 2242).
+    /// #6211, décision de Bertrand du 21/10 (« jamais de hausse » vaut
+    /// partout, radio comprise ; elle remplace celle du 19/10 sur ce point) —
+    /// sur une RADIO (flux sans fin), couper l'égaliseur en vol garde le
+    /// préampli négatif : le RMS reste celui du préampli, il ne remonte
+    /// jamais vers le niveau d'avant l'égaliseur, sans marche ni relance de
+    /// la station.
     #[test]
-    fn sur_une_radio_couper_l_egaliseur_rend_le_niveau_d_avant_6211() {
+    fn sur_une_radio_couper_l_egaliseur_ne_fait_jamais_monter_le_niveau_6211() {
         let poste = EqEnVol::pour_la_radio();
         let mut eq = None;
         let bloc = 1_024;
@@ -314,16 +317,29 @@ mod tests {
             "prémisse : l'égaliseur change le niveau du sinus"
         );
         poste.poser(None);
-        // 3 s de rampe à 44,1 kHz = ~130 blocs de 1 024 trames ; marge.
-        let _ = passer(&mut eq, 150);
+        // 3 s de rampe à 44,1 kHz = ~130 blocs de 1 024 trames ; marge. Le
+        // fondu de la courbe fini (300 ms ≈ 13 blocs), aucun bloc ne dépasse
+        // le niveau du préampli.
+        let _ = passer(&mut eq, 16);
+        for n in 0..150 {
+            let bloc_db = 20.0 * (rms(&passer(&mut eq, 1)) / avant).log10();
+            assert!(
+                bloc_db < preampli + 0.1,
+                "radio, égaliseur coupé : le niveau monte à {bloc_db:+.2} dB au bloc {n} \
+                 (préampli {preampli:+.2} dB) — jamais de hausse (décision du 21/10)"
+            );
+        }
         let apres = rms(&passer(&mut eq, 8));
         let ecart_db = 20.0 * (apres / avant).log10();
         assert!(
-            ecart_db.abs() < 0.5,
-            "radio, égaliseur coupé, fondu fini : {ecart_db:+.2} dB du niveau d'avant \
-             l'égaliseur (préampli {preampli:+.2} dB)"
+            (ecart_db - preampli).abs() < 0.5,
+            "radio, égaliseur coupé : {ecart_db:+.2} dB, le préampli \
+             {preampli:+.2} dB doit rester gardé"
         );
-        assert!(eq.is_none(), "préampli éteint : plus rien dans la chaîne");
+        assert!(
+            eq.as_ref().is_some_and(|e| e.est_neutre()),
+            "le préampli gardé reste porté par un égaliseur neutre"
+        );
         let saut = servi
             .windows(2)
             .map(|w| (w[1] - w[0]).abs())

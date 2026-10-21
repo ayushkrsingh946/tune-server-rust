@@ -13,6 +13,11 @@ pub struct RelayRegister {
     pub server_name: String,
     pub version: String,
     pub bridge_token: String,
+    /// Cle publique Ed25519 du serveur, base64url (#6603). Le relais lui
+    /// fait alors signer un defi (`relay.challenge`) avant de l'enregistrer.
+    /// Absente chez un serveur anterieur.
+    #[serde(default)]
+    pub server_pk: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +66,13 @@ pub struct RelayRegistered {
     /// serveur rc4 a rc6 ignore le champ ; un serveur recent n'envoie ses
     /// morceaux en binaire que s'il y lit [`CAPACITE_MORCEAUX_BINAIRES`].
     pub capabilities: &'static [&'static str],
+    /// L'ancien lien d'acces est-il encore accepte par ce relais (#6603) ?
+    /// Le serveur l'affiche dans ses Reglages, et cesse de le proposer quand
+    /// il ne l'est plus.
+    pub jeton_herite: bool,
+    /// Ce relais ouvre des sessions par laissez-passer : il tient un jeu de
+    /// cles signe par la racine.
+    pub laissez_passer: bool,
 }
 
 /// Le pont lit les morceaux de flux en trames WebSocket binaires (#6564).

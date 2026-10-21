@@ -60,8 +60,11 @@ impl PlaybackOrchestrator {
         // tel quel sur l'appareil cible.
         let flux = np.source_id.as_deref().filter(|s| !s.is_empty());
         let direct = matches!(np.source.as_str(), "radio" | "podcast") && flux.is_some();
+        // #6466 (point 15) — la piste transférée a déjà son écoute, écrite
+        // avec la zone d'origine : la relancer sur la cible ne la réécrit pas.
+        // Les titres suivants, eux, s'écriront avec la zone cible.
         let lancement = if direct {
-            self.play(super::PlayRequest {
+            self.play_transfere_sans_historique(super::PlayRequest {
                 zone_id,
                 output_device_id: Some(did.to_string()),
                 source: Some(np.source.clone()),
@@ -76,7 +79,7 @@ impl PlaybackOrchestrator {
             .await
             .map(|_| ())
         } else {
-            self.play_from_queue(zone_id, queue_position)
+            self.play_from_queue_sans_historique(zone_id, queue_position)
                 .await
                 .map(|_| ())
         };

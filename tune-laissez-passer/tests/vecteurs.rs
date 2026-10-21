@@ -129,6 +129,16 @@ fn le_defi_du_serveur_se_verifie_et_ne_vaut_que_pour_son_server_id() {
         ),
         Err(Refus::Defi)
     );
+    let preuve = v["inscription"]["preuve"].as_str().unwrap();
+    assert_eq!(
+        tune_laissez_passer::verifier_inscription_serveur(cle, sid, preuve),
+        Ok(())
+    );
+    // La preuve d'inscription n'est pas une signature de défi, et inversement.
+    assert_eq!(
+        verifier_defi_serveur(cle, sid, defi, preuve),
+        Err(Refus::Defi)
+    );
 }
 
 /// Les clés de test publiées sont bien celles que la fabrique utilise : un

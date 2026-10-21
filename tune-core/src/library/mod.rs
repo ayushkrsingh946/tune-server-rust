@@ -6,6 +6,8 @@ pub mod artwork_cache;
 pub mod artwork_proxy;
 pub mod audit;
 pub mod cover_fetcher;
+/// #6332 — compléter au rescan le débit des pistes déjà en base.
+pub mod debit_des_pistes;
 pub mod duplicate_detector;
 /// Les exemplaires d'une piste dans plusieurs répertoires (#4907).
 pub mod exemplaires;
@@ -13,6 +15,7 @@ pub mod export;
 pub mod folder_playlists;
 pub mod full_text_search;
 pub mod genre_tree;
+pub mod genres_equivalents;
 /// Regrouper les exemplaires d'un même enregistrement entre sources, et
 /// choisir celui qu'on joue (#2264).
 pub mod groupes_versions;

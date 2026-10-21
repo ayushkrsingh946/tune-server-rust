@@ -67,6 +67,10 @@ pub mod encoder;
 pub mod eq;
 pub mod eq_presets;
 pub mod faststart;
+/// Faux hi-res : bits effectifs et coupure spectrale (#6285).
+pub mod faux_hires;
+/// La passe de fond des faux hi-res (#6285).
+pub mod faux_hires_passe;
 /// Mémoire du volume d'avant l'armement du mode bit-perfect (#2395).
 pub mod fixed_volume;
 pub mod flac_vendeur;
@@ -137,6 +141,8 @@ pub mod tempo;
 #[cfg(feature = "audio-embedding")]
 pub mod text_embedding;
 pub mod thermal;
+/// #6541 — limites de sécurité et de confort du volume d'une zone.
+pub mod volume_limites;
 /// Conversion volume linéaire ↔ décibels — le seul endroit (#1274).
 pub mod volume_scale;
 pub mod wav;

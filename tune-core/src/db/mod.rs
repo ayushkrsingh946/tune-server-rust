@@ -11,6 +11,8 @@ pub mod backend;
 pub mod champs_tenus;
 pub mod coffrets_auto;
 pub mod collection_folder_repo;
+/// Le conteneur de chaque élément de file (#6466).
+pub mod contexte_de_file;
 /// Un disque par dossier pour un album sans DISCNUMBER réparti en dossiers frères.
 pub mod disques_par_dossier;
 /// Les dossiers « Collections » suivent leurs albums (#5527, #5528).

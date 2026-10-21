@@ -127,6 +127,7 @@ pub(super) async fn faux_endpoint_avec(dsd: bool) -> u16 {
                                 audio_port,
                                 clock_port,
                                 buffer_size_ms: 100,
+                                features: vec![],
                             })),
                             Message::FormatPropose(fp) => {
                                 Some(Message::FormatAccept(FormatAccept {

@@ -243,6 +243,34 @@ pub(super) struct Habillage {
 
 impl PlaybackOrchestrator {
     pub async fn play(&self, req: PlayRequest) -> Result<PlayResult, String> {
+        // Public entry point: this is a *new* logical play, so it is recorded
+        // in the listen history.
+        self.play_par_l_entree(req, true).await
+    }
+
+    /// #6466 (fil 2302 point 15) — le transfert de zone : une lecture
+    /// NOUVELLE sur la cible, qui passe par TOUTES les étapes d'entrée de
+    /// [`play`](Self::play) (plafond de zones, dédoublonnage du re-tap), mais
+    /// qui n'écrit pas l'historique : la piste transférée a déjà son écoute,
+    /// écrite avec la zone d'origine.
+    ///
+    /// Ce n'est PAS [`play_without_history`](Self::play_without_history), qui
+    /// saute ces étapes exprès : elle recrée le flux d'une piste DÉJÀ en cours
+    /// (seek, relance radio, reconnexion) et n'active aucune zone.
+    pub async fn play_transfere_sans_historique(
+        &self,
+        req: PlayRequest,
+    ) -> Result<PlayResult, String> {
+        self.play_par_l_entree(req, false).await
+    }
+
+    /// Les étapes d'entrée de `play()`, puis `play_inner`. `historique` ne
+    /// commande QUE l'écriture de l'écoute.
+    async fn play_par_l_entree(
+        &self,
+        req: PlayRequest,
+        historique: bool,
+    ) -> Result<PlayResult, String> {
         // Free-tier zone cap, enforced at *activation* (a zone's first play).
         // This is the single choke point for every play entry point (direct
         // play, resume, streaming, transfer, alarms, AI) — gating here, rather
@@ -297,9 +325,7 @@ impl PlaybackOrchestrator {
             }
         }
 
-        // Public entry point: this is a *new* logical play, so it is recorded
-        // in the listen history.
-        self.play_inner(req, true).await
+        self.play_inner(req, historique).await
     }
 
     /// Free-tier gate: block *activating* a brand-new zone once the free active
@@ -1284,9 +1310,19 @@ impl PlaybackOrchestrator {
             // qui manquait au 128 kbit/s de Bandcamp : annoncé sur l'écran de
             // découverte, il disparaissait dès que la piste partait en zone —
             // le chemin du signal ne montrait plus qu'un « MP3 » qu'aucun
-            // auditeur ne peut distinguer d'un 320 (#2074). Une piste locale
-            // n'en porte pas : sa résolution réelle est lue au scan.
-            bitrate_kbps: resolved.bitrate_kbps,
+            // auditeur ne peut distinguer d'un 320 (#2074).
+            //
+            // #6332 — une piste LOCALE porte désormais le sien, lu au scan
+            // (`tracks.bitrate_kbps`) : c'est le débit du FICHIER, pas celui du
+            // flux servi (qui peut être un WAV transcodé), comme la résolution
+            // ci-dessus.
+            bitrate_kbps: resolved.bitrate_kbps.or_else(|| {
+                track_meta
+                    .as_ref()
+                    .and_then(|t| t.bitrate_kbps)
+                    .and_then(|b| u32::try_from(b).ok())
+                    .filter(|b| *b > 0)
+            }),
             // #5336 : resolved.channels décrit la SORTIE (potentiellement
             // repliée). Seule la ligne source fait autorité ici. Les radios
             // décodées sont complétées à la lecture de leur observation.
@@ -1784,13 +1820,9 @@ impl PlaybackOrchestrator {
             // position reellement atteinte, avance automatique comprise. En
             // aleatoire il reste vide — on re-tirera (#2441).
             let rang = rang_a_retenir(etat.shuffle, etat.queue_position);
-            let context = (
-                etat.session_context_type,
-                etat.session_context_id,
-                etat.session_context_source,
-                etat.session_context_title,
-                etat.session_context_cover,
-            );
+            // #6466 — le conteneur de l'ÉLÉMENT de file joué d'abord, celui de
+            // la session à défaut.
+            let context = self.contexte_de_l_ecoute(&etat, req.track_id, req.source_id.as_deref());
             self.record_listen(
                 &resolved.title,
                 resolved.artist.as_deref(),

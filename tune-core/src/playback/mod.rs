@@ -212,11 +212,13 @@ impl NowPlaying {
             year: track.year,
             album_id: track.album_id,
             artist_id: track.artist_id,
-            // Une piste de la bibliothèque n'annonce pas de débit : sa
-            // résolution réelle est lue au scan et déjà portée ci-dessus. Le
-            // champ existe pour les flux distants qui, eux, nomment leur
-            // encodage (#2074).
-            bitrate_kbps: None,
+            // #6332 — le débit moyen du FICHIER, lu au scan et stocké dans
+            // `tracks.bitrate_kbps` (il était lu puis jeté). `None` tant que la
+            // ligne ne le porte pas encore : le rescan suivant le complète.
+            bitrate_kbps: track
+                .bitrate_kbps
+                .and_then(|b| u32::try_from(b).ok())
+                .filter(|b| *b > 0),
             channels: u16::try_from(track.channels).ok().filter(|n| *n > 0),
             version: None,
         }
