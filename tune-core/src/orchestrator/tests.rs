@@ -11,6 +11,9 @@ use std::sync::Arc;
 #[path = "radio_profondeur_tests.rs"]
 mod radio_profondeur_tests;
 
+#[path = "journal_sans_url_6468_tests.rs"]
+mod journal_sans_url_6468_tests;
+
 #[tokio::test]
 async fn local_stream_watch_reports_only_an_unconsumed_live_session_once() {
     use crate::http::streamer::{AudioStreamer, StreamInfo};

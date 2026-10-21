@@ -1046,8 +1046,8 @@ impl PlaybackOrchestrator {
         });
 
         info!(
+            hote = %hote_pour_le_journal(audio_url),
             source = "radio",
-            url = %audio_url,
             "radio_decode_to_wav_for_local_output"
         );
 
@@ -1203,7 +1203,11 @@ impl PlaybackOrchestrator {
         };
         let (session_id, tx, data_ready, session) =
             self.streamer.create_radio_session(wav_info, 256).await;
-        info!(url = %audio_url, "bandcamp_decode_to_wav_for_oaat_output");
+        info!(
+            hote = %hote_pour_le_journal(audio_url),
+            source = "bandcamp",
+            "bandcamp_decode_to_wav_for_oaat_output"
+        );
         let bc_url = audio_url.to_string();
         let bc_strict = crate::audio::bitperfect_strict::zone_enabled(&self.db, req.zone_id);
         let bc_levels_tx = if let Some(ref bus) = self.event_bus {
@@ -1614,13 +1618,12 @@ impl PlaybackOrchestrator {
         let stream_url = self
             .streamer
             .get_stream_url(&session_id, &server_ip, conteneur);
-        // L'hôte seul : le chemin ou la requête d'un flux privé ou payant porte
-        // souvent un jeton, qui n'a rien à faire au journal (#6468).
-        let hote = reqwest::Url::parse(audio_url)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_string))
-            .unwrap_or_default();
-        info!(hote = %hote, conteneur, stream_id = %session_id, "direct_proxy_session");
+        info!(
+            hote = %hote_pour_le_journal(audio_url),
+            conteneur,
+            stream_id = %session_id,
+            "direct_proxy_session"
+        );
         (stream_url, session_id)
     }
 
@@ -1640,7 +1643,12 @@ impl PlaybackOrchestrator {
                 req.bit_depth,
             )
             .await;
-        info!(url = %audio_url, "direct_proxy_for_browser_output");
+        info!(
+            hote = %hote_pour_le_journal(audio_url),
+            source = req.source.as_deref().unwrap_or("podcast"),
+            stream_id = %session_id,
+            "direct_proxy_for_browser_output"
+        );
         (
             stream_url,
             Some(session_id),
@@ -1680,7 +1688,8 @@ impl PlaybackOrchestrator {
             warn!(
                 zone_id,
                 age_secs,
-                url = %audio_url,
+                hote = %hote_pour_le_journal(audio_url),
+                source = "bandcamp",
                 "bandcamp_signature_perimee_sans_reference"
             );
             return None;
@@ -1768,7 +1777,8 @@ impl PlaybackOrchestrator {
             .streamer
             .get_stream_url(&session_id, &server_ip, bc_codec);
         info!(
-            url = %audio_url,
+            hote = %hote_pour_le_journal(audio_url),
+            source = "bandcamp",
             browser = is_browser_output,
             codec = bc_codec,
             resignable,
@@ -1869,7 +1879,11 @@ impl PlaybackOrchestrator {
             let (session_id, tx, data_ready, session) =
                 self.streamer.create_radio_session(wav_info, 256).await;
             retenir_le_codec_de_la_station(&self.db, &session, req.source_id.as_deref());
-            info!(url = %audio_url, "radio_proxy_transcode_for_dlna");
+            info!(
+                hote = %hote_pour_le_journal(audio_url),
+                source = "radio",
+                "radio_proxy_transcode_for_dlna"
+            );
             // #4407 — le poste de relève : un changement d'égaliseur est posé
             // dans CE flux au paquet suivant, sans nouvelle session UPnP.
             let en_vol = super::eq_en_vol::EqEnVol::pour_la_radio();
@@ -2315,6 +2329,19 @@ fn track_id_dans_une_url_audio_de_tune(url: &str) -> Option<i64> {
         .parse::<i64>()
         .ok()
         .filter(|id| *id > 0)
+}
+
+/// L'hôte seul d'une URL de flux, pour le journal (#6468).
+///
+/// L'URL d'un flux de service (Bandcamp, podcast privé, radio, onglet) porte
+/// souvent dans son chemin ou sa requête une signature ou un jeton d'écoute :
+/// le journal, que les testeurs joignent au forum, n'en reçoit que l'hôte.
+/// Une URL illisible rend `?`, jamais l'URL brute.
+pub(crate) fn hote_pour_le_journal(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "?".to_string())
 }
 
 /// Cet hôte d'URL est-il une adresse de CETTE machine ?
