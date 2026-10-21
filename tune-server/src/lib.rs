@@ -40,6 +40,8 @@ pub mod fils_de_travail;
 /// Détecteur de gel de l'exécuteur et relevé automatique (#4924).
 pub mod gel_executeur;
 mod instance_existante;
+/// #6253 — `--sans-console` : relance sans fenêtre de terminal (Windows).
+pub(crate) mod lancement_sans_console;
 pub use tune_http_types::error;
 pub mod i18n;
 pub mod journal;
