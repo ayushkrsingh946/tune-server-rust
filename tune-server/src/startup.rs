@@ -123,10 +123,111 @@ fn version_du_temoin_asio(sentinel: &Path) -> Option<String> {
 /// Chemin du témoin : à côté du journal, donc `%LOCALAPPDATA%\TuneServer` sous
 /// Windows — le dossier que l'on demande déjà aux testeurs d'ouvrir.
 fn asio_warm_sentinel_path() -> PathBuf {
+    dans_le_dossier_du_journal(ASIO_WARM_SENTINEL)
+}
+
+fn dans_le_dossier_du_journal(nom: &str) -> PathBuf {
     crate::config::default_log_file_path()
         .parent()
-        .map(|dir| dir.join(ASIO_WARM_SENTINEL))
-        .unwrap_or_else(|| PathBuf::from(ASIO_WARM_SENTINEL))
+        .map(|dir| dir.join(nom))
+        .unwrap_or_else(|| PathBuf::from(nom))
+}
+
+/// #6452 — le témoin de démarrage inachevé, dans le même dossier que
+/// `asio-warm.pending` (`%LOCALAPPDATA%\TuneServer` sous Windows).
+///
+/// Ce n'est pas `asio-warm.pending` : celui-là n'entoure que le préchauffage
+/// ASIO et il est retiré dès que ce balayage revient (0,45 s chez
+/// Jean-Pierre le 20/10), bien avant l'étape qui retient le démarrage. Il dit
+/// « un pilote a emporté le processus », pas « le démarrage n'est pas allé
+/// jusqu'à `listening` ». Voir `tune_core::demarrage_inacheve`.
+pub(crate) fn chemin_du_temoin_de_demarrage() -> PathBuf {
+    dans_le_dossier_du_journal(tune_core::demarrage_inacheve::TEMOIN)
+}
+
+/// Pose le témoin au tout début du démarrage. Rend `true` s'il était déjà là :
+/// le démarrage précédent n'a pas atteint `listening`.
+pub(crate) fn poser_le_temoin_de_demarrage() -> bool {
+    let chemin = chemin_du_temoin_de_demarrage();
+    let (precedent_inacheve, ecrit) = tune_core::demarrage_inacheve::poser_le_temoin(&chemin);
+    match ecrit {
+        Ok(()) => info!(
+            temoin = %chemin.display(),
+            precedent_inacheve,
+            "demarrage_temoin_pose"
+        ),
+        Err(error) => warn!(
+            temoin = %chemin.display(),
+            precedent_inacheve,
+            %error,
+            "demarrage_temoin_non_pose — un blocage de ce démarrage ne sera pas vu au suivant"
+        ),
+    }
+    precedent_inacheve
+}
+
+/// La décision de #6452 pour CET état, sans rien armer : `(décision, hôte
+/// enregistré)`. `on_windows` en paramètre, pour être jugée hors Windows.
+pub(crate) fn hote_de_demarrage_selon(
+    state: &AppState,
+    precedent_inacheve: bool,
+    on_windows: bool,
+) -> (tune_core::demarrage_inacheve::HoteDeCeDemarrage, String) {
+    let demande = state.stored_audio_backend();
+    let decision = tune_core::demarrage_inacheve::decider(precedent_inacheve, &demande, on_windows);
+    (decision, demande)
+}
+
+/// Applique le témoin : sous le repli, CE démarrage se fait sur l'hôte par
+/// défaut, la base garde le choix, le journal et la Santé du serveur le disent.
+///
+/// Appelé après `AppState::new` (le choix est en base) et AVANT
+/// `init_state`, qui lance le préchauffage ASIO.
+pub(crate) async fn appliquer_le_temoin_de_demarrage(state: &AppState, precedent_inacheve: bool) {
+    use tune_core::demarrage_inacheve::{DETAIL, HOTE_PAR_DEFAUT, HoteDeCeDemarrage};
+    let (decision, demande) =
+        hote_de_demarrage_selon(state, precedent_inacheve, cfg!(target_os = "windows"));
+    match decision {
+        HoteDeCeDemarrage::RepliHoteParDefaut => {
+            tune_core::demarrage_inacheve::activer_le_repli(&demande);
+            warn!(
+                hote_demande = %demande,
+                hote_retenu = HOTE_PAR_DEFAUT,
+                temoin = %chemin_du_temoin_de_demarrage().display(),
+                "demarrage_precedent_inacheve_repli_hote_par_defaut — le démarrage précédent \
+                 n'a pas atteint `listening` avec cet hôte : celui-ci se fait sur l'hôte par \
+                 défaut, sans modifier le choix enregistré. S'il aboutit, le suivant retentera \
+                 l'hôte choisi (#6452)."
+            );
+            state
+                .health_monitor
+                .signaler(
+                    tune_core::health_monitor::AlertLevel::Warning,
+                    "audio_local",
+                    DETAIL,
+                )
+                .await;
+        }
+        HoteDeCeDemarrage::Demande if precedent_inacheve => info!(
+            hote = %demande,
+            "demarrage_precedent_inacheve_hote_conserve — aucun hôte plus sûr où se replier"
+        ),
+        HoteDeCeDemarrage::Demande => {}
+    }
+}
+
+/// Retire le témoin : le serveur écoute, le démarrage a abouti.
+pub(crate) fn retirer_le_temoin_de_demarrage() {
+    let chemin = chemin_du_temoin_de_demarrage();
+    match tune_core::demarrage_inacheve::retirer_le_temoin(&chemin) {
+        Ok(()) => info!(temoin = %chemin.display(), "demarrage_temoin_retire"),
+        Err(error) => warn!(
+            temoin = %chemin.display(),
+            %error,
+            "demarrage_temoin_non_retire — le prochain démarrage se croira précédé d'un \
+             démarrage inachevé"
+        ),
+    }
 }
 
 fn asio_warm_status_at(sentinel: &Path, disabled_by_env: bool, supported: bool) -> AsioWarmStatus {
@@ -328,12 +429,35 @@ impl Drop for FinDuPrechauffageAsio {
     }
 }
 
+/// #6452 — sous le repli de démarrage, ce processus ne charge aucun pilote
+/// ASIO : ni préchauffage, ni liste à la demande (réglages, diagnostics). Le
+/// parc local est un repli par construction : le refus d'une zone nommée sous
+/// ASIO peut donc dire pourquoi. Rend `true` quand le repli est armé.
+#[cfg(feature = "local-audio")]
+fn ecarter_asio_sous_le_repli_de_demarrage() -> bool {
+    if tune_core::demarrage_inacheve::repli_actif().is_none() {
+        return false;
+    }
+    tune_core::outputs::local::block_asio_device_enumeration(
+        tune_core::outputs::asio_blocage_4556::MotifDeBlocage::DemarrageInacheve,
+        Some(&chemin_du_temoin_de_demarrage().display().to_string()),
+    );
+    tune_core::outputs::asio_blocage_4556::noter_repli_wasapi_apres_blocage();
+    info!("asio_warm_scan_skipped_after_unfinished_boot");
+    true
+}
+
 /// Lance le préchauffage du cache ASIO, protégé par le témoin de plantage.
 #[cfg(feature = "local-audio")]
 fn spawn_asio_warm_scan() {
     // Sans hôte ASIO compilé, ne pas bloquer le repli WASAPI d'une ancienne
     // préférence "asio", même si un témoin de crash existe encore (#4168).
     if !tune_core::outputs::local::asio_available() {
+        return;
+    }
+
+    // #6452 — sous le repli de démarrage, aucun pilote ASIO n'est chargé.
+    if ecarter_asio_sous_le_repli_de_demarrage() {
         return;
     }
 
@@ -5000,6 +5124,109 @@ mod restauration_piste_de_service_6380_tests {
                 .now_playing
                 .is_none(),
             "une piste Tidal ne se restaure pas sur une ligne Qobuz"
+        );
+    }
+}
+
+/// #6452 — le témoin de démarrage inachevé, câblé sur l'état du serveur.
+#[cfg(test)]
+mod temoin_de_demarrage_6452_tests {
+    use super::*;
+    use tune_core::db::settings_repo::SettingsRepo;
+    use tune_core::demarrage_inacheve::{HOTE_PAR_DEFAUT, HoteDeCeDemarrage};
+
+    /// Ce qu'écrit le choix d'ASIO dans les réglages (#4184).
+    fn etat_avec_asio() -> AppState {
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let reglages = SettingsRepo::with_backend(state.backend.clone());
+        reglages.set("local_audio_backend", "asio").unwrap();
+        reglages.set("local_exclusive_mode", "true").unwrap();
+        reglages
+            .set(tune_core::config::REGLAGE_EXCLUSIF_ARME_PAR_ASIO, "true")
+            .unwrap();
+        state
+    }
+
+    /// Témoin présent + ASIO : ce démarrage part sur l'hôte par défaut, en
+    /// partagé, et le choix en base est inchangé. C'est le test qui rougit
+    /// contre le code d'avant : `effective_audio_backend` rendait « asio »
+    /// à chaque démarrage, quoi qu'il soit arrivé au précédent.
+    #[test]
+    fn temoin_present_et_asio_demarrent_sur_l_hote_par_defaut() {
+        let state = etat_avec_asio();
+        let (decision, demande) = hote_de_demarrage_selon(&state, true, true);
+        assert_eq!(decision, HoteDeCeDemarrage::RepliHoteParDefaut);
+        assert_eq!(demande, "asio");
+
+        let repli = Some(demande.as_str());
+        assert_eq!(state.effective_audio_backend_selon(repli), HOTE_PAR_DEFAUT);
+        assert!(
+            !state.requested_exclusive_mode_selon(repli),
+            "l'écho de l'exclusif posé par le choix d'ASIO ne vaut rien sous le repli"
+        );
+        // Le choix enregistré n'a pas bougé.
+        let reglages = SettingsRepo::with_backend(state.backend.clone());
+        assert_eq!(
+            reglages.get("local_audio_backend").unwrap().as_deref(),
+            Some("asio")
+        );
+        assert_eq!(state.stored_audio_backend(), "asio");
+    }
+
+    /// Témoin absent : ASIO, comme avant.
+    #[test]
+    fn temoin_absent_garde_asio() {
+        let state = etat_avec_asio();
+        let (decision, _) = hote_de_demarrage_selon(&state, false, true);
+        assert_eq!(decision, HoteDeCeDemarrage::Demande);
+        assert_eq!(state.effective_audio_backend_selon(None), "asio");
+        assert!(state.requested_exclusive_mode_selon(None));
+    }
+
+    /// Témoin présent mais hôte WASAPI : rien à replier.
+    #[test]
+    fn temoin_present_en_wasapi_ne_change_rien() {
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        SettingsRepo::with_backend(state.backend.clone())
+            .set("local_audio_backend", "wasapi")
+            .unwrap();
+        let (decision, _) = hote_de_demarrage_selon(&state, true, true);
+        assert_eq!(decision, HoteDeCeDemarrage::Demande);
+        assert_eq!(state.effective_audio_backend_selon(Some("asio")), "wasapi");
+    }
+
+    /// L'ordre du démarrage : témoin posé AVANT l'ouverture de la base,
+    /// appliqué AVANT `init_state` (qui lance le préchauffage ASIO) et avant
+    /// les sorties audio, retiré APRÈS `listening`. Garde de texte : le
+    /// démarrage complet ne se joue pas dans un test.
+    #[test]
+    fn le_bootstrap_pose_applique_puis_retire_le_temoin() {
+        let source = include_str!("bootstrap.rs");
+        let position = |motif: &str| {
+            let trouvees: Vec<usize> = source.match_indices(motif).map(|(i, _)| i).collect();
+            assert_eq!(
+                trouvees.len(),
+                1,
+                "« {motif} » doit apparaître une fois : {trouvees:?}"
+            );
+            trouvees[0]
+        };
+        let pose = position("crate::startup::poser_le_temoin_de_demarrage()");
+        let base = position("AppState::new(&config.db_path");
+        let applique = position("crate::startup::appliquer_le_temoin_de_demarrage(");
+        let init = position("crate::startup::init_state(&state, &config)");
+        let sorties = position("crate::startup::register_local_outputs(&state)");
+        let ecoute = position("info!(%addr, \"listening\")");
+        let retire = position("crate::startup::retirer_le_temoin_de_demarrage()");
+        assert!(pose < base, "le témoin doit être posé avant la base");
+        assert!(
+            base < applique && applique < init,
+            "appliqué après la base, avant init_state"
+        );
+        assert!(applique < sorties, "appliqué avant les sorties audio");
+        assert!(
+            ecoute < retire,
+            "retiré seulement une fois le serveur à l'écoute"
         );
     }
 }

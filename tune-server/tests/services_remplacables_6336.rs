@@ -10,10 +10,12 @@
 //!   `services-factices`, allumée par les seuls `[dev-dependencies]` ;
 //! - **services de streaming** : `avec_bases_de_test` construit le service
 //!   avec des adresses de base locales, connexion comprise (même feature) ;
-//! - **licence et SSO** : déjà redirigeables par le réglage `mozaik_base_url`,
-//!   et déjà couverts par le vrai routeur (`licence_activation_immediate.rs`,
-//!   `licence_verdict_absent.rs`, `sso_modules_du_compte.rs`,
-//!   `sso_reconnexion_apres_attente.rs`). Rien à ajouter ici.
+//! - **licence et SSO** : redirigeables par le réglage `mozaik_base_url`
+//!   (`licence_activation_immediate.rs`, `licence_verdict_absent.rs`,
+//!   `sso_modules_du_compte.rs`, `sso_reconnexion_apres_attente.rs`), sauf le
+//!   battement de la licence et la liaison du serveur au compte, qui passent
+//!   par `services_factices::substituer_base` : banc
+//!   `licence_sso_remplacables_6336.rs`.
 //!
 //! Binaire à lui seul : le registre des substitutions est un état de
 //! PROCESSUS. Les tests qui s'en servent se suivent sous [`SUBSTITUTIONS`] ;
