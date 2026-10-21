@@ -448,3 +448,94 @@ async fn suivre_une_playlist_locale_inconnue_est_refuse() {
     assert_eq!(r.json()["code"], suivi::CODE_SOURCE_INCONNUE);
     assert_eq!(appels(&b), 0);
 }
+
+/// Un membre change la playlist de cercle `id` : Alice y ajoute un morceau.
+fn alice_ajoute_au_cercle(b: &Banc, id: i64) {
+    let mut f = b.faux.etat.lock().unwrap();
+    let p = f.playlists.iter_mut().find(|p| p["id"] == id).unwrap();
+    p["items"].as_array_mut().unwrap().push(json!({
+        "item_id": 998, "title": "Ajout d'Alice pendant l'arrêt",
+        "added_by": { "user_id": 7, "name": "Alice" }
+    }));
+    p["version"] = json!(p["version"].as_i64().unwrap() + 1);
+}
+
+/// Relecture rc7 : « Ne plus suivre », des membres changent la copie, puis un
+/// nouveau `PUT …/follow`. Leurs changements sont remplacés — l'originale
+/// l'emporte — mais PAS en silence : l'écart est levé.
+#[tokio::test]
+async fn reprendre_le_suivi_signale_ce_que_le_cercle_a_change_pendant_l_arret() {
+    let b = banc().await;
+    partager_et_suivre(&b).await;
+    let r = appel(&b.app, "DELETE", "/playlists/6/follow", None).await;
+    assert_eq!(r.statut, StatusCode::OK);
+    alice_ajoute_au_cercle(&b, 6);
+
+    let r = appel(
+        &b.app,
+        "PUT",
+        "/playlists/6/follow",
+        Some(json!({ "playlist_id": b.locale, "circle_id": 1 })),
+    )
+    .await;
+    assert_eq!(r.statut, StatusCode::OK);
+    let j = r.json();
+    assert_eq!(
+        j["sync"]["warning"]["code"],
+        suivi::CODE_ECART,
+        "#6688 — la reprise du suivi a écrasé sans avertissement ce que le cercle avait changé : {j}"
+    );
+    assert_eq!(j["sync"]["warning"]["discarded_items"], 1);
+    assert_eq!(j["follow"]["warning"]["code"], suivi::CODE_ECART);
+    assert_eq!(titres_du_cercle(&b), titres_locaux(&b));
+}
+
+/// La reprise d'un suivi dont la copie n'a PAS bougé pendant l'arrêt, alors
+/// que l'originale a changé : report normal, sans écart.
+#[tokio::test]
+async fn reprendre_le_suivi_sans_changement_du_cercle_ne_signale_rien() {
+    let b = banc().await;
+    partager_et_suivre(&b).await;
+    appel(&b.app, "DELETE", "/playlists/6/follow", None).await;
+    repo(&b).add_tracks(b.locale, &[b.pistes[3]], None).unwrap();
+
+    let j = appel(
+        &b.app,
+        "PUT",
+        "/playlists/6/follow",
+        Some(json!({ "playlist_id": b.locale, "circle_id": 1 })),
+    )
+    .await
+    .json();
+    assert_eq!(j["sync"]["status"], "synced", "{j}");
+    assert!(j["sync"]["warning"].is_null(), "écart à tort : {j}");
+    assert_eq!(titres_du_cercle(&b), titres_locaux(&b));
+}
+
+/// Relecture rc7 : `PUT …/follow` sur une playlist de cercle EXISTANTE et
+/// garnie (la 5, « Dimanche », du faux) : ce qu'elle portait est remplacé
+/// avec l'avertissement d'écart.
+#[tokio::test]
+async fn suivre_une_playlist_de_cercle_deja_garnie_signale_l_ecart() {
+    let b = banc().await;
+    let avant = b.faux.etat.lock().unwrap().playlists[0]["items"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(avant > 0);
+    let r = appel(
+        &b.app,
+        "PUT",
+        "/playlists/5/follow",
+        Some(json!({ "playlist_id": b.locale, "circle_id": 1 })),
+    )
+    .await;
+    assert_eq!(r.statut, StatusCode::OK);
+    let j = r.json();
+    assert_eq!(
+        j["sync"]["warning"]["code"],
+        suivi::CODE_ECART,
+        "#6688 — suivre une playlist de cercle garnie a écrasé son contenu sans avertissement : {j}"
+    );
+    assert_eq!(j["sync"]["warning"]["discarded_items"], avant);
+}

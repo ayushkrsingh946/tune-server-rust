@@ -29,7 +29,10 @@
 //! * **« Ne plus suivre »** : `DELETE /playlists/{id}/follow` ARRÊTE le lien
 //!   (`stopped_at`) ; plus aucun report ne part. Le lien arrêté est gardé :
 //!   le badge « Partagée avec un cercle » de la playlist locale dit alors
-//!   « suivi arrêté ». Un nouveau `PUT …/follow` le relance.
+//!   « suivi arrêté ». Un nouveau `PUT …/follow` le relance, en gardant
+//!   l'empreinte du dernier report : ce que le cercle a changé pendant
+//!   l'arrêt est remplacé AVEC l'avertissement d'écart. Un premier lien sur
+//!   une playlist de cercle déjà garnie et différente l'avertit aussi.
 //! * **Le badge** : `GET /api/v1/playlists` et `GET /api/v1/playlists/{id}`
 //!   (routes du serveur) lisent ces liens et exposent `cercles`.
 //! * Une playlist locale qui n'est suivie par aucun cercle ne provoque AUCUN
@@ -414,6 +417,10 @@ impl Suivi {
             Some(n) => Some(n),
             None => self.nom_du_cercle(&cercle).await,
         };
+        // La reprise d'un lien arrêté vers la même originale garde l'état du
+        // dernier report : ce que les membres ont changé dans la copie
+        // pendant l'arrêt reste un écart, signalé au premier report.
+        let avant = lien(&self.reglages(), id).filter(|a| a.local_playlist_id == local);
         let l = Lien {
             circle_playlist_id: id.to_string(),
             local_playlist_id: local,
@@ -421,6 +428,8 @@ impl Suivi {
             circle_name: nom_du_cercle,
             local_name: nom.to_string(),
             followed_at: maintenant(),
+            synced_version: avant.as_ref().and_then(|a| a.synced_version),
+            circle_digest: avant.and_then(|a| a.circle_digest),
             ..Lien::default()
         };
         ecrire(&self.reglages(), &l);
@@ -650,9 +659,13 @@ impl Suivi {
             Err(issue) => return Tentative::Echec(issue),
         };
 
-        // L'écart : le cercle a changé depuis le dernier report.
-        let change_dans_le_cercle =
-            l.circle_digest.is_some() && l.circle_digest.as_deref() != Some(&cercle.empreinte());
+        // L'écart : le cercle a changé depuis le dernier report. Sans report
+        // connu (premier `PUT …/follow` sur une playlist de cercle existante),
+        // tout morceau qu'elle porte déjà est à elle : le remplacer est un écart.
+        let change_dans_le_cercle = match &l.circle_digest {
+            Some(d) => *d != cercle.empreinte(),
+            None => !cercle.items().is_empty(),
+        };
 
         let voulues: Vec<String> = originale.references.iter().map(cle_de_reference).collect();
         // Appariement dans l'ordre : chaque référence voulue prend le premier
