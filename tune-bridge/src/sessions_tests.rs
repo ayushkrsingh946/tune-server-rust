@@ -987,14 +987,33 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Traces {
 
 #[tokio::test]
 async fn aucun_jeton_ni_laissez_passer_dans_les_traces() {
+    use tracing::dispatcher::{Dispatch, set_default};
+    use tracing::subscriber::NoSubscriber;
+
     let traces = Traces::default();
-    let abonne = tracing_subscriber::fmt()
-        .with_writer(traces.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
-    let _garde = tracing::subscriber::set_default(abonne);
+    // Un abonne LOCAL a ce test (`set_default` est propre au fil), avec son
+    // ecrivain en memoire. Mais le registre des points d'appel de `tracing`
+    // ne compte que les abonnes vivants du PROCESSUS : s'il n'y en a qu'un,
+    // il calcule l'interet d'un point d'appel avec l'abonne du fil qui
+    // l'enregistre en premier. Un autre test, qui n'a aucun abonne, y
+    // inscrirait « jamais » pour toute la suite, et la trace de ce test
+    // disparaissait (ex. `ecoute_distante_session_coupee`), une fois sur
+    // deux sous charge. Un second abonne vivant, ici muet, force le mode
+    // « tous les abonnes », ou notre abonne est toujours consulte.
+    let _veille = Dispatch::new(NoSubscriber::default());
+    let abonne = Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_writer(traces.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .finish(),
+    );
+    let _garde = set_default(&abonne);
 
     let mut b = banc(true).await;
+    // Un autre test, parti en meme temps, a pu inscrire un point d'appel dans
+    // la fenetre ou notre abonne n'etait pas encore au registre : creer un
+    // abonne recalcule l'interet de tous les points d'appel.
+    drop(Dispatch::new(NoSubscriber::default()));
     let lp = laissez_passer(&iphone(), "cpt", "app", b.maintenant(), "j1");
     let (statut, v) = b.ouvrir_avec(&iphone(), &lp).await;
     assert_eq!(statut, 200);
