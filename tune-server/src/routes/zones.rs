@@ -333,6 +333,8 @@ fn inject_device_identity(
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0);
     obj.insert("gain_trim_db".into(), json!(trim));
+    // #6541 — les limites de volume, toujours publiées (`null` = aucune).
+    tune_core::audio::volume_limites::publier(obj, backend, zone_id);
     let upnp_renderer = settings
         .get(&format!("zone_{zone_id}_upnp_renderer"))
         .ok()
@@ -511,6 +513,16 @@ pub fn router() -> Router<AppState> {
                 .post(rattacher_asio_6120::rattacher_zone),
         )
         .route("/{id}/volume", put(update_volume))
+        // #6541 — boutons + / − et limites de volume (sécurité, confort).
+        .route(
+            "/{id}/volume/step",
+            post(limites_de_volume_6541::pas_de_volume),
+        )
+        .route(
+            "/{id}/volume-limits",
+            get(limites_de_volume_6541::lire_les_limites)
+                .put(limites_de_volume_6541::regler_les_limites),
+        )
         .route("/{id}/muted", put(update_muted))
         .route("/{id}/dsp", get(get_zone_dsp).put(set_zone_dsp))
         .route("/{id}/eq/response", get(eq_response))
@@ -606,6 +618,8 @@ mod lecture;
 pub use lecture::*;
 mod presence;
 mod rattacher_asio_6120;
+// #6541 — boutons + / − et limites de volume d'une zone.
+mod limites_de_volume_6541;
 
 // #5353 — le backend nommé par le chemin du signal est celui de LA sortie.
 mod backend_de_la_sortie_5353;

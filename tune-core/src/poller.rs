@@ -594,6 +594,9 @@ pub struct PositionPoller {
     /// une fois (voir `volume_pure_concilie`). Une zone en sort dès qu'elle
     /// est vue hors verrou, pour que le prochain armement soit rattrapé.
     volumes_pure_concilies: std::sync::Mutex<std::collections::HashSet<i64>>,
+    /// #6541 — dernier volume rapporté au-dessus de la limite de sécurité,
+    /// par zone : la consigne n'est recommandée qu'une fois par valeur.
+    volumes_plafonnes: std::sync::Mutex<std::collections::HashMap<i64, f64>>,
     /// #5662 — zones dont le renderer annonce 100 % sans que Tune l'adopte :
     /// l'épisode est dit une fois (`volume_100_ignore_constate`).
     volumes_100_ignores: std::sync::Mutex<std::collections::HashSet<i64>>,
@@ -641,6 +644,7 @@ impl PositionPoller {
             zones_a_position_prouvee: std::sync::Mutex::new(std::collections::HashSet::new()),
             volumes_pure_reimposes: std::sync::Mutex::new(std::collections::HashSet::new()),
             volumes_pure_concilies: std::sync::Mutex::new(std::collections::HashSet::new()),
+            volumes_plafonnes: std::sync::Mutex::new(std::collections::HashMap::new()),
             volumes_100_ignores: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -1046,6 +1050,11 @@ mod demarrage_fige_5522;
 #[cfg(test)]
 mod demarrage_fige_5522_tests;
 
+/// #6541 — au-dessus de la limite de sécurité, le volume du renderer n'est
+/// pas adopté : il est ramené sous la limite.
+mod volume_plafond_6541;
+#[cfg(test)]
+mod volume_plafond_6541_tests;
 /// #5695 — sous PURE verrouillé, réimposer 100 % au lieu d'adopter le volume
 /// du renderer.
 mod volume_pure_5695;
