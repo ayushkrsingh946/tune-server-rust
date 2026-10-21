@@ -1667,6 +1667,31 @@ impl LocalOutput {
         self.reaffectation.appliquee()
     }
 
+    /// #6230 — la matrice posée demande-t-elle un autre nombre de voies que
+    /// celui de l'ouverture en cours ? Vrai seulement sur le chemin partagé,
+    /// le seul qui pilote ses voies, et jamais sans règle armée : une règle
+    /// qui passe de 6 → 6 à 6 → 2 en pleine lecture, une piste enchaînée à
+    /// laquelle la règle de la zone s'applique, ou une règle retirée (ou une
+    /// entrée en PURE) après une ouverture pilotée. L'orchestrateur rouvre
+    /// alors la sortie à la position courante.
+    pub fn les_voies_imposent_de_rouvrir(&self) -> bool {
+        let Some(pilotage) = self.reaffectation.pilotage() else {
+            return false;
+        };
+        let Some(reel) = self.transformations_reelles.lock().ok().and_then(|t| *t) else {
+            return false;
+        };
+        let (source, ouvertes) = (reel.entree().canaux(), reel.ouvert().canaux);
+        let voulues = if self.pure_bypass.load(Ordering::Relaxed)
+            || self.dop_active.load(Ordering::Relaxed)
+        {
+            None
+        } else {
+            self.reaffectation.voies_de_la_matrice(source)
+        };
+        reaffectation::rouvrir_pour_les_voies(voulues, pilotage, ouvertes, source)
+    }
+
     /// #6057 — poser la disposition DÉCLARÉE par le fichier de la piste
     /// (`None` : l'ordre par défaut, comme avant). Lue à chaque bloc par
     /// l'étage de conversion.
@@ -1810,6 +1835,15 @@ impl LocalOutput {
 
     pub fn has_crossfeed(&self) -> bool {
         self.crossfeed.lock().unwrap().is_some()
+    }
+
+    /// #6256 — l'étage casque installé porte-t-il le greffon natif tiers `id` ?
+    pub fn crossfeed_porte_l_etage_tiers(&self, id: &str) -> bool {
+        self.crossfeed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|cf| cf.porte_l_etage_tiers(id))
     }
 
     pub fn has_convolver(&self) -> bool {
@@ -3254,7 +3288,23 @@ pub(crate) fn cascade_de_formats(
     principal: &cpal::StreamConfig,
     source: &cpal::StreamConfig,
 ) -> Vec<(cpal::StreamConfig, FormatDeSortie)> {
-    let mut cadences = vec![principal.clone()];
+    cascade_de_formats_avec_la_matrice(None, principal, source)
+}
+
+/// #6230 — [`cascade_de_formats`], précédée des voies que demande une matrice
+/// de réaffectation armée (`matrice`, à la cadence retenue). Sans matrice, la
+/// cascade est exactement celle d'avant.
+pub(crate) fn cascade_de_formats_avec_la_matrice(
+    matrice: Option<&cpal::StreamConfig>,
+    principal: &cpal::StreamConfig,
+    source: &cpal::StreamConfig,
+) -> Vec<(cpal::StreamConfig, FormatDeSortie)> {
+    let mut cadences: Vec<cpal::StreamConfig> = matrice
+        .filter(|m| m.sample_rate != principal.sample_rate || m.channels != principal.channels)
+        .into_iter()
+        .cloned()
+        .collect();
+    cadences.push(principal.clone());
     if source.sample_rate != principal.sample_rate || source.channels != principal.channels {
         cadences.push(source.clone());
     }
@@ -3926,7 +3976,6 @@ pub(super) type AdaptationNative<'a> = (&'a CreneauReaffectation, &'a CreneauDis
 /// La disposition déclarée déplace-t-elle une voie, à nombre de canaux égal ?
 /// Mesuré par la fonction même qui l'appliquerait (#4969) : une disposition
 /// qui recopie chaque voie à sa place ne doit pas coûter le bit-perfect.
-#[cfg(any(target_os = "windows", test))]
 fn disposition_deplace_une_voie(
     disposition: &crate::audio::disposition_canaux::Disposition,
     canaux: u16,
@@ -4432,7 +4481,17 @@ impl Etage for EtageDeConversion<'_> {
     }
 
     fn transformations(&self) -> TransformationsReelles {
+        // #6057 — la réorganisation à nombre égal que `convertir` applique.
+        let reordonne = reorganisation_a_nombre_egal(
+            self.pcm.reaffectation,
+            self.pcm.disposition,
+            self.spec.canaux(),
+            self.sortie.canaux,
+            self.pcm.dop_active.load(Ordering::Relaxed),
+            self.pcm.pure_bypass.load(Ordering::Relaxed),
+        );
         TransformationsReelles::nouvelles(self.spec, self.sortie, self.dsp_actif())
+            .avec_reorganisation_canaux(reordonne)
     }
 }
 
@@ -4584,6 +4643,29 @@ fn adaptation_retenue_pour(
             .filter(|d| d.canaux() == source)
     };
     (matrice, declaree)
+}
+
+/// #6057 — à nombre de canaux égal, l'étage réordonne-t-il des voies selon la
+/// disposition déclarée par le fichier ? La MÊME décision que l'adaptation
+/// (`adaptation_retenue_pour` : jamais sur un porteur DoP, la matrice de
+/// réaffectation d'abord), mesurée par la fonction qui l'applique
+/// (`disposition_deplace_une_voie`) : une disposition qui recopie chaque voie
+/// à sa place ne réordonne rien. À nombre de canaux différent, c'est une
+/// adaptation de canaux, que `TransformationsReelles` dit déjà.
+fn reorganisation_a_nombre_egal(
+    reaffectation: &CreneauReaffectation,
+    disposition: &CreneauDisposition,
+    source: u16,
+    sortie: u16,
+    dop: bool,
+    pure: bool,
+) -> bool {
+    if source != sortie {
+        return false;
+    }
+    let (matrice, declaree) =
+        adaptation_retenue_pour(reaffectation, disposition, source, sortie, dop, pure);
+    matrice.is_none() && declaree.is_some_and(|d| disposition_deplace_une_voie(&d, source))
 }
 
 /// REF-6b (#2219) — pose dans le créneau de `LocalOutput` ce que l'étage fait
@@ -5281,6 +5363,8 @@ impl OutputTarget for LocalOutput {
         if let Ok(mut slot) = self.transformations_reelles.lock() {
             *slot = None;
         }
+        // #6230 — l'ouverture d'avant ne décrit plus rien.
+        self.reaffectation.noter_l_ouverture(None);
         let open_failure = self.open_failure.clone();
         let transformations_reelles = self.transformations_reelles.clone();
         #[cfg(target_os = "windows")]
@@ -5787,7 +5871,20 @@ impl OutputTarget for LocalOutput {
                 // jusque-là échouer la première et unique tentative, et la
                 // zone s'arrêtait sans cause affichée. Tout ce qui vient d'un
                 // serveur multimédia arrive par cette branche.
-                let tentatives = cascade_de_formats(&output_config, &source_config);
+                // #6230 — une matrice armée qui change le nombre de voies les
+                // demande d'abord ; un refus laisse la cascade d'avant.
+                let voies_de_la_matrice = reaffectation
+                    .voies_de_la_matrice(dec_ch)
+                    .filter(|_| !pure_bypass.load(Ordering::Relaxed));
+                let config_de_la_matrice = voies_de_la_matrice.map(|voies| cpal::StreamConfig {
+                    channels: voies,
+                    ..output_config.clone()
+                });
+                let tentatives = cascade_de_formats_avec_la_matrice(
+                    config_de_la_matrice.as_ref(),
+                    &output_config,
+                    &source_config,
+                );
                 let anneaux: std::cell::RefCell<Option<Arc<RingBuf>>> =
                     std::cell::RefCell::new(None);
                 let ouverture = ouvrir_premier_format_accepte(&tentatives, |cfg, format| {
@@ -5898,6 +5995,7 @@ impl OutputTarget for LocalOutput {
                 }
                 let output_sr = actual_config.sample_rate;
                 let output_ch = actual_config.channels;
+                reaffectation.constater_l_ouverture(voies_de_la_matrice, output_ch, &device_name);
 
                 info!(
                     device = %device_name,
@@ -5932,11 +6030,24 @@ impl OutputTarget for LocalOutput {
                         &mono_downmix,
                     );
                     if let Ok(mut slot) = transformations_reelles.lock() {
-                        *slot = Some(TransformationsReelles::nouvelles(
-                            entree,
-                            FormatOuvert::new(output_sr, output_ch),
-                            dsp_actif,
-                        ));
+                        // #6057 — `conformer_la_piste_decodee` applique la
+                        // disposition déclarée, même à nombre égal.
+                        let reordonne = reorganisation_a_nombre_egal(
+                            &reaffectation,
+                            &disposition,
+                            dec_ch,
+                            output_ch,
+                            false,
+                            pure_bypass.load(Ordering::Relaxed),
+                        );
+                        *slot = Some(
+                            TransformationsReelles::nouvelles(
+                                entree,
+                                FormatOuvert::new(output_sr, output_ch),
+                                dsp_actif,
+                            )
+                            .avec_reorganisation_canaux(reordonne),
+                        );
                     }
                     info!(
                         dec_sr,
@@ -6397,8 +6508,18 @@ impl OutputTarget for LocalOutput {
             // `BackendCpal::ouvrir` (`local/backend.rs`). `play_url` ne crée
             // plus d'anneau et n'en passe plus d'`Arc` (D2) : il reçoit un
             // backend, lui demande son format, son puits et une observation.
+            // #6230 — une matrice armée qui change le nombre de voies (6 → 2)
+            // les demande au périphérique ; sinon rien ne change. L'amorce
+            // lue avec l'en-tête suffit à écarter un porteur DoP.
+            let voies_de_la_matrice = reaffectation.voies_a_demander(
+                spec,
+                header_buf.get(data_offset..).unwrap_or_default(),
+                pure_bypass.load(Ordering::Relaxed),
+                dop_active.load(Ordering::Relaxed),
+            );
             let demande = DemandeDOuverture {
                 spec,
+                voies_de_la_matrice,
                 device_name: &device_name,
                 endpoint_id: endpoint_id.as_deref(),
                 origin_host: origin_host.as_deref(),
@@ -6431,6 +6552,7 @@ impl OutputTarget for LocalOutput {
 
             let output_sr = sortie.cadence;
             let output_ch = sortie.canaux;
+            reaffectation.constater_l_ouverture(voies_de_la_matrice, output_ch, &device_name);
 
             info!(
                 device = %device_name,

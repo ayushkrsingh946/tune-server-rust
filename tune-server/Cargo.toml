@@ -197,6 +197,8 @@ tokio = { workspace = true, features = ["test-util"] }
 tune-core = { path = "../tune-core", default-features = false, features = [
     "journal-de-test",
     "isolement-disque-de-test",
+    # #6336 : services remplaçables en test (tests/services_remplacables_6336.rs).
+    "services-factices",
 ] }
 
 # Purge à froid de la mémoire libre gardée par la glibc : binaire à part, le
@@ -1005,6 +1007,13 @@ path = "tests/radio_artiste_5395.rs"
 [[test]]
 name = "contexte_de_session_6465"
 path = "tests/contexte_de_session_6465.rs"
+# #6468 — un épisode de podcast sur un renderer réseau passe par le mandataire
+# de Tune (http://) ; une sortie locale garde l'URL ; un refus de la sortie est
+# une erreur HTTP lisible. `autotests = false` plus haut : sans cette cible, le
+# fichier ne serait jamais compilé.
+[[test]]
+name = "podcast_sortie_reseau_6468"
+path = "tests/podcast_sortie_reseau_6468.rs"
 # #2816 — la garde qui detecte la DERIVE des garde-fous : un fichier d'essais
 # que le compilateur n'atteint plus, un temoin qui ne s'execute plus que sous
 # une variable d'environnement que plus aucune etape ne pose. `autotests =
@@ -1528,6 +1537,14 @@ name = "pg_etiquette_collection_5026"
 path = "tests/pg_etiquette_collection_5026.rs"
 required-features = ["postgres"]
 
+# #6257 — l'ordre des étiquettes sur PostgreSQL : la 091 pose `tags.position`
+# en BIGINT, `PUT /tags/order` l'écrit, les listes le suivent.
+# `autotests = false` : sans cette cible, jamais compilé.
+[[test]]
+name = "pg_ordre_etiquettes_6257"
+path = "tests/pg_ordre_etiquettes_6257.rs"
+required-features = ["postgres"]
+
 # #6245 — l'artiste d'une piste modifié par son NOM (édition, tagger) :
 # enregistré par `artist_id`, tenu à la NOUVELLE valeur, gardé au rescan.
 # `autotests = false` : sans cette cible, jamais compilé.
@@ -1709,3 +1726,20 @@ path = "tests/playlist_manager_alias_deprecies.rs"
 name = "pg_balises_6124"
 path = "tests/pg_balises_6124.rs"
 required-features = ["postgres"]
+
+# #6336 — AirPlay 2, SMB, Qobuz, TIDAL et Deezer éprouvés par le vrai routeur
+# contre des faux locaux. Binaire à lui seul : les substitutions de programmes
+# (`tune_core::services_factices`) sont un état de PROCESSUS. `autotests =
+# false` plus haut : sans cette cible, le banc ne serait JAMAIS compilé.
+[[test]]
+name = "services_remplacables_6336"
+path = "tests/services_remplacables_6336.rs"
+
+# #6454 — `GET /profiles` ne rend plus `200 []` sur une base en échec : un
+# 500 au code lisible, et une ligne ERROR au journal. Abonné `tracing` GLOBAL,
+# donc un binaire à lui seul et un seul essai dedans (leçon de
+# `panne_sql_journalisee`). `autotests = false` plus haut : sans cette cible,
+# le fichier ne serait jamais compilé.
+[[test]]
+name = "profils_panne_de_base_6454"
+path = "tests/profils_panne_de_base_6454.rs"
