@@ -1839,6 +1839,15 @@ impl LocalOutput {
         self.crossfeed.lock().unwrap().is_some()
     }
 
+    /// #6256 — l'étage casque installé porte-t-il le greffon natif tiers `id` ?
+    pub fn crossfeed_porte_l_etage_tiers(&self, id: &str) -> bool {
+        self.crossfeed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|cf| cf.porte_l_etage_tiers(id))
+    }
+
     pub fn has_convolver(&self) -> bool {
         self.convolver_config.lock().unwrap().is_some()
     }
@@ -3974,7 +3983,6 @@ pub(super) type AdaptationNative<'a> = (&'a CreneauReaffectation, &'a CreneauDis
 /// La disposition déclarée déplace-t-elle une voie, à nombre de canaux égal ?
 /// Mesuré par la fonction même qui l'appliquerait (#4969) : une disposition
 /// qui recopie chaque voie à sa place ne doit pas coûter le bit-perfect.
-#[cfg(any(target_os = "windows", test))]
 fn disposition_deplace_une_voie(
     disposition: &crate::audio::disposition_canaux::Disposition,
     canaux: u16,
@@ -4480,7 +4488,17 @@ impl Etage for EtageDeConversion<'_> {
     }
 
     fn transformations(&self) -> TransformationsReelles {
+        // #6057 — la réorganisation à nombre égal que `convertir` applique.
+        let reordonne = reorganisation_a_nombre_egal(
+            self.pcm.reaffectation,
+            self.pcm.disposition,
+            self.spec.canaux(),
+            self.sortie.canaux,
+            self.pcm.dop_active.load(Ordering::Relaxed),
+            self.pcm.pure_bypass.load(Ordering::Relaxed),
+        );
         TransformationsReelles::nouvelles(self.spec, self.sortie, self.dsp_actif())
+            .avec_reorganisation_canaux(reordonne)
     }
 }
 
@@ -4632,6 +4650,29 @@ fn adaptation_retenue_pour(
             .filter(|d| d.canaux() == source)
     };
     (matrice, declaree)
+}
+
+/// #6057 — à nombre de canaux égal, l'étage réordonne-t-il des voies selon la
+/// disposition déclarée par le fichier ? La MÊME décision que l'adaptation
+/// (`adaptation_retenue_pour` : jamais sur un porteur DoP, la matrice de
+/// réaffectation d'abord), mesurée par la fonction qui l'applique
+/// (`disposition_deplace_une_voie`) : une disposition qui recopie chaque voie
+/// à sa place ne réordonne rien. À nombre de canaux différent, c'est une
+/// adaptation de canaux, que `TransformationsReelles` dit déjà.
+fn reorganisation_a_nombre_egal(
+    reaffectation: &CreneauReaffectation,
+    disposition: &CreneauDisposition,
+    source: u16,
+    sortie: u16,
+    dop: bool,
+    pure: bool,
+) -> bool {
+    if source != sortie {
+        return false;
+    }
+    let (matrice, declaree) =
+        adaptation_retenue_pour(reaffectation, disposition, source, sortie, dop, pure);
+    matrice.is_none() && declaree.is_some_and(|d| disposition_deplace_une_voie(&d, source))
 }
 
 /// REF-6b (#2219) — pose dans le créneau de `LocalOutput` ce que l'étage fait
@@ -5996,11 +6037,24 @@ impl OutputTarget for LocalOutput {
                         &mono_downmix,
                     );
                     if let Ok(mut slot) = transformations_reelles.lock() {
-                        *slot = Some(TransformationsReelles::nouvelles(
-                            entree,
-                            FormatOuvert::new(output_sr, output_ch),
-                            dsp_actif,
-                        ));
+                        // #6057 — `conformer_la_piste_decodee` applique la
+                        // disposition déclarée, même à nombre égal.
+                        let reordonne = reorganisation_a_nombre_egal(
+                            &reaffectation,
+                            &disposition,
+                            dec_ch,
+                            output_ch,
+                            false,
+                            pure_bypass.load(Ordering::Relaxed),
+                        );
+                        *slot = Some(
+                            TransformationsReelles::nouvelles(
+                                entree,
+                                FormatOuvert::new(output_sr, output_ch),
+                                dsp_actif,
+                            )
+                            .avec_reorganisation_canaux(reordonne),
+                        );
                     }
                     info!(
                         dec_sr,

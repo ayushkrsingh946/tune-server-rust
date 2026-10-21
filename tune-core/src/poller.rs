@@ -1068,6 +1068,11 @@ mod tests;
 #[cfg(test)]
 mod status_timeout_tests;
 
+/// Sourdine par zéro (Eversolo DMP-A8) : le silence commandé n'est pas
+/// rouvert par le volume que l'appareil remonte.
+#[cfg(test)]
+mod volume_sourdine_zero_tests;
+
 /// #3318 — l'instant où l'anneau audio se vide, et le silence que le DAC
 /// reçoit alors. La comptabilité pure, et son branchement dans `tick()`.
 #[cfg(test)]

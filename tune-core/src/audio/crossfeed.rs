@@ -192,6 +192,11 @@ impl CrossfeedProcessor {
         self.tiers.len()
     }
 
+    /// #6256 — cet étage casque porte-t-il un étage du greffon tiers `id` ?
+    pub fn porte_l_etage_tiers(&self, id: &str) -> bool {
+        self.tiers.iter().any(|t| t.id == id)
+    }
+
     pub fn new(sample_rate: u32, amount: f32, delay_ms: f32) -> Self {
         Self::avec_ombre(sample_rate, amount, delay_ms, None)
     }

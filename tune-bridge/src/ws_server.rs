@@ -79,12 +79,68 @@ pub async fn handle_server_ws(socket: WebSocket, state: Arc<RelayState>) {
         return;
     }
 
+    // Clé du serveur (#6603) : s'il en annonce une, il signe un défi. Si le
+    // site connaît une clé pour ce server_id, rien d'autre n'est accepté.
+    let cle_serveur = {
+        let tx = &mut ws_tx;
+        let rx = &mut ws_rx;
+        let echange = |defi: String| async move {
+            let message = serde_json::json!({"type": "relay.challenge", "defi": defi});
+            tx.send(Message::Text(message.to_string().into()))
+                .await
+                .ok()?;
+            tokio::time::timeout(DELAI_DEFI_SERVEUR, async {
+                loop {
+                    match rx.next().await {
+                        Some(Ok(Message::Text(text))) => {
+                            if protocol::parse_message_type(&text).as_deref()
+                                == Some("relay.challenge_response")
+                            {
+                                let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+                                return v["signature"].as_str().map(str::to_string);
+                            }
+                        }
+                        Some(Ok(Message::Ping(data))) => {
+                            let _ = tx.send(Message::Pong(data)).await;
+                        }
+                        None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return None,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+        authentifier_serveur(
+            &state,
+            &register.server_id,
+            register.server_pk.as_deref(),
+            echange,
+        )
+        .await
+    };
+    let cle_serveur = match cle_serveur {
+        Ok(c) => c,
+        Err(reason) => {
+            warn!(server_id = %register.server_id, reason, "register refuse — cle du serveur");
+            let reject = serde_json::json!({
+                "type": "relay.registered",
+                "ok": false,
+                "error": reason,
+            });
+            let _ = ws_tx.send(Message::Text(reject.to_string().into())).await;
+            return;
+        }
+    };
+
     let (msg_tx, mut msg_rx) = mpsc::channel::<String>(256);
 
     if let Err(reason) = state.register_server(
         register.server_id.clone(),
         register.server_name.clone(),
         register.bridge_token,
+        cle_serveur,
         msg_tx,
     ) {
         // Log the server_id and reason, never the bridge_token.
@@ -102,6 +158,8 @@ pub async fn handle_server_ws(socket: WebSocket, state: Arc<RelayState>) {
         msg_type: "relay.registered",
         ok: true,
         server_id: register.server_id.clone(),
+        jeton_herite: state.sessions.jeton_herite_ouvert(),
+        laissez_passer: state.sessions.actif(),
         capabilities: protocol::CAPACITES,
     };
     let _ = ws_tx
@@ -161,6 +219,50 @@ pub async fn handle_server_ws(socket: WebSocket, state: Arc<RelayState>) {
     writer_handle.abort();
     state.unregister_server(&server_id);
     info!(server_id = %server_id, "server disconnected");
+}
+
+/// Délai laissé au serveur pour signer le défi d'enregistrement.
+const DELAI_DEFI_SERVEUR: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Authentifie un serveur qui s'enregistre (#6603).
+///
+/// - il annonce une clé : `echanger` lui envoie un défi et rend sa
+///   signature, vérifiée avec cette clé ;
+/// - le site connaît une clé pour ce `server_id` : seul un serveur qui la
+///   prouve est accepté. C'est ce qui empêche un tiers d'occuper le
+///   `server_id` d'un serveur relié à un compte ;
+/// - ni l'un ni l'autre : serveur antérieur, accepté comme avant.
+///
+/// Rend la clé prouvée, s'il y en a une.
+pub(crate) async fn authentifier_serveur<F, Fut>(
+    state: &RelayState,
+    server_id: &str,
+    server_pk: Option<&str>,
+    echanger: F,
+) -> Result<Option<String>, &'static str>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    let attendue = state.sessions.cle_du_serveur(server_id).await;
+    let prouvee = match server_pk.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(pk) => {
+            let defi = tune_laissez_passer::jeton_aleatoire().ok_or("aleatoire indisponible")?;
+            let signature = echanger(defi.clone())
+                .await
+                .ok_or("defi du serveur sans reponse")?;
+            tune_laissez_passer::verifier_defi_serveur(pk, server_id, &defi, &signature)
+                .map_err(|_| "signature du serveur invalide")?;
+            Some(pk.to_string())
+        }
+        None => None,
+    };
+    if let Some(attendue) = attendue
+        && prouvee.as_deref() != Some(attendue.as_str())
+    {
+        return Err("cle du serveur requise");
+    }
+    Ok(prouvee)
 }
 
 pub(crate) async fn handle_server_message(state: &RelayState, server_id: &str, text: &str) {
@@ -535,7 +637,7 @@ mod relais_de_flux_tests {
     async fn serveur_enregistre(state: &RelayState) -> mpsc::Receiver<String> {
         let (tx, rx) = mpsc::channel::<String>(16);
         state
-            .register_server("srv".into(), "Salon".into(), "tok".into(), tx)
+            .register_server("srv".into(), "Salon".into(), "tok".into(), None, tx)
             .unwrap();
         rx
     }

@@ -11,8 +11,9 @@
 //!
 //! 1. si la qualité demandée est au-dessus du CD (format 27 ou 7) et que le
 //!    service n'a pas déjà rendu du 16/44,1, le début du flux HR est sondé ;
-//! 2. si la sonde échoue (statut HTTP d'échec, connexion refusée, flux vide ou
-//!    coupé avant le premier octet), la même piste est redemandée UNE fois au
+//! 2. si la sonde échoue (statut HTTP d'échec, connexion refusée, flux vide,
+//!    ou flux coupé avant d'avoir livré son seuil de démarrage — #6658), la
+//!    même piste est redemandée UNE fois au
 //!    format 6 (16/44,1), et `qobuz_repli_qualite` est écrit au journal avec
 //!    le `track_id`, le format demandé, l'erreur et le format obtenu ;
 //! 3. si le format 6 échoue aussi (`qobuz_repli_qualite_echec`), le flux
@@ -40,9 +41,25 @@ pub const FORMAT_DE_REPLI: &str = "6";
 /// `QobuzService::get_track_url`.
 pub const JETON_DE_REPLI: &str = "cd";
 
-/// Le temps laissé au CDN pour rendre son premier octet. Au-delà, le flux est
-/// tenu pour coupé au démarrage.
+/// La fenêtre de démarrage : le temps laissé au CDN pour livrer son seuil de
+/// démarrage. Au-delà, un flux qui n'a rendu AUCUN octet est tenu pour coupé
+/// au démarrage ; un flux qui en a rendu est lent, pas mort, et il est gardé.
 const DELAI_DE_SONDE: Duration = Duration::from_secs(10);
+
+/// #6658 — ce que le début du flux doit livrer, dans la fenêtre de
+/// démarrage, pour que la sonde conclue au succès : 64 Kio, ou la longueur
+/// annoncée (`Content-Length`) si elle est plus courte.
+///
+/// Un octet ne suffit pas. Le CDN de Qobuz annonce la taille du fichier
+/// (`taille=141979599`), livre UN octet, puis ferme la connexion (fils 2267
+/// et 2350 : `probe reached EOF at 1 bytes`, puis `end of file before
+/// message length reached`). La sonde de #6404 lâchait la connexion au
+/// premier bloc : ce flux la passait, et le titre n'était jamais replié.
+///
+/// 64 Kio, c'est environ un tiers de seconde de FLAC 192/24 : rien au regard
+/// d'une piste, et assez pour qu'une coupure « juste après le début » ne
+/// passe plus pour un flux sain. La sonde ne lit jamais au-delà.
+const SEUIL_DE_DEMARRAGE: u64 = 64 * 1024;
 
 /// Le format Qobuz que `get_track_url` demandera pour ce jeton de qualité —
 /// le même tableau que dans `QobuzService::get_track_url`.
@@ -77,11 +94,34 @@ pub fn repli_possible(jeton: Option<&str>, obtenu: &StreamQuality) -> Option<&'s
     Some(format)
 }
 
-/// Sonde le début du flux : un statut de succès ET au moins un octet.
+/// Sonde le début du flux : un statut de succès, puis le seuil de démarrage
+/// ([`SEUIL_DE_DEMARRAGE`], ou la longueur annoncée si elle est plus courte)
+/// livré dans la fenêtre de démarrage.
 ///
 /// `Range: bytes=0-`, comme le premier GET d'un renderer. La connexion est
-/// lâchée dès le premier bloc reçu : rien n'est téléchargé au-delà.
+/// lâchée dès le seuil atteint : rien n'est téléchargé au-delà.
+///
+/// Le critère (#6658) :
+/// - la connexion rend une erreur, ou se ferme, avant le seuil → échec, que
+///   le premier octet soit arrivé ou non ;
+/// - la fenêtre s'écoule sans un seul octet → échec (coupé au démarrage) ;
+/// - la fenêtre s'écoule alors que des octets arrivent, sans erreur ni
+///   fermeture → succès : un flux LENT n'est jamais replié ;
+/// - un corps complet plus court que le seuil (longueur annoncée atteinte,
+///   ou fin propre sans longueur annoncée) → succès.
 pub async fn sonder_le_debut(client: &reqwest::Client, url: &str) -> Result<(), String> {
+    sonder_le_debut_avec(client, url, DELAI_DE_SONDE, SEUIL_DE_DEMARRAGE).await
+}
+
+/// [`sonder_le_debut`] avec sa fenêtre et son seuil, pour les bancs.
+pub(crate) async fn sonder_le_debut_avec(
+    client: &reqwest::Client,
+    url: &str,
+    fenetre: Duration,
+    seuil: u64,
+) -> Result<(), String> {
+    // Les octets reçus, lus aussi quand la fenêtre expire.
+    let recus = std::sync::atomic::AtomicU64::new(0);
     let sonde = async {
         let reponse = client
             .get(url)
@@ -94,21 +134,47 @@ pub async fn sonder_le_debut(client: &reqwest::Client, url: &str) -> Result<(), 
         if !statut.is_success() {
             return Err(format!("HTTP {}", statut.as_u16()));
         }
+        let annoncee = reponse.content_length();
+        let attendu = annoncee.map_or(seuil, |longueur| longueur.min(seuil));
+        let annonce = annoncee
+            .map(|longueur| format!(" sur {longueur} annoncés"))
+            .unwrap_or_default();
         let mut corps = reponse.bytes_stream();
         loop {
+            let deja = recus.load(std::sync::atomic::Ordering::Relaxed);
+            if deja > 0 && deja >= attendu {
+                return Ok(());
+            }
             match corps.next().await {
-                Some(Ok(bloc)) if bloc.is_empty() => continue,
-                Some(Ok(_)) => return Ok(()),
-                Some(Err(e)) => return Err(format!("flux coupé au démarrage : {e}")),
-                None => return Err("flux vide au démarrage".to_string()),
+                Some(Ok(bloc)) => {
+                    recus.fetch_add(bloc.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+                Some(Err(e)) if deja == 0 => {
+                    return Err(format!("flux coupé au démarrage : {e}"));
+                }
+                Some(Err(e)) => {
+                    return Err(format!(
+                        "flux coupé au démarrage après {deja} octets{annonce} : {e}"
+                    ));
+                }
+                None if deja == 0 => return Err("flux vide au démarrage".to_string()),
+                // Fin propre sans longueur annoncée : le corps est complet.
+                None if annoncee.is_none() => return Ok(()),
+                None => {
+                    return Err(format!(
+                        "flux coupé au démarrage après {deja} octets{annonce}"
+                    ));
+                }
             }
         }
     };
-    match tokio::time::timeout(DELAI_DE_SONDE, sonde).await {
+    match tokio::time::timeout(fenetre, sonde).await {
         Ok(issue) => issue,
+        // Des octets arrivent, sans erreur ni fermeture : lent, pas mort.
+        Err(_) if recus.load(std::sync::atomic::Ordering::Relaxed) > 0 => Ok(()),
         Err(_) => Err(format!(
             "aucun octet en {} s au démarrage",
-            DELAI_DE_SONDE.as_secs()
+            fenetre.as_secs()
         )),
     }
 }
