@@ -80,14 +80,45 @@ struct RadioConsumerGuard {
 /// sans exception. Aucun des renderers de #1689 ne le porte, et si un appareil
 /// inconnu s'annonçait ainsi, il retomberait simplement sur le comportement
 /// d'avant #1689 — chunké — et non sur une panne nouvelle.
+///
+/// ## #5975 — sauf les navigateurs qui lisent par CoreMedia
+///
+/// Safari (macOS) et tout navigateur iOS (Safari, Chrome « CriOS », Firefox
+/// « FxiOS »…) confient l'élément `<audio>` à WebKit, donc à CoreMedia. Ils
+/// ouvrent chaque connexion par une sonde `Range: bytes=0-1` et exigent un
+/// 206 : le chunké est refusé, la connexion tombe à `connected_secs=0` et la
+/// radio reste muette (Alex Campbell, Safari 18.6, fils 2178 et 2246). C'est
+/// le rejet d'AVPlayer que #6549 a réglé sur la voie « fichier borné » : ces
+/// agents la prennent aussi. Chrome et Edge disent « Safari » dans leur agent,
+/// mais lisent par leur propre pile et gardent le chunké, comme Firefox.
 fn accepts_chunked_live_stream(user_agent: Option<&str>) -> bool {
     match user_agent {
         Some(ua) if !ua.is_empty() => {
             let ua = ua.to_ascii_lowercase();
+            if lit_par_coremedia(&ua) {
+                return false;
+            }
             ua.contains("lavf") || ua.contains("mozilla")
         }
         _ => true,
     }
+}
+
+/// Un agent de navigateur WebKit dont le média passe par CoreMedia : tout
+/// navigateur iOS / iPadOS, ou Safari sur macOS (sans Chrome, Chromium, Edge
+/// ni Opera dans l'agent). `ua` est déjà en minuscules.
+fn lit_par_coremedia(ua: &str) -> bool {
+    if !ua.contains("applewebkit") {
+        return false;
+    }
+    if ua.contains("iphone") || ua.contains("ipad") || ua.contains("ipod") {
+        return true;
+    }
+    ua.contains("safari")
+        && ua.contains("macintosh")
+        && !["chrome", "chromium", "edg/", "opr/"]
+            .iter()
+            .any(|autre| ua.contains(autre))
 }
 
 /// Entrelacer les blocs de métadonnées ICY dans un morceau du corps.
@@ -4459,7 +4490,10 @@ mod tests {
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
              (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
         )));
-        assert!(accepts_chunked_live_stream(Some(
+        // #5975 — Safari, lui, lit par CoreMedia et REFUSE le chunké (fil
+        // 2246) : il prend le contrat fichier, comme AVPlayer (#6549). #3513
+        // n'avait été mesuré que sur Firefox.
+        assert!(!accepts_chunked_live_stream(Some(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
              (KHTML, like Gecko) Version/18.5 Safari/605.1.15"
         )));
@@ -6807,6 +6841,170 @@ mod sonde_avplayer_radio_6453_tests {
                 assert!(entete(&h, "Content-Range").is_none(), "{range:?}");
                 assert_eq!(corps.len(), 44 + PCM, "{range:?}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod safari_radio_5975_tests {
+    //! #5975 (fils 2178 et 2246) — la radio muette dans la zone navigateur de
+    //! Safari 18.6 sous macOS.
+    //!
+    //! Journal du fil 2246 (rc4) : Safari ouvre chaque connexion par une sonde
+    //! `Range: bytes=0-1`, reçoit le contrat chunké (200, sans longueur ni
+    //! `Accept-Ranges`), raccroche aussitôt (`connected_secs=0`), six fois en
+    //! 0,4 s, puis l'élément `<audio>` tombe en erreur. #6549 (rc7) a donné un
+    //! 206 à cette sonde, mais sur la seule voie « fichier borné », celle
+    //! d'AVPlayer (`AppleCoreMedia/…`). Ces témoins jouent la même sonde avec
+    //! l'agent EXACT de Safari relevé dans le journal.
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use futures_util::StreamExt;
+    use tune_core::http::streamer::{
+        LIVE_BOUNDED_TOTAL_LEN, SharedSessions, StreamInfo, StreamSession,
+    };
+
+    /// L'agent de Safari 18.6 (macOS) relevé dans le journal du fil 2246.
+    const SAFARI_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+        AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15";
+    /// Safari sur iPhone, et Chrome sur iPhone : sous iOS, tout navigateur lit
+    /// le média par WebKit et CoreMedia.
+    const SAFARI_IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) \
+        AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1";
+    const CHROME_IPHONE: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) \
+        AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/141.0.7390.41 Mobile/15E148 Safari/604.1";
+    /// Les navigateurs qui lisent le chunké (#3513) : ils doivent le garder.
+    /// Chrome et Edge annoncent AUSSI « Safari » dans leur agent.
+    const CHROME_MAC: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+        AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+    const EDGE_WINDOWS: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+        AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0";
+    const CHROME_ANDROID: &str = "Mozilla/5.0 (Linux; Android 15; Pixel 8) \
+        AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36";
+    const FIREFOX_MAC: &str =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:141.0) Gecko/20100101 Firefox/141.0";
+
+    const PCM: usize = 3 * 8192;
+
+    async fn sessions_radio(sid: &str) -> SharedSessions {
+        let info = StreamInfo {
+            format: "wav".into(),
+            mime_type: "audio/wav".into(),
+            sample_rate: 44100,
+            bit_depth: 16,
+            channels: 2,
+            ..StreamInfo::default()
+        };
+        let mut session = StreamSession::new(sid.to_string(), info, false, 64);
+        session.is_radio = true;
+        let session = std::sync::Arc::new(session);
+        session.publish_detected_output_format(48000, 2);
+        let tx = session.tx.lock().await.clone().expect("tx");
+        for _ in 0..PCM / 8192 {
+            tx.send(vec![0xAA; 8192]).await.expect("pcm");
+        }
+        drop(tx);
+        session.close_sender().await;
+        std::sync::Arc::new(tokio::sync::Mutex::new(
+            [(sid.to_string(), session)].into_iter().collect(),
+        ))
+    }
+
+    async fn requete(
+        sessions: &SharedSessions,
+        sid: &str,
+        agent: &str,
+        range: Option<&str>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("User-Agent", agent.parse().unwrap());
+        if let Some(r) = range {
+            h.insert("Range", r.parse().unwrap());
+        }
+        let rep =
+            super::handle_stream(Path(format!("{sid}.flac")), State(sessions.clone()), h).await;
+        let statut = rep.status();
+        let entetes = rep.headers().clone();
+        let mut corps = rep.into_body().into_data_stream();
+        let mut octets = Vec::new();
+        while let Some(Ok(b)) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), corps.next())
+                .await
+                .expect("le corps doit se terminer")
+        {
+            octets.extend_from_slice(&b);
+        }
+        (statut, entetes, octets)
+    }
+
+    fn entete<'a>(h: &'a axum::http::HeaderMap, nom: &str) -> Option<&'a str> {
+        h.get(nom).and_then(|v| v.to_str().ok())
+    }
+
+    /// LE témoin de #5975 : la sonde `bytes=0-1` de Safari 18.6 reçoit ses
+    /// deux octets en 206, comme celle d'AVPlayer depuis #6549.
+    #[tokio::test]
+    async fn la_sonde_de_safari_recoit_un_206_de_deux_octets_5975() {
+        let sid = "radio-5975-sonde-safari";
+        let sessions = sessions_radio(sid).await;
+        let (statut, h, corps) = requete(&sessions, sid, SAFARI_MAC, Some("bytes=0-1")).await;
+        assert_eq!(
+            statut,
+            StatusCode::PARTIAL_CONTENT,
+            "Safari 18.6 reçoit {statut} et {:?} à sa sonde bytes=0-1 : le contrat chunké, \
+             qu'il refuse (fil 2246) — #6549 ne couvre que l'agent AppleCoreMedia",
+            entete(&h, "Transfer-Encoding")
+        );
+        let attendu = format!("bytes 0-1/{LIVE_BOUNDED_TOTAL_LEN}");
+        assert_eq!(entete(&h, "Content-Range"), Some(attendu.as_str()));
+        assert_eq!(entete(&h, "Content-Length"), Some("2"));
+        assert_eq!(corps, b"RI".to_vec());
+    }
+
+    /// Après la sonde, la requête du fichier entier en plage fermée reçoit
+    /// l'en-tête et TOUT le direct en file : la sonde n'a pas pris le canal.
+    #[tokio::test]
+    async fn apres_la_sonde_safari_recoit_le_direct_sans_perte_5975() {
+        let sid = "radio-5975-suite-safari";
+        let sessions = sessions_radio(sid).await;
+        let _ = requete(&sessions, sid, SAFARI_MAC, Some("bytes=0-1")).await;
+        let fin = LIVE_BOUNDED_TOTAL_LEN - 1;
+        let (statut, _, corps) =
+            requete(&sessions, sid, SAFARI_MAC, Some(&format!("bytes=0-{fin}"))).await;
+        assert_eq!(statut, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(&corps[..4], b"RIFF");
+        assert_eq!(corps.len(), 44 + PCM, "la sonde a consommé du direct");
+    }
+
+    /// Les navigateurs iOS lisent par WebKit et CoreMedia : même contrat.
+    #[tokio::test]
+    async fn les_navigateurs_ios_recoivent_aussi_le_206_5975() {
+        for (i, agent) in [SAFARI_IPHONE, CHROME_IPHONE].into_iter().enumerate() {
+            let sid = format!("radio-5975-ios-{i}");
+            let sessions = sessions_radio(&sid).await;
+            let (statut, _, corps) = requete(&sessions, &sid, agent, Some("bytes=0-1")).await;
+            assert_eq!(statut, StatusCode::PARTIAL_CONTENT, "{agent}");
+            assert_eq!(corps, b"RI".to_vec(), "{agent}");
+        }
+    }
+
+    /// Non-régression de #3513 : Firefox, Chrome (même s'il dit « Safari »),
+    /// Edge et Chrome Android gardent le direct chunké, sans longueur ni
+    /// `Accept-Ranges` qui les inviteraient à se reconnecter.
+    #[tokio::test]
+    async fn les_autres_navigateurs_gardent_le_chunke_3513() {
+        for (i, agent) in [FIREFOX_MAC, CHROME_MAC, EDGE_WINDOWS, CHROME_ANDROID]
+            .into_iter()
+            .enumerate()
+        {
+            let sid = format!("radio-5975-chunke-{i}");
+            let sessions = sessions_radio(&sid).await;
+            let (statut, h, corps) = requete(&sessions, &sid, agent, Some("bytes=0-1")).await;
+            assert_eq!(statut, StatusCode::OK, "{agent}");
+            assert!(entete(&h, "Content-Length").is_none(), "{agent}");
+            assert!(entete(&h, "Accept-Ranges").is_none(), "{agent}");
+            assert_eq!(entete(&h, "Transfer-Encoding"), Some("chunked"), "{agent}");
+            assert_eq!(corps.len(), 44 + PCM, "{agent}");
         }
     }
 }
