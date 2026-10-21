@@ -137,7 +137,8 @@ mod garde_ecriture_fichiers {
         ("tune-core/src/library/lyrics_pass.rs", 2),
         ("tune-core/src/metadata/lyrics.rs", 1),
         ("tune-core/src/metadata/mod.rs", 2),
-        ("tune-core/src/metadata/tag_writer.rs", 21),
+        // +2 (#6635) : `write_tags_atomique` et son appel à `ecrire_atomiquement`.
+        ("tune-core/src/metadata/tag_writer.rs", 23),
         ("tune-core/src/queue_persistence.rs", 2),
         ("tune-server/src/routes/converter.rs", 1),
         (

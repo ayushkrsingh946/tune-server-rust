@@ -1369,8 +1369,9 @@ pub(crate) fn ecrire_atomiquement(
     synchroniser_le_dossier(original.parent());
     #[cfg(test)]
     if essais::COUPURE_AVANT_RENOMMAGE.with(|c| c.get()) {
-        // Le processus « meurt » ici : aucun `Drop` ne passe.
-        std::mem::forget(copie);
+        // Le processus « meurt » ici : la copie reste sur le disque, comme
+        // si aucun `Drop` ne passait.
+        copie.renommee = true;
         return Err("coupure simulée avant le renommage".into());
     }
     std::fs::rename(&copie.chemin, original).map_err(|e| format!("rename: {e}"))?;
