@@ -25,6 +25,7 @@ pub mod dashboard;
 pub mod db;
 pub mod db_backup;
 pub mod deezer_proxy;
+pub mod demarrage_inacheve;
 pub mod device_catalog;
 pub mod device_preconfig;
 pub mod digest;
