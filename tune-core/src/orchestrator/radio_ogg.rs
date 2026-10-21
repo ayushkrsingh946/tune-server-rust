@@ -37,7 +37,25 @@ pub(super) enum DecodeurRadio {
         decodeur: opus::Decoder,
         canaux: usize,
         tampon: Vec<f32>,
+        /// Échantillons (par canal) encore à écarter en tête du flux logique :
+        /// le pre-skip de l'OpusHead (RFC 7845 §4.2), le pré-roll de
+        /// l'encodeur, qui ne fait pas partie du son. Un décodeur neuf par
+        /// flux logique : il est rejoué à chaque titre d'un Ogg chaîné.
+        a_ecarter: usize,
     },
+}
+
+/// Le pre-skip que l'OpusHead annonce (octets 10 et 11, petit-boutiste),
+/// 0 sans en-tête lisible. symphonia recopie l'OpusHead entier dans
+/// `extra_data`.
+fn pre_skip_opus(params: &AudioCodecParameters) -> usize {
+    params
+        .extra_data
+        .as_deref()
+        .filter(|tete| tete.len() >= 12 && tete.starts_with(b"OpusHead"))
+        .map_or(0, |tete| {
+            usize::from(u16::from_le_bytes([tete[10], tete[11]]))
+        })
 }
 
 impl DecodeurRadio {
@@ -63,6 +81,7 @@ impl DecodeurRadio {
                 decodeur,
                 canaux,
                 tampon: vec![0.0; TRAME_OPUS_MAX * canaux],
+                a_ecarter: pre_skip_opus(params),
             });
         }
         symphonia::default::get_codecs()
@@ -90,6 +109,7 @@ impl DecodeurRadio {
                 decodeur,
                 canaux,
                 tampon,
+                a_ecarter,
             } => {
                 if paquet.data.is_empty() {
                     return Ok(*canaux);
@@ -98,7 +118,9 @@ impl DecodeurRadio {
                     .decode_float(&paquet.data, tampon, false)
                     .map_err(|e| format!("opus: {e}"))?;
                 let n = (par_canal * *canaux).min(tampon.len());
-                sortie.extend_from_slice(&tampon[..n]);
+                let ecartes = (*a_ecarter).min(par_canal);
+                *a_ecarter -= ecartes;
+                sortie.extend_from_slice(&tampon[(ecartes * *canaux).min(n)..n]);
                 Ok(*canaux)
             }
         }
@@ -205,5 +227,56 @@ mod tests {
         assert!(!pcm.is_empty());
         // Un autre format (cadence annoncée différente) : on ne continue pas.
         assert!(piste_du_flux_suivant(&*format, 2, 44_100).is_none());
+    }
+
+    /// Le pre-skip de l'OpusHead (312 dans la fixture) est écarté en tête de
+    /// CHAQUE flux logique : sinon le pré-roll de l'encodeur (6,5 ms) est
+    /// joué au début du flux, puis à chaque titre d'un Ogg chaîné.
+    #[test]
+    fn le_pre_skip_opus_est_ecarte_a_chaque_flux_logique() {
+        use symphonia::core::codecs::CodecParameters;
+        use symphonia::core::formats::TrackType;
+        use symphonia::core::formats::probe::Hint;
+        use symphonia::core::io::MediaSourceStream;
+        // 0,2 s par flux : 10 trames de 960 échantillons par canal.
+        let mut octets = crate::ogg_factice::ogg_opus(40, 0.2, &[("TITLE", "Un")]);
+        octets.extend(crate::ogg_factice::ogg_opus(41, 0.2, &[("TITLE", "Deux")]));
+        let mss =
+            MediaSourceStream::new(Box::new(std::io::Cursor::new(octets)), Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension("ogg");
+        let mut format = symphonia::default::get_probe()
+            .probe(&hint, mss, Default::default(), Default::default())
+            .expect("sonde");
+        let mut decodeur = match &format
+            .default_track(TrackType::Audio)
+            .expect("piste")
+            .codec_params
+        {
+            Some(CodecParameters::Audio(p)) => DecodeurRadio::pour(p).expect("décodeur opus"),
+            autre => panic!("piste audio attendue : {autre:?}"),
+        };
+        let mut par_flux = vec![0usize];
+        let mut pcm = Vec::new();
+        loop {
+            match format.next_packet() {
+                Ok(Some(paquet)) => {
+                    assert_eq!(decodeur.decoder(&paquet, &mut pcm), Ok(2));
+                    *par_flux.last_mut().unwrap() += pcm.len() / 2;
+                }
+                Err(symphonia::core::errors::Error::ResetRequired) => {
+                    decodeur = piste_du_flux_suivant(&*format, 2, 48_000)
+                        .expect("même format : on continue")
+                        .1;
+                    par_flux.push(0);
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(
+            par_flux,
+            vec![10 * 960 - 312, 10 * 960 - 312],
+            "chaque flux logique doit perdre exactement le pre-skip de son OpusHead"
+        );
     }
 }
