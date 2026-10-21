@@ -1528,13 +1528,7 @@ impl PlaybackOrchestrator {
                     source = %resolved.source,
                     "envoi_annule_session_de_flux_abandonnee"
                 );
-                return (
-                    false,
-                    Some(format!(
-                        "Le flux de « {} » n'a pas pu être ouvert auprès du service ({}).",
-                        resolved.title, resolved.source
-                    )),
-                );
+                return (false, Some(message_flux_non_ouvert(resolved)));
             }
 
             // A local output opens this URL in its own reader thread just
@@ -1562,6 +1556,9 @@ impl PlaybackOrchestrator {
                     req.zone_id,
                     req.track_id,
                 )
+                .await;
+            let result = self
+                .session_morte_pendant_l_envoi(req, resolved, device_id, result)
                 .await;
             let total_ms = play_start.elapsed().as_millis();
             // `output_ms` ne compte plus l'attente de pré-tampon : les trois
@@ -1626,6 +1623,51 @@ impl PlaybackOrchestrator {
             );
             (false, None)
         }
+    }
+
+    /// #6658 — la garde #5522 ci-dessus regarde la session UNE fois, AVANT
+    /// l'envoi. Or l'envoi à une sortie locale prend son temps : arrêter le
+    /// flux précédent et relâcher le périphérique exclusif. Au fil 2350
+    /// (rc6, ASIO), la garde passe vers 14:29:50.75, le producteur meurt à
+    /// 51.411 (`streaming_session_abandonnee_producteur_mort`), et la sortie
+    /// n'ouvre `/stream/<id>.wav` qu'à 51.990 : 404, `output_play_sent`
+    /// quand même, et la zone reste « en lecture » à 0:00, sans un mot.
+    ///
+    /// Relue ici, juste après l'envoi : si le producteur a abandonné la
+    /// session pendant l'envoi, la sortie tient un flux mort. Elle est
+    /// arrêtée, et l'échec prend le chemin d'erreur ordinaire, avec le MÊME
+    /// message que la garde #5522 (`output_sent=false` et un motif : la zone
+    /// s'arrête et le bandeau le dit).
+    ///
+    /// Seule une session ABANDONNÉE par son producteur compte
+    /// (`AudioStreamer::session_abandonnee`) : une session retirée par un Stop
+    /// ou une nouvelle lecture pendant l'envoi n'est pas un échec de CETTE
+    /// lecture, et ne doit pas arrêter la zone.
+    async fn session_morte_pendant_l_envoi(
+        &self,
+        req: &PlayRequest,
+        resolved: &ResolvedStream,
+        device_id: &str,
+        result: (bool, Option<String>),
+    ) -> (bool, Option<String>) {
+        let Some(ref sid) = resolved.stream_id else {
+            return result;
+        };
+        if !result.0 || !self.streamer.session_abandonnee(sid) {
+            return result;
+        }
+        warn!(
+            zone_id = req.zone_id,
+            stream_id = %sid,
+            source = %resolved.source,
+            device_id,
+            "envoi_annule_session_de_flux_abandonnee_pendant_l_envoi"
+        );
+        let sortie = { self.outputs.lock().await.get(device_id) };
+        if let Some(sortie) = sortie {
+            let _ = sortie.lock().await.stop().await;
+        }
+        (false, Some(message_flux_non_ouvert(resolved)))
     }
 
     /// Cinquième temps : ce qui ne se dit qu'une fois la sortie entendue.
@@ -2471,6 +2513,54 @@ impl PlaybackOrchestrator {
             false,
         )
         .await;
+    }
+
+    /// #6380 (Sandro, fils 2351 et 2352, Diretta Renderer en DLNA) — la
+    /// « Lecture » qui suit un REDÉMARRAGE, à la position restaurée.
+    ///
+    /// Les chemins « Lecture après arrêt » de `routes/playback.rs` passent la
+    /// position restaurée dans `seek_ms` (#2876). Mais une piste de la
+    /// bibliothèque en passthrough part dans une session FICHIER, une piste
+    /// Qobuz dans une session MANDATAIRE : ces sessions servent depuis
+    /// l'octet 0 et ne lisent jamais `seek_ms` (#2893). Le renderer ouvrait
+    /// donc le flux en `bytes=0-`, sans aucun `Seek` derrière : le morceau
+    /// repartait de 0:00 alors que le journal annonçait
+    /// `reprise_a_la_position_restauree position_ms=7000`.
+    ///
+    /// Même remède que la relecture, le rétablissement de `resume` et la
+    /// reprise après décrochage : [`Self::seek_output_after_replay`], avec sa
+    /// règle ([`replay_needs_output_seek`] : sortie réseau, session seekable,
+    /// position non nulle), son garde du départ natif (#6059) et son `Seek`
+    /// détaché après la pose. Une session décodée (OAAT, sortie locale,
+    /// traitement actif) part déjà de l'offset et ne reçoit rien de plus.
+    ///
+    /// Sans position (`seek_ms` nul ou absent), c'est exactement
+    /// [`Self::play`].
+    pub async fn play_a_la_position_restauree(
+        &self,
+        req: PlayRequest,
+    ) -> Result<PlayResult, String> {
+        let zone_id = req.zone_id;
+        let position_ms = req.seek_ms.unwrap_or(0);
+        let device_id = req.output_device_id.clone().or_else(|| {
+            ZoneRepo::with_backend(self.db.clone())
+                .get(zone_id)
+                .ok()
+                .flatten()
+                .and_then(|z| z.output_device_id)
+        });
+        let resultat = self.play(req).await?;
+        // Rien n'est parti vers la sortie (lecture évincée, double appui
+        // fusionné) : il n'y a pas de flux neuf à rattraper.
+        if position_ms > 0
+            && resultat.output_sent
+            && let Some(did) = device_id
+        {
+            let output_type = self.output_type_of(&did).await;
+            self.seek_output_after_replay(zone_id, Some(&did), output_type.as_deref(), position_ms)
+                .await;
+        }
+        Ok(resultat)
     }
 
     /// Fil 2125 (#5711) — le saut de la reprise automatique après décrochage
@@ -3925,3 +4015,12 @@ pub(crate) fn sessions_a_fermer_apres_remplacement(
 
 #[cfg(test)]
 mod session_remplacee_ticket_134;
+
+/// Le bandeau d'une lecture dont la session de flux est morte avant que la
+/// sortie n'en tire un octet : avant l'envoi (#5522) ou pendant (#6658).
+fn message_flux_non_ouvert(resolved: &ResolvedStream) -> String {
+    format!(
+        "Le flux de « {} » n'a pas pu être ouvert auprès du service ({}).",
+        resolved.title, resolved.source
+    )
+}

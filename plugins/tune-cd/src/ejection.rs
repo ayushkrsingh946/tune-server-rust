@@ -140,7 +140,12 @@ impl Surveillant {
         if (avant != Some(presence) || lecteur_remplace)
             && let Some(p) = &self.publication
         {
-            p.publier(presence).await;
+            // #6596 — un disque qui ARRIVE (pas celui déjà là au premier
+            // tour) est annoncé : le client propose de le charger. Rien
+            // d'autre : ni file, ni lecture.
+            let insertion = presence == Presence::Disque
+                && (lecteur_remplace || avant.is_some_and(|a| a != Presence::Disque));
+            p.publier(presence, insertion).await;
         }
         arretees
     }

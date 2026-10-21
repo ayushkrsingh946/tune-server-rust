@@ -5,6 +5,9 @@ mod album_ref_bandcamp_2121_tests;
 #[path = "playback/journal_pause_reprise_tests.rs"]
 mod journal_pause_reprise_tests;
 #[cfg(test)]
+#[path = "playback/reprise_apres_redemarrage_dlna_6380_tests.rs"]
+mod reprise_apres_redemarrage_dlna_6380_tests;
+#[cfg(test)]
 #[path = "playback/seek_en_double_193_tests.rs"]
 mod seek_en_double_193_tests;
 #[cfg(test)]
@@ -2106,6 +2109,29 @@ async fn ancrer_position_demandee(
     );
 }
 
+/// Lancer la lecture d'une demande dont la position vient — ou non — de la
+/// reprise restaurée au démarrage.
+///
+/// #6380 (Sandro, fils 2351 et 2352, Diretta Renderer en DLNA) : `seek_ms`
+/// suffit aux bras qui décodent, pas aux sessions fichier et mandataire, qui
+/// servent depuis l'octet 0. Une reprise passe donc par
+/// `play_a_la_position_restauree`, qui envoie ensuite à la sortie réseau le
+/// `Seek` de la relecture (#2893). Sans reprise, rien ne change.
+async fn lancer_la_lecture(
+    state: &AppState,
+    orch_req: tune_core::orchestrator::PlayRequest,
+    reprise: Option<u64>,
+) -> Result<tune_core::orchestrator::PlayResult, String> {
+    if reprise.is_some() {
+        state
+            .orchestrator
+            .play_a_la_position_restauree(orch_req)
+            .await
+    } else {
+        state.orchestrator.play(orch_req).await
+    }
+}
+
 /// La décision seule, sans effet de bord : cette demande de lecture porte-t-elle
 /// sur la piste dont le démarrage a restauré la position ?
 ///
@@ -2212,7 +2238,7 @@ async fn play(
                     album_ref: None,
                 };
                 ancrer_position_demandee(&state, zone_id, orch_req.seek_ms, reprise).await;
-                return match state.orchestrator.play(orch_req).await {
+                return match lancer_la_lecture(&state, orch_req, reprise).await {
                     Ok(result) => {
                         // Restore queue_length from DB so the poller can
                         // advance tracks (fixes repeat-all after restart).
@@ -3137,7 +3163,7 @@ async fn play(
                 album_ref: None,
             };
             ancrer_position_demandee(&state, zone_id, orch_req.seek_ms, reprise).await;
-            return match state.orchestrator.play(orch_req).await {
+            return match lancer_la_lecture(&state, orch_req, reprise).await {
                 Ok(result) => {
                     persist_queue_async(&state, zone_id);
                     Json(build_zone_json_with_result(&state, zone_id, &result).await)
@@ -3373,7 +3399,7 @@ async fn play(
 
     ancrer_position_demandee(&state, zone_id, orch_req.seek_ms, reprise).await;
 
-    match state.orchestrator.play(orch_req).await {
+    match lancer_la_lecture(&state, orch_req, reprise).await {
         Ok(result) => {
             let qr = PlayQueueRepo::with_backend(state.backend.clone());
             let q_len = qr.count_all(zone_id).unwrap_or(0);
@@ -3545,7 +3571,7 @@ async fn resume(
             album_ref: None,
         };
         ancrer_position_demandee(&state, zone_id, orch_req.seek_ms, reprise).await;
-        return match state.orchestrator.play(orch_req).await {
+        return match lancer_la_lecture(&state, orch_req, reprise).await {
             Ok(result) => {
                 // Restore queue_length from DB so the poller can
                 // advance tracks (fixes repeat-all after restart).
