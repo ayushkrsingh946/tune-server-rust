@@ -456,6 +456,11 @@ async fn purger(state: &AppState, id: &str, garder_les_reglages: bool) -> Respon
         return refusal("unknown third-party native plugin".into());
     }
     let settings = tune_core::db::settings_repo::SettingsRepo::with_backend(state.backend.clone());
+    // Lues AVANT la désinstallation, qui baisse les drapeaux du greffon.
+    let zones_du_greffon = state
+        .orchestrator
+        .zones_qui_utilisent_le_greffon_tiers(id)
+        .await;
     let bilan = match desinstaller_completement(&root(), &settings, id, garder_les_reglages) {
         Ok(bilan) => bilan,
         Err(e) => {
@@ -464,13 +469,12 @@ async fn purger(state: &AppState, id: &str, garder_les_reglages: bool) -> Respon
         }
     };
     // Sortir des chaînes SANS redémarrage : l'étage casque de chaque sortie
-    // locale qui joue est rebâti, sans le greffon. Un flux réseau déjà
-    // préparé le porte jusqu'à la fin de sa piste ; la suivante ne l'a plus.
-    let zones = tune_core::db::zone_repo::ZoneRepo::with_backend(state.backend.clone())
-        .list()
-        .unwrap_or_default();
+    // locale qui joue AVEC ce greffon est rebâti, sans lui. Les autres zones
+    // ne sont pas touchées : les rebâtir ne leur retirerait rien et pourrait
+    // s'entendre. Un flux réseau déjà préparé le porte jusqu'à la fin de sa
+    // piste ; la suivante ne l'a plus.
     let mut zones_rebaties = Vec::new();
-    for zone in zones.iter().filter_map(|z| z.id) {
+    for zone in zones_du_greffon {
         if state
             .orchestrator
             .rebatir_l_etage_casque_en_direct(zone)

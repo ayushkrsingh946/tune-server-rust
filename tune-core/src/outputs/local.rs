@@ -1837,6 +1837,15 @@ impl LocalOutput {
         self.crossfeed.lock().unwrap().is_some()
     }
 
+    /// #6256 — l'étage casque installé porte-t-il le greffon natif tiers `id` ?
+    pub fn crossfeed_porte_l_etage_tiers(&self, id: &str) -> bool {
+        self.crossfeed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|cf| cf.porte_l_etage_tiers(id))
+    }
+
     pub fn has_convolver(&self) -> bool {
         self.convolver_config.lock().unwrap().is_some()
     }
