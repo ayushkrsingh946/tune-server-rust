@@ -188,3 +188,54 @@ async fn sans_limite_le_pas_par_defaut_est_de_deux_points_6541() {
     assert!(proche(corps["volume"].as_f64().unwrap(), 0.18), "{corps}");
     assert_eq!(corps["limited"], false);
 }
+
+/// Relecture rc7 de #6620 — zone à volume fixe : poser une sécurité la fait
+/// descendre (réarmement borné), la RELEVER ou l'effacer n'envoie rien.
+/// Avant le correctif, le second PUT réarmait et l'appareil montait de 0,6 à
+/// 0,9 sans aucun geste de volume.
+#[tokio::test]
+async fn relever_la_securite_d_une_zone_fixe_ne_monte_pas_l_appareil_6541() {
+    let (app, state, id) = serveur().await;
+    ZoneRepo::with_backend(state.backend.clone())
+        .update_fixed_volume(id, true)
+        .unwrap();
+    let regler = |corps: Value| {
+        let app = app.clone();
+        async move {
+            let (statut, rendu) = appeler(
+                &app,
+                "PUT",
+                &format!("/api/v1/zones/{id}/volume-limits"),
+                corps,
+            )
+            .await;
+            assert_eq!(statut, StatusCode::OK, "{rendu}");
+        }
+    };
+
+    regler(json!({ "safety": 0.6 })).await;
+    assert_eq!(
+        recus(&state).await,
+        vec![0.6],
+        "poser une sécurité sur une zone fixe réarme l'appareil à la sécurité"
+    );
+
+    regler(json!({ "safety": 0.9 })).await;
+    assert_eq!(
+        recus(&state).await,
+        vec![0.6],
+        "relever la sécurité de 0,6 à 0,9 ne doit RIEN envoyer : l'appareil \
+         monterait sans geste de volume"
+    );
+
+    regler(json!({})).await;
+    assert_eq!(
+        recus(&state).await,
+        vec![0.6],
+        "effacer la sécurité ne doit rien envoyer non plus"
+    );
+
+    // Témoin : un nouvel abaissement réarme, borné.
+    regler(json!({ "safety": 0.4 })).await;
+    assert_eq!(recus(&state).await, vec![0.6, 0.4]);
+}

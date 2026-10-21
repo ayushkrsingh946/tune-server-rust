@@ -125,6 +125,9 @@ pub(super) async fn regler_les_limites(
         Ok(v) => v,
         Err(m) => return refus("invalid_volume_limit", m),
     };
+    // Lue AVANT l'écriture : seul un abaissement réarme une zone à volume
+    // fixe (relecture rc7 de #6620).
+    let securite_avant = volume_limites::lire(&state.backend, id).securite;
     let settings = SettingsRepo::with_backend(state.backend.clone());
     for (cle, valeur) in [
         (volume_limites::cle_securite(id), securite),
@@ -151,12 +154,21 @@ pub(super) async fn regler_les_limites(
     );
     // Effet immédiat : une zone au-dessus de la nouvelle sécurité est
     // ramenée MAINTENANT, pas au prochain geste. Une zone à volume fixe ne
-    // reçoit rien de `set_volume` : son appareil est réarmé, borné.
+    // reçoit rien de `set_volume` : son appareil est réarmé, borné — mais
+    // seulement si la sécurité BAISSE (ou apparaît). Le réarmement envoie la
+    // nouvelle sécurité : la relever de 0,6 à 0,9 ferait monter l'appareil
+    // sans aucun geste de volume. Un relèvement ou un effacement n'envoie
+    // rien ; le prochain armement (lecture, réglage) appliquera la nouvelle
+    // borne.
     if let Some(s) = limites.securite {
         let actuel = state.playback.get_state(id).await.volume;
         let device_id = zone.output_device_id.as_deref();
         let resultat = if zone.fixed_volume {
-            state.orchestrator.arm_fixed_volume(id, device_id).await
+            if securite_avant.is_none_or(|avant| s < avant) {
+                state.orchestrator.arm_fixed_volume(id, device_id).await
+            } else {
+                Ok(())
+            }
         } else if actuel > s || zone.volume / 100.0 > s {
             state
                 .orchestrator

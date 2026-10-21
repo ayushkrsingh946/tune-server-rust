@@ -261,8 +261,22 @@ async fn hors_verrou_l_aiguillage_laisse_adopter() {
 
 #[test]
 fn le_bandeau_dit_l_echec_de_la_reimposition() {
-    let m = volume_pure_5695::message_de_volume_reimpose(0.83, Some("timeout"));
+    let m = volume_pure_5695::message_de_volume_reimpose(0.83, 1.0, Some("timeout"));
     assert!(m.contains("83 %") && m.contains("n'a pas pu") && m.contains("timeout"));
+}
+
+/// #6541 (relecture rc7 de #6620) — sous une limite de sécurité, Tune a
+/// renvoyé la limite, pas 100 % : le bandeau le dit.
+#[test]
+fn sous_une_limite_le_bandeau_dit_la_limite_et_pas_100_6541() {
+    let m = volume_pure_5695::message_de_volume_reimpose(0.95, 0.7, None);
+    assert!(
+        m.contains("remis à 70 %, sa limite de sécurité"),
+        "le bandeau doit nommer la limite envoyée : {m}"
+    );
+    assert!(!m.contains("remis à 100 %"), "{m}");
+    let sans = volume_pure_5695::message_de_volume_reimpose(0.95, 1.0, None);
+    assert!(sans.contains("remis à 100 %"), "{sans}");
 }
 
 /// L'état hérité : la zone était DÉJÀ à 83 % en base et sur l'appareil quand

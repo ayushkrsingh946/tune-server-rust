@@ -18,18 +18,29 @@
 use super::*;
 
 /// Le texte du bandeau. Le volume rapporté est nommé : c'est la seule trace,
-/// côté auditeur, de ce que l'appareil a fait de lui-même.
-pub(super) fn message_de_volume_reimpose(rapporte: f64, echec: Option<&str>) -> String {
+/// côté auditeur, de ce que l'appareil a fait de lui-même. `cible` est ce que
+/// Tune a réellement renvoyé : 100 %, ou la limite de sécurité de la zone
+/// quand elle en a une (#6541) — le bandeau ne promet pas un 100 % qui n'a
+/// pas été envoyé.
+pub(super) fn message_de_volume_reimpose(rapporte: f64, cible: f64, echec: Option<&str>) -> String {
     let pourcent = (rapporte.clamp(0.0, 1.0) * 100.0).round() as i32;
+    let remis = if cible < 1.0 {
+        format!(
+            "{} %, sa limite de sécurité",
+            (cible.clamp(0.0, 1.0) * 100.0).round() as i32
+        )
+    } else {
+        "100 %".to_string()
+    };
     match echec {
         None => format!(
             "Le volume de l'appareil a été changé hors de Tune ({pourcent} %), alors que \
-             le mode PURE de cette zone impose 100 % : Tune l'a remis à 100 %."
+             le mode PURE de cette zone impose 100 % : Tune l'a remis à {remis}."
         ),
         Some(cause) => format!(
             "Le volume de l'appareil a été changé hors de Tune ({pourcent} %), alors que \
              le mode PURE de cette zone impose 100 %, et Tune n'a pas pu le remettre à \
-             100 % ({cause})."
+             {remis} ({cause})."
         ),
     }
 }
@@ -74,7 +85,11 @@ impl PositionPoller {
                 "zone.playback_error",
                 serde_json::json!({
                     "zone_id": zone_id,
-                    "error": message_de_volume_reimpose(rapporte, echec.as_deref()),
+                    "error": message_de_volume_reimpose(
+                        rapporte,
+                        crate::audio::volume_limites::lire(&self.db, zone_id).borner_appareil(1.0),
+                        echec.as_deref(),
+                    ),
                     // La lecture continue : c'est un avertissement (#2269).
                     "fatal": false,
                 }),
