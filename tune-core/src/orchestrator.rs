@@ -1958,7 +1958,8 @@ async fn arm_local_stream_consumer_watch(
             format = %session.info.format,
             mime_type = %session.info.mime_type,
             file_path = ?file_path,
-            proxy_url = ?proxy_url,
+            // L'hôte seul : l'URL amont d'un mandataire est souvent signée (#6468).
+            proxy_hote = ?proxy_url.as_deref().map(resolve_direct::hote_pour_le_journal),
             active_consumers,
             "local_stream_never_consumed"
         );

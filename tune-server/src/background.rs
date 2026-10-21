@@ -1444,6 +1444,19 @@ fn spawn_telemetry_reporter(state: &AppState) {
 /// memoire. Elles sont locales et n'appellent personne.
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
+/// L'adresse de production du battement.
+const BASE_DU_BATTEMENT: &str = "https://mozaiklabs.fr";
+
+/// `POST {base}/api/v1/heartbeat`. La base est celle de production, sauf dans
+/// un banc compilé avec `services-factices` qui en a déclaré une autre : hors
+/// de cette feature, `base_substituee` rend toujours `None` (#6336).
+fn url_du_battement() -> String {
+    let base =
+        tune_core::services_factices::base_substituee(tune_core::services_factices::MOZAIKLABS)
+            .unwrap_or_else(|| BASE_DU_BATTEMENT.to_string());
+    format!("{base}/api/v1/heartbeat")
+}
+
 /// Reprise rapprochée après un battement — ou une revalidation de clé — en
 /// échec : 1 min, puis 5, puis 15, puis la cadence horaire. Sans elle, un
 /// hôte injoignable au démarrage (réseau pas encore monté, coupure) laissait
@@ -1520,7 +1533,10 @@ pub fn plan_du_tour(settings: &tune_core::db::settings_repo::SettingsRepo) -> He
 /// comment here used to claim the loop ran "ALWAYS regardless of
 /// TUNE_TELEMETRY", and the code agreed with it: the opt-out cut nothing.
 /// The account premium refresh keeps running either way, see [`heartbeat_plan`].
-fn spawn_heartbeat(state: &AppState) {
+///
+/// `pub` pour les bancs d'essai (#6336) : ils lancent CETTE boucle, contre un
+/// faux mozaiklabs, et lisent son verdict par le vrai routeur.
+pub fn spawn_heartbeat(state: &AppState) {
     let backend = state.backend.clone();
     let services = state.services.clone();
     let outputs = state.outputs.clone();
@@ -1837,7 +1853,7 @@ fn spawn_heartbeat(state: &AppState) {
                 &settings,
                 tune_core::cloud::rate_limit::CloudScope::InstanceHeartbeat,
                 client
-                    .post("https://mozaiklabs.fr/api/v1/heartbeat")
+                    .post(url_du_battement())
                     .header("Accept", "application/json")
                     .json(&payload),
             )
