@@ -3710,6 +3710,30 @@ pub(super) fn meme_url(retenue: &str, posee: &str) -> bool {
 }
 
 impl DlnaOutput {
+    /// #6335 — efface la suivante que l'appareil tient (`SetNextAVTransportURI`
+    /// vide, la forme qu'AVTransport:1 donne à « plus de suivante »).
+    ///
+    /// Pour la façade MediaRenderer d'une zone : quand elle retire la suivante
+    /// qu'elle avait confiée à la file, le sondeur a pu l'armer déjà chez
+    /// l'appareil, qui l'enchaînerait alors tout seul. Le sondeur, lui, ne
+    /// désarme jamais une préparation dont la suivante a quitté la file
+    /// (`gapless_arm_outdated(Some, None)`), et ce sens-là protège le gapless
+    /// ordinaire : seul l'appelant qui SAIT que la suivante est retirée efface.
+    pub async fn effacer_la_suivante(&self) -> Result<(), String> {
+        let resp = self
+            .av_action(
+                "SetNextAVTransportURI",
+                "<InstanceID>0</InstanceID><NextURI></NextURI><NextURIMetaData></NextURIMetaData>",
+            )
+            .await?;
+        if resp.contains("UPnPError") || resp.contains("<errorCode>") {
+            warn!(device = %self.name, response = %resp, "dlna_suivante_non_effacee");
+            return Err(format!("SetNextAVTransportURI vide refusé : {resp}"));
+        }
+        info!(device = %self.name, "dlna_suivante_effacee");
+        Ok(())
+    }
+
     pub async fn get_protocol_info(&self) -> Result<Vec<String>, String> {
         let body = self
             .soap_action(
