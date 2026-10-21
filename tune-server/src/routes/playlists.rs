@@ -173,7 +173,68 @@ async fn list_playlists(
     let offset = p.offset.unwrap_or(0);
     let items = repo.list(profile.id(), limit, offset).unwrap_or_default();
     let _total = repo.count(profile.id()).unwrap_or(0);
-    Json(json!(items))
+    // #6688 — le badge « Partagée avec un cercle ».
+    let mut cercles = cercles_par_playlist(&state);
+    Json(json!(
+        items
+            .into_iter()
+            .map(|pl| {
+                let liste = pl.id.and_then(|id| cercles.remove(&id)).unwrap_or_default();
+                avec_les_cercles(json!(pl), liste)
+            })
+            .collect::<Vec<_>>()
+    ))
+}
+
+/// Préfixe des liens de suivi que le greffon Tune Circle écrit dans les
+/// réglages (`tune_circle::suivi::PREFIXE_SUIVI`, #6688) : une playlist de
+/// cercle → la playlist locale qu'elle suit. Lu ici sans dépendre du greffon :
+/// sans greffon, aucun lien, et `cercles` est vide.
+const PREFIXE_SUIVI_DE_CERCLE: &str = "circle_suivi:";
+
+/// #6688 — pour chaque playlist locale partagée avec un cercle, les cercles
+/// qui la portent : `{ id, nom, suivi, synchronisee_le }`. `suivi` est faux
+/// après « Ne plus suivre » (le lien est gardé, arrêté) ; `synchronisee_le`
+/// est la date du dernier report (RFC 3339), nulle avant le premier.
+fn cercles_par_playlist(state: &AppState) -> std::collections::HashMap<i64, Vec<Value>> {
+    let mut par_playlist: std::collections::HashMap<i64, Vec<Value>> = Default::default();
+    let reglages = SettingsRepo::with_backend(state.backend.clone())
+        .all()
+        .unwrap_or_default();
+    for (cle, valeur) in reglages {
+        if !cle.starts_with(PREFIXE_SUIVI_DE_CERCLE) {
+            continue;
+        }
+        let Ok(lien) = serde_json::from_str::<Value>(&valeur) else {
+            continue;
+        };
+        let Some(locale) = lien["local_playlist_id"].as_i64() else {
+            continue;
+        };
+        par_playlist.entry(locale).or_default().push(json!({
+            "id": lien["circle_id"],
+            "nom": lien["circle_name"],
+            "suivi": lien["stopped_at"].is_null(),
+            "synchronisee_le": lien["last_sync"],
+        }));
+    }
+    for liste in par_playlist.values_mut() {
+        liste.sort_by(|a, b| {
+            a["nom"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(b["nom"].as_str().unwrap_or_default())
+        });
+    }
+    par_playlist
+}
+
+/// La playlist sérialisée, avec `cercles` (vide si elle n'est pas partagée).
+fn avec_les_cercles(mut playlist: Value, cercles: Vec<Value>) -> Value {
+    if let Some(obj) = playlist.as_object_mut() {
+        obj.insert("cercles".into(), Value::Array(cercles));
+    }
+    playlist
 }
 
 /// #2794 — le cloisonnement par profil ne tenait qu'au listing. Toute route
@@ -198,7 +259,11 @@ async fn get_playlist(
 ) -> impl IntoResponse {
     let repo = PlaylistRepo::with_backend(state.backend.clone());
     match repo.get_for_profile(id, profile.id()) {
-        Ok(Some(pl)) => Json(json!(pl)).into_response(),
+        Ok(Some(pl)) => {
+            // #6688 — le badge « Partagée avec un cercle ».
+            let cercles = cercles_par_playlist(&state).remove(&id).unwrap_or_default();
+            Json(avec_les_cercles(json!(pl), cercles)).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
@@ -2336,5 +2401,18 @@ mod ssrf_tests {
         ] {
             assert!(!is_blocked_ip(&ip(s)), "{s} should be allowed");
         }
+    }
+}
+
+#[cfg(all(test, feature = "circle"))]
+mod badge_de_cercle_6688 {
+    /// Le préfixe lu ici est celui qu'écrit le greffon : s'ils divergent, le
+    /// badge « Partagée avec un cercle » disparaît sans bruit.
+    #[test]
+    fn le_prefixe_lu_est_celui_du_greffon() {
+        assert_eq!(
+            super::PREFIXE_SUIVI_DE_CERCLE,
+            tune_circle::suivi::PREFIXE_SUIVI
+        );
     }
 }

@@ -1609,6 +1609,12 @@ required-features = ["postgres"]
 name = "playlists_pistes_de_service"
 path = "tests/playlists_pistes_de_service.rs"
 
+# #6688 — le badge « Partagée avec un cercle » (`cercles` dans la liste et la
+# fiche des playlists). `autotests = false` : sans cette cible, jamais compilé.
+[[test]]
+name = "playlists_badge_cercle_6688"
+path = "tests/playlists_badge_cercle_6688.rs"
+
 # Favoris LOCAUX sur PostgreSQL (chasse PG du 25/09/2026) : `ProfileRepo` liait
 # `favorites.profile_id`/`item_id` en chaine alors que ces colonnes sont BIGINT
 # sur les deux naissances d'une base PG. PAS de `required-features` : la
