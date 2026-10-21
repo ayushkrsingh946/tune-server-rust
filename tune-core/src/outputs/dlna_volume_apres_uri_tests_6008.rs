@@ -334,3 +334,44 @@ async fn un_80_remonte_par_l_appareil_n_est_jamais_reimpose_apres_l_uri() {
         "après la pose d'URI, Tune doit reposer SA consigne (13 %), pas les 80 % lus sur l'appareil"
     );
 }
+
+/// 🔴 #6472 — zone sensible (volume). Appareil qui porte la règle « volume
+/// remonté à l'URI », mais auquel Tune n'a encore donné AUCUNE consigne : il
+/// rapporte 0 hors de la fenêtre (la radio de Reivax66, fil 2307), puis deux
+/// changements de piste. Tune n'a rien à reposer : aucun `SetVolume` ne doit
+/// partir, ni 0 ni autre chose.
+#[tokio::test]
+async fn sans_consigne_de_tune_aucun_set_volume_au_changement_de_piste() {
+    let udn = "uuid:banc-6472-sans-consigne";
+    compat::reinitialiser_compatibilite(udn).unwrap();
+    compat::memoriser_volume_remonte_a_l_uri(udn);
+    let etat = FauxRenderer::new(false);
+    let (sortie, vie) = demarrer(etat.clone(), udn).await;
+
+    sortie
+        .play_media(&piste("http://127.0.0.1:9/stream/6472-radio.flac"))
+        .await
+        .expect("la radio part");
+    sortie.vieillir_la_pose_d_uri();
+    *etat.volume.lock().await = 0;
+    let statut = sortie.get_status().await.unwrap();
+    assert!(
+        statut.volume.abs() < 0.005,
+        "prémisse : le sondeur a bien lu 0 ({})",
+        statut.volume
+    );
+    for url in [
+        "http://127.0.0.1:9/stream/6472-album-1.flac",
+        "http://127.0.0.1:9/stream/6472-album-2.flac",
+    ] {
+        sortie.play_media(&piste(url)).await.expect("la piste part");
+    }
+
+    let envoyes = etat.set_volume.lock().await.clone();
+    compat::reinitialiser_compatibilite(udn).unwrap();
+    vie.abort();
+    assert!(
+        envoyes.is_empty(),
+        "#6472 : aucun SetVolume ne doit partir au changement de piste quand Tune n'a posé aucune consigne ; envoyés : {envoyes:?}"
+    );
+}

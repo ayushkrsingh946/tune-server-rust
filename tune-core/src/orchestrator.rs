@@ -1190,6 +1190,10 @@ pub struct PlaybackOrchestrator {
     /// à la position (voir `transfert_en_pause_5050`). Verrou std : accès
     /// courts.
     transferts_en_pause: std::sync::Mutex<std::collections::HashSet<i64>>,
+    /// #6612 — la dernière reprise SUR PLACE d'un renderer réseau, par zone :
+    /// (position, instant). Voir `plage_hors_fichier_6612`. Verrou std :
+    /// accès courts.
+    reprises_sur_place: std::sync::Mutex<std::collections::HashMap<i64, (u64, std::time::Instant)>>,
     /// Anti-rebond du redémarrage de flux déclenché par un changement
     /// d'égaliseur sur un chemin NON local (#1710, lot 2).
     ///
@@ -1427,7 +1431,9 @@ pub struct ResolvedStream {
     pub file_size: Option<u64>,
     /// Audio sample rate in Hz for the output stream (e.g. 176400 for DSD64->PCM).
     pub sample_rate: Option<u32>,
-    /// Output bit depth (e.g. 24 for DSD->PCM).
+    /// Output bit depth (e.g. 24 for DSD->PCM). #6334 — `None` for a lossy
+    /// service codec, even decoded to WAV: this is what the SOURCE announces.
+    /// What reaches an output's `PlayMedia` is `profondeur_du_fil`.
     pub bit_depth: Option<u32>,
     /// Number of audio channels.
     pub channels: Option<u32>,
@@ -1446,6 +1452,12 @@ pub struct ResolvedStream {
     /// et la règle écrite dans `tune-bandcamp` veut que ce débit soit
     /// « annoncé comme tel partout où il apparaît ».
     pub bitrate_kbps: Option<u32>,
+    /// #6334 — le codec que le SERVICE a livré (`aac`, `flac`…), en
+    /// minuscules, quand il le nomme. Distinct de `mime_type`, qui décrit le
+    /// CONTENEUR servi : un AAC décodé pour une sortie qui exige du WAV part
+    /// en `audio/wav`, et l'annonce ne doit pas en faire un WAV « CD ».
+    /// `None` hors services de streaming : la source y est nommée ailleurs.
+    pub format_source: Option<String>,
 }
 
 pub struct ResolvedQueueItem {
@@ -1704,6 +1716,7 @@ impl PlaybackOrchestrator {
             dlna_canaux_max: Mutex::new(HashMap::new()),
             levels_prewarm: std::sync::Mutex::new(std::collections::HashSet::new()),
             transferts_en_pause: std::sync::Mutex::new(std::collections::HashSet::new()),
+            reprises_sur_place: std::sync::Mutex::new(std::collections::HashMap::new()),
             eq_replay_gen: std::sync::Mutex::new(std::collections::HashMap::new()),
             eq_replay_last: std::sync::Mutex::new(std::collections::HashMap::new()),
             traitement_des_flux: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1842,6 +1855,10 @@ mod eq_en_vol_4407_tests;
 // bibliothèque native de test.
 #[cfg(test)]
 mod greffon_natif_tiers_tests;
+// #6256 — la désinstallation d'un greffon natif tiers ne rebâtit que les
+// zones qui l'utilisent.
+#[cfg(all(test, feature = "local-audio"))]
+mod purge_greffon_tiers_6256_tests;
 // #6522, #6524 — le verdict PURE de la sortie locale suit les réglages
 // enregistrés, dans l'état que la vraie bascule produit.
 #[cfg(all(test, feature = "local-audio"))]
@@ -1880,7 +1897,10 @@ pub use bandcamp::*;
 mod bandcamp_resignature;
 
 mod qualite_pre_armee;
-pub(crate) use qualite_pre_armee::{QualitePreArmee, format_du_mime, format_nomme_par_la_source};
+pub(crate) use qualite_pre_armee::{
+    QualitePreArmee, debit_annonce_par_le_service, format_du_mime, format_livre_par_le_service,
+    format_nomme_par_la_source, profondeur_annoncee_par_le_service, profondeur_du_fil,
+};
 
 /// Ce qu'on ANNONCE au renderer pour une piste de serveur média : le MIME ne
 /// se devine plus dans la seule URL, qui pour un `<res>` de Tune ne porte
@@ -2034,6 +2054,8 @@ mod mesure_saut_cd_5079;
 /// FLAC (ou le catalogue) ; inconnue, elle est refusée par une erreur nommée.
 #[cfg(test)]
 mod qobuz_cadence_nulle_5283_tests;
+#[cfg(test)]
+mod tidal_aac_annonce_6334_tests;
 
 /// #6401 — le préchargement sans blanc et la sonde de niveaux après une
 /// avance sans blanc passent par le même repli Qobuz en 16/44,1 que la
@@ -2156,6 +2178,13 @@ mod pause_rend_le_peripherique_4177;
 #[cfg(test)]
 mod reprise_nouveau_flux_6264_tests;
 
+/// #6612 — une plage hors du fichier à la reprise : nouveau flux, à la position.
+pub(crate) mod plage_hors_fichier_6612;
+
+/// #6380 — la Lecture qui suit un redémarrage ramène le renderer réseau à la
+/// position restaurée (piste Qobuz ; sortie locale inchangée).
+#[cfg(test)]
+mod reprise_au_redemarrage_6380;
 /// Fil 2095 — le rétablissement d'une session morte ramène le renderer
 /// réseau à la position de la pause.
 #[cfg(test)]

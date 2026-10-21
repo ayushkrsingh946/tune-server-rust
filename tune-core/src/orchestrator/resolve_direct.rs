@@ -321,6 +321,7 @@ impl PlaybackOrchestrator {
             channels: Some(channels as u32),
             origin_url: None,
             bitrate_kbps: None,
+            format_source: None,
             cover_url: None,
             file_size,
         })
@@ -1000,6 +1001,7 @@ impl PlaybackOrchestrator {
             // renderer réseau : les trois portent le MÊME flux source, et
             // c'est LUI que le chemin du signal doit annoncer (#2074).
             bitrate_kbps: bc_quality.as_ref().and_then(|q| q.bitrate_kbps),
+            format_source: None,
         })
     }
 
@@ -1395,6 +1397,7 @@ impl PlaybackOrchestrator {
             channels: out_ch,
             origin_url: Some(audio_url.to_string()),
             bitrate_kbps: None,
+            format_source: None,
         })
     }
 
@@ -1578,19 +1581,29 @@ impl PlaybackOrchestrator {
         }
     }
 
-    async fn relayer_direct_au_navigateur(&self, req: &PlayRequest, d: Directe<'_>) -> FluxDirect {
-        let Directe {
-            audio_url,
-            mime_type,
-            duration_ms,
-            ..
-        } = d;
+    /// Relaie une URL distante TELLE QUELLE par une session du mandataire de
+    /// Tune, et rend l'adresse `http://` de Tune à jouer avec l'identifiant
+    /// de la session.
+    ///
+    /// Le chemin d'un flux direct vers un onglet (#2076, #2158), et celui
+    /// d'un épisode de podcast vers un renderer réseau (#6468) : un renderer
+    /// DLNA n'ouvre souvent pas le HTTPS d'un hébergeur, le mandataire si.
+    /// Aucun transcodage : les octets passent verbatim, le conteneur suit
+    /// l'URL et le MIME annoncé.
+    pub async fn relayer_un_flux_distant(
+        &self,
+        audio_url: &str,
+        mime_type: &str,
+        duration_ms: Option<i64>,
+        sample_rate: Option<u32>,
+        bit_depth: Option<u16>,
+    ) -> (String, String) {
         let conteneur = conteneur_depuis_url(audio_url, mime_type);
         let info = StreamInfo {
             format: conteneur.to_string(),
             mime_type: mime_type.to_string(),
-            sample_rate: req.sample_rate.unwrap_or(44_100),
-            bit_depth: req.bit_depth.unwrap_or(16),
+            sample_rate: sample_rate.unwrap_or(44_100),
+            bit_depth: bit_depth.unwrap_or(16),
             channels: 2,
             file_size: None,
             duration_ms: duration_ms.map(|d| d as u64),
@@ -1604,11 +1617,33 @@ impl PlaybackOrchestrator {
         let stream_url = self
             .streamer
             .get_stream_url(&session_id, &server_ip, conteneur);
-        info!(
-            url = %audio_url,
-            conteneur,
-            "direct_proxy_for_browser_output"
-        );
+        // L'hôte seul : le chemin ou la requête d'un flux privé ou payant porte
+        // souvent un jeton, qui n'a rien à faire au journal (#6468).
+        let hote = reqwest::Url::parse(audio_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        info!(hote = %hote, conteneur, stream_id = %session_id, "direct_proxy_session");
+        (stream_url, session_id)
+    }
+
+    async fn relayer_direct_au_navigateur(&self, req: &PlayRequest, d: Directe<'_>) -> FluxDirect {
+        let Directe {
+            audio_url,
+            mime_type,
+            duration_ms,
+            ..
+        } = d;
+        let (stream_url, session_id) = self
+            .relayer_un_flux_distant(
+                audio_url,
+                mime_type,
+                duration_ms,
+                req.sample_rate,
+                req.bit_depth,
+            )
+            .await;
+        info!(url = %audio_url, "direct_proxy_for_browser_output");
         (
             stream_url,
             Some(session_id),
