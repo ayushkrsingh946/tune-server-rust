@@ -625,6 +625,19 @@ pub async fn lire_sur_musicbrainz(
     }
 }
 
+/// Le transport de production d'un PARCOURS `/{chemin}?{params}&fmt=json` —
+/// `genre/all` (#6001), `release-group?artist=` (#6288). Même User-Agent,
+/// même base. N'attend pas le créneau : l'appelant appelle
+/// [`rate_limit_delay`] avant chaque page.
+pub async fn parcourir_sur_musicbrainz(
+    chemin: &str,
+    params: &[(&str, String)],
+) -> Result<Value, RefusMusicBrainz> {
+    let mut avec_format: Vec<(&str, String)> = params.to_vec();
+    avec_format.push(("fmt", "json".to_string()));
+    mb_get(chemin, &avec_format).await
+}
+
 /// Best-guess identification: narrow the query with everything we know and
 /// return a hit only if MusicBrainz is confident.
 pub async fn lookup_release(

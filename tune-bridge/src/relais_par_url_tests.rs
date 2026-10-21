@@ -29,7 +29,7 @@ async fn pont_de_test() -> PontDeTest {
     let state = Arc::new(RelayState::new());
     let (tx, serveur) = mpsc::channel::<String>(16);
     state
-        .register_server("srv".into(), "Salon".into(), JETON.into(), tx)
+        .register_server("srv".into(), "Salon".into(), JETON.into(), None, tx)
         .unwrap();
     let app = Router::new()
         .route(
