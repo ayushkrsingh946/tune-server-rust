@@ -368,14 +368,38 @@ impl PlaybackOrchestrator {
     where
         F: Fn(&str) -> Option<String>,
     {
+        self.reglages_sortie_locale_selon_le_repli(
+            environnement,
+            crate::demarrage_inacheve::repli_actif(),
+        )
+    }
+
+    /// Même résolution, le repli de démarrage (#6452) en PARAMÈTRE : muter le
+    /// repli global depuis un test changerait l'hôte de tous les autres.
+    ///
+    /// Sous le repli, ce démarrage n'ouvre pas ASIO : la sortie reconstruite à
+    /// la volée doit partir, elle aussi, sur l'hôte par défaut et en partagé —
+    /// sinon le premier appui sur Lecture rouvrirait le pilote que le
+    /// démarrage vient d'écarter (`AsioExclusiveOutput`).
+    pub fn reglages_sortie_locale_selon_le_repli<F>(
+        &self,
+        environnement: F,
+        repli: Option<&str>,
+    ) -> (bool, String)
+    where
+        F: Fn(&str) -> Option<String>,
+    {
         let reglages = crate::db::settings_repo::SettingsRepo::with_backend(self.db.clone());
-        let backend = reglages
+        let demande_hote = reglages
             .get("local_audio_backend")
             .ok()
             .flatten()
             .filter(|v| !v.trim().is_empty())
             .or_else(|| crate::config::resolve_local_audio_backend(&environnement))
             .unwrap_or_else(|| "auto".to_string());
+        let repli_applique = repli.is_some()
+            && crate::demarrage_inacheve::hote_susceptible_de_bloquer(&demande_hote);
+        let backend = crate::demarrage_inacheve::hote_de_ce_demarrage(demande_hote, repli);
         let demande = reglages
             .get("local_exclusive_mode")
             .ok()
@@ -386,6 +410,16 @@ impl PlaybackOrchestrator {
                     .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "1" | "yes"))
                     .unwrap_or(false)
             });
+        let arme_par_asio = reglages
+            .get(crate::config::REGLAGE_EXCLUSIF_ARME_PAR_ASIO)
+            .ok()
+            .flatten()
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
+        let demande = crate::demarrage_inacheve::exclusif_de_ce_demarrage(
+            demande,
+            arme_par_asio,
+            repli_applique,
+        );
         // ASIO est exclusif par nature, et c'est une notion Windows (#1268,
         // #3192). La règle vit dans `tune-core::config` et n'est pas recopiée
         // ici : une seule écriture pour les deux chemins.
