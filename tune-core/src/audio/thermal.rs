@@ -62,12 +62,12 @@ use tracing::{info, warn};
 /// 80 °C est franchement chaud pour un serveur au repos, et encore loin du
 /// seuil de throttling des CPU modernes (~100 °C) : on s'arrête avant que le
 /// matériel n'ait à se défendre lui-même, pas après.
-const PAUSE_ABOVE_C: f64 = 80.0;
+pub const PAUSE_ABOVE_C: f64 = 80.0;
 
 /// En dessous de cette température, elles reprennent. L'écart avec le seuil de
 /// pause est ce qui empêche l'oscillation : sans lui, une machine posée juste
 /// au seuil ferait démarrer/arrêter la passe en boucle.
-const RESUME_BELOW_C: f64 = 70.0;
+pub const RESUME_BELOW_C: f64 = 70.0;
 
 /// Décision d'un tour de garde, pour que l'appelant journalise les
 /// *transitions* et non chaque tour de boucle.
@@ -144,7 +144,9 @@ impl ThermalGate {
     /// attendre. Factorisé ici pour que les deux sweeps se comportent — et
     /// s'expriment — à l'identique.
     pub fn should_hold(&mut self, sweep: &str) -> bool {
-        match self.check() {
+        let verdict = self.check();
+        noter_la_retenue(sweep, matches!(verdict, Verdict::Hold { .. }));
+        match verdict {
             Verdict::Hold {
                 temp_c,
                 entering: true,
@@ -172,6 +174,37 @@ impl ThermalGate {
             Verdict::Go { .. } => false,
         }
     }
+}
+
+/// Les passes qu'une garde tient en ce moment parce que la machine est trop
+/// chaude (#4681, écran « ce qui tourne »). Chaque passe n'en savait rien
+/// au-delà de sa propre garde : ce registre le rend lisible par une route,
+/// sans lecture de capteur de plus.
+static RETENUES: Mutex<std::collections::BTreeSet<String>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+fn noter_la_retenue(sweep: &str, retenue: bool) {
+    let mut r = RETENUES.lock().unwrap_or_else(|e| e.into_inner());
+    if retenue {
+        if !r.contains(sweep) {
+            r.insert(sweep.to_string());
+        }
+    } else {
+        r.remove(sweep);
+    }
+}
+
+/// Les passes arrêtées par la chaleur (au-delà de [`PAUSE_ABOVE_C`], jusqu'au
+/// retour sous [`RESUME_BELOW_C`]), triées. Vide au frais, et vide quand la
+/// température n'est pas lisible : c'est alors la largeur qui se replie
+/// ([`brider_sans_thermometre`]), pas une garde qui retient.
+pub fn passes_retenues_par_la_chaleur() -> Vec<String> {
+    RETENUES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .cloned()
+        .collect()
 }
 
 /// Un relevé de température lu dans sysfs : la puce ou la zone qui l'expose,
@@ -861,6 +894,23 @@ fn parse_millidegrees(raw: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #4681 — une passe retenue par la chaleur se lit au registre, et en
+    /// sort au retour au frais.
+    #[test]
+    fn une_passe_retenue_par_la_chaleur_se_lit_puis_s_efface_4681() {
+        noter_la_retenue("passe-essai-4681", true);
+        noter_la_retenue("passe-essai-4681", true);
+        assert_eq!(
+            passes_retenues_par_la_chaleur()
+                .iter()
+                .filter(|p| p.as_str() == "passe-essai-4681")
+                .count(),
+            1
+        );
+        noter_la_retenue("passe-essai-4681", false);
+        assert!(!passes_retenues_par_la_chaleur().contains(&"passe-essai-4681".to_string()));
+    }
 
     #[test]
     fn parses_millidegrees_and_rejects_nonsense() {

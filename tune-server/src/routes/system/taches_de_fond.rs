@@ -63,7 +63,7 @@ use crate::state::AppState;
 ///   ces passes s'inscrivent déjà par `begin()` le temps qu'elles vivent.
 /// * **`identification`** — même signal, même registre : le pilote de lot de
 ///   `POST /library/identify-all` s'y inscrit sous `identification_lot` (#4805).
-fn etat_de(state: &AppState, tache: Tache) -> Etat {
+pub(crate) fn etat_de(state: &AppState, tache: Tache) -> Etat {
     if est_en_pause(tache) {
         return Etat::EnPause;
     }

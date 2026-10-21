@@ -726,9 +726,18 @@ pub(super) fn jouer_via_asio(entrees: EntreesAsio) {
     let mut route = match backend.puits() {
         Puits::Natif(puits) => Route::Native {
             etage: EtageNatifAsio {
+                // #6230 (relecture rc7) — l'étage natif porte désormais les
+                // voies de `sortie`. Le puits, lui, reste étiqueté aux canaux
+                // de la source (`spec_du_puits_natif(self.spec)`) : tant que
+                // l'ouverture ASIO n'est pas pilotée (étape 2), l'étage est
+                // monté aux canaux de la SOURCE, comme la route flottante
+                // ci-dessous. Une ouverture de repli à moins de voies (5.1 sur
+                // un DAC stéréo) ne fait donc pas livrer 2 voies à un puits de
+                // 6 (`windows_native_sink_spec_mismatch`, lecture arrêtée) :
+                // les mots restent ceux d'avant cette PR.
                 etage: EtageNatif::monter(
                     spec,
-                    backend.format_ouvert(),
+                    FormatOuvert::new(backend.format_ouvert().cadence, spec.canaux()),
                     &volume,
                     &eq,
                     &convolver,
