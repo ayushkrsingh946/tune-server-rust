@@ -256,13 +256,22 @@ mod tests {
                 .await
                 .unwrap();
             let db: Arc<dyn DbBackend> = Arc::new(crate::db::backend::PostgresBackend::new(pool));
+            // #6222 — « album au hasard » relit l'album par
+            // `TrackRepo::list_by_album`, dont la projection (`select_track`)
+            // lit toutes les colonnes ci-dessous : elles portent les types des
+            // migrations PostgreSQL réelles.
             db.execute_batch(&format!("CREATE TEMP TABLE zones (id BIGINT PRIMARY KEY, autoplay_enabled {initial_type} DEFAULT '0');
             CREATE TEMP TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT);
             CREATE TEMP TABLE artists (id BIGINT PRIMARY KEY, name TEXT);
-            CREATE TEMP TABLE albums (id BIGINT PRIMARY KEY, title TEXT, artist_id BIGINT, year INTEGER);
+            CREATE TEMP TABLE albums (id BIGINT PRIMARY KEY, title TEXT, artist_id BIGINT, year INTEGER,
+                cover_path TEXT);
             CREATE TEMP TABLE tracks (id BIGINT PRIMARY KEY, title TEXT, album_id BIGINT, artist_id BIGINT,
                 file_path TEXT, cue_media_path TEXT, disc_number INTEGER, track_number INTEGER,
-                duration_ms BIGINT DEFAULT 0, genre TEXT, year INTEGER, bpm DOUBLE PRECISION, source TEXT DEFAULT 'local');
+                duration_ms BIGINT DEFAULT 0, genre TEXT, year INTEGER, bpm DOUBLE PRECISION, source TEXT DEFAULT 'local',
+                album_artist TEXT, disc_subtitle TEXT, format TEXT, sample_rate INTEGER, bit_depth INTEGER,
+                channels INTEGER, file_mtime DOUBLE PRECISION, file_size BIGINT, audio_hash TEXT, source_id TEXT,
+                isrc TEXT, composer TEXT, label TEXT, musicbrainz_recording_id TEXT, cover_path TEXT, genres TEXT,
+                comments TEXT, cue_start_ms BIGINT, cue_end_ms BIGINT, rating BIGINT);
             INSERT INTO zones (id, autoplay_enabled) VALUES (1, 0), (2, 1), (3, NULL);")).unwrap();
             if initial_type == "TEXT" {
                 db.execute_batch(
