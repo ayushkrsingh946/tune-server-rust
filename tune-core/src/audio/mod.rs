@@ -67,6 +67,10 @@ pub mod encoder;
 pub mod eq;
 pub mod eq_presets;
 pub mod faststart;
+/// Faux hi-res : bits effectifs et coupure spectrale (#6285).
+pub mod faux_hires;
+/// La passe de fond des faux hi-res (#6285).
+pub mod faux_hires_passe;
 /// Mémoire du volume d'avant l'armement du mode bit-perfect (#2395).
 pub mod fixed_volume;
 pub mod flac_vendeur;

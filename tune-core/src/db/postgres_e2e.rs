@@ -1139,6 +1139,67 @@ async fn pg_6466_le_conteneur_des_elements_de_file() {
     let _ = db.execute("DELETE FROM queue_items", &[]);
 }
 
+/// #6285 — la passe des faux hi-res sur PostgreSQL : la jumelle 093 se
+/// rejoue, les candidats se choisissent (sans perte, locaux, pas encore
+/// mesurés), et le verdict s'écrit puis se réécrit (`ON CONFLICT`).
+#[tokio::test(flavor = "multi_thread")]
+async fn pg_6285_les_verdicts_des_faux_hires() {
+    use crate::audio::faux_hires::Mesure;
+    use crate::audio::faux_hires_passe::{compter_les_candidats, enregistrer, prochains_candidats};
+    use crate::db::backend::ToSqlValue;
+
+    let db = pg_or_skip!();
+    reset_schema(&db);
+    let _ = db.execute("DELETE FROM hires_verifications", &[]);
+    let url = std::env::var("TUNE_TEST_PG_URL").expect("posée : pg_or_skip l'a vérifié");
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/postgres/093_hires_verifications.sql"
+    ))
+    .execute(&pool)
+    .await
+    .expect("la migration 093 doit se rejouer");
+    for (id, format) in [(1i64, "flac"), (2, "mp3"), (3, "wav")] {
+        let chemin = format!("/m/{id}.{format}");
+        let format = format.to_string();
+        db.execute(
+            "INSERT INTO tracks (id, title, file_path, format, source, duration_ms) \
+             VALUES (?, 't', ?, ?, 'local', 60000)",
+            &[&id as &dyn ToSqlValue, &chemin, &format],
+        )
+        .unwrap();
+    }
+    assert_eq!(compter_les_candidats(&db), 2);
+    let ids: Vec<i64> = prochains_candidats(&db, 10)
+        .iter()
+        .map(|c| c.track_id)
+        .collect();
+    assert_eq!(ids, vec![1, 3]);
+    let mesure = Mesure {
+        sample_rate: 96_000,
+        bits_declares: 24,
+        bits_effectifs: Some(16),
+        coupure_hz: Some(20_000.0),
+        silencieux: false,
+    };
+    enregistrer(&db, 1, &Ok(mesure)).unwrap();
+    enregistrer(&db, 1, &Ok(mesure)).unwrap();
+    enregistrer(&db, 3, &Err("illisible".into())).unwrap();
+    assert_eq!(compter_les_candidats(&db), 0);
+    let r = db
+        .query_one(
+            "SELECT verdict, raison, bits_effectifs, coupure_hz FROM hires_verifications WHERE track_id = 1",
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(r[0].as_string().as_deref(), Some("douteux"));
+    assert_eq!(r[1].as_string().as_deref(), Some("bits_de_remplissage"));
+    assert_eq!(r[2].as_i64(), Some(16));
+    assert_eq!(r[3].as_f64(), Some(20_000.0));
+    let _ = db.execute("DELETE FROM hires_verifications", &[]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pg_settings_round_trip() {
     use crate::db::settings_repo::SettingsRepo;

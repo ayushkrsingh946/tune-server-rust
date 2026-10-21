@@ -245,6 +245,10 @@ const MIGRATION_TABLES_APRES_SCRIPTS: &[&str] = &[
 #[cfg_attr(not(test), allow(dead_code))]
 const TABLES_NON_COPIEES: &[(&str, &str)] = &[
     (
+        "hires_verifications",
+        "verdicts des faux hi-res (#6285) : mesures recalculables, la passe de fond les refait",
+    ),
+    (
         "_migrations",
         "tenue des versions du schema SQLite ; PostgreSQL a sa propre `schema_version`",
     ),

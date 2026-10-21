@@ -2556,6 +2556,35 @@ CREATE TABLE IF NOT EXISTS album_preferred_roots (
         name: "queue_items_contexte",
         up: "",
     },
+    // #6285 — la détection des faux hi-res : le verdict de chaque piste
+    // (`verifie`, `conforme`, `douteux` + raison, `non_concluant`), la
+    // coupure spectrale et les bits effectifs mesurés sur un extrait. La table
+    // naît VIDE : la passe de fond (désactivée par défaut) la remplit.
+    // `ON DELETE CASCADE` : une piste retirée emporte sa mesure.
+    //
+    // Numérotée 129 / PG 093 à sa jonction avec `batch/bugs-rc7-20261015`
+    // (21/10) : la PR la tenait en 127 / 091, prises dans le lot par
+    // `tags_position` (#6257) ; 128 / 092 vont à la PR de #6466 (historique
+    // par conteneurs), qui entre avant celle-ci (ordre fixé par Bertrand :
+    // #6639, #6637, #6641, #6633). La garde de contiguïté exige donc que
+    // #6637 soit fusionnée d'abord. Jumelle PG : 093.
+    Migration {
+        version: 129,
+        name: "hires_verifications",
+        up: "
+CREATE TABLE IF NOT EXISTS hires_verifications (
+    track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    verdict TEXT NOT NULL,
+    raison TEXT,
+    coupure_hz REAL,
+    bits_effectifs INTEGER,
+    sample_rate INTEGER,
+    bits_declares INTEGER,
+    mesure_le TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_hires_verifications_verdict ON hires_verifications(verdict);
+",
+    },
 ];
 
 /// Migration 127 (#6257) : `tags.position`, 0 pour toutes les etiquettes
@@ -5401,6 +5430,13 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         92,
         "queue_items_contexte",
         include_str!("../../migrations/postgres/092_queue_items_contexte.sql"),
+    ),
+    // Jumelle de la SQLite 129 (#6285) : `hires_verifications`, le verdict
+    // des faux hi-res par piste. Naît vide.
+    (
+        93,
+        "hires_verifications",
+        include_str!("../../migrations/postgres/093_hires_verifications.sql"),
     ),
 ];
 
@@ -8713,7 +8749,9 @@ mod tests {
         // `tags.position`, que l'INSERT des etiquettes NOMME.
         // 92 : `queue_items_contexte` (#6466), jumelle de la SQLite 128. Pose
         // le conteneur de chaque élément de file, que l'historique NOMME.
-        assert_eq!(pg_latest_version(), 92, "latest PG migration must be 92");
+        // 93 : `hires_verifications` (#6285), jumelle de la SQLite 129. Crée la
+        // table des verdicts des faux hi-res, que la passe de fond NOMME.
+        assert_eq!(pg_latest_version(), 93, "latest PG migration must be 93");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),

@@ -63,6 +63,7 @@ use crate::state::AppState;
 ///   ces passes s'inscrivent déjà par `begin()` le temps qu'elles vivent.
 /// * **`identification`** — même signal, même registre : le pilote de lot de
 ///   `POST /library/identify-all` s'y inscrit sous `identification_lot` (#4805).
+/// * **`hires_check`** — un lot de la passe des faux hi-res décode (#6285).
 pub(crate) fn etat_de(state: &AppState, tache: Tache) -> Etat {
     if est_en_pause(tache) {
         return Etat::EnPause;
@@ -88,6 +89,8 @@ pub(crate) fn etat_de(state: &AppState, tache: Tache) -> Etat {
         Tache::Enrichissement | Tache::ImagesArtistes | Tache::Identification => {
             inscrite(state, tache)
         }
+        // #6285 — la passe des faux hi-res : un lot décode-t-il.
+        Tache::FauxHiRes => tune_core::audio::faux_hires_passe::lot_en_cours(),
     };
     if en_cours {
         Etat::EnCours
