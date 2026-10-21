@@ -32,6 +32,8 @@ mod tests {
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 8192];
                     let mut count = 0u32;
+                    // (PTS du premier paquet, horloge oaat à sa réception)
+                    let mut premier: Option<(u64, u64)> = None;
                     loop {
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
@@ -39,14 +41,24 @@ mod tests {
                         )
                         .await
                         {
-                            Ok(Ok(n)) if n >= AUDIO_HEADER_SIZE => count += 1,
+                            Ok(Ok(n)) if n >= AUDIO_HEADER_SIZE => {
+                                count += 1;
+                                if premier.is_none() {
+                                    let recu_ns = oaat_core::time::now_ns();
+                                    let hdr: [u8; AUDIO_HEADER_SIZE] =
+                                        buf[..AUDIO_HEADER_SIZE].try_into().unwrap();
+                                    if let Ok(h) = AudioPacketHeader::decode(&hdr) {
+                                        premier = Some((h.pts_ns, recu_ns));
+                                    }
+                                }
+                            }
                             _ => break,
                         }
                         if count >= 10 {
                             break;
                         }
                     }
-                    count
+                    (count, premier)
                 })
             };
 
@@ -134,8 +146,8 @@ mod tests {
                 }
             }
 
-            let audio_count = audio_rx.await.unwrap_or(0);
-            (got_format, got_play, audio_count)
+            let (audio_count, premier) = audio_rx.await.unwrap_or((0, None));
+            (got_format, got_play, audio_count, premier)
         });
 
         // Start HTTP server with a short WAV
@@ -162,6 +174,7 @@ mod tests {
         );
 
         let url = format!("http://127.0.0.1:{http_port}/test.wav");
+        let avant_play_ns = oaat_core::time::now_ns();
         let result = output
             .play_media(&PlayMedia {
                 url: &url,
@@ -173,11 +186,25 @@ mod tests {
         assert!(result.is_ok());
 
         // Wait for mock to finish
-        let (got_format, got_play, audio_packets) =
+        let (got_format, got_play, audio_packets, premier) =
             tokio::time::timeout(std::time::Duration::from_secs(8), mock_handle)
                 .await
                 .expect("mock timed out")
                 .expect("mock panicked");
+
+        // L'heure de départ envoyée à l'endpoint (PTS du premier paquet,
+        // `stream_start_ns` = maintenant + 500 ms) est datée dans l'horloge
+        // monotone d'oaat, celle de la synchro d'horloge : elle tombe entre
+        // « avant play » et « réception » lus sur `oaat_core::time::now_ns()`,
+        // décalés des 500 ms d'avance.
+        let (pts_premier, recu_ns) = premier.expect("aucun en-tête audio décodable reçu");
+        assert!(
+            avant_play_ns + 500_000_000 <= pts_premier && pts_premier <= recu_ns + 500_000_000,
+            "PTS du premier paquet {pts_premier} hors de [{}, {}] : l'heure de départ \
+             n'est pas dans le domaine d'horloge d'oaat",
+            avant_play_ns + 500_000_000,
+            recu_ns + 500_000_000
+        );
 
         assert!(got_format, "endpoint should receive FormatPropose");
         assert!(got_play, "endpoint should receive Play");
