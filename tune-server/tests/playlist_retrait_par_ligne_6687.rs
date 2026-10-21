@@ -236,6 +236,23 @@ async fn le_retrait_en_lot_lit_des_rangs_6687() {
         ["A", "E"],
         "le lot refusé a effacé quand même"
     );
+
+    // Une liste vide ne désigne rien : `{"removed": 0}`, comme avant #6687.
+    let (st, v) = appel(
+        &app,
+        "DELETE",
+        &format!("/api/v1/playlists/{id}/tracks"),
+        P1,
+        Some(json!({"positions": []})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "une liste de rangs vide n'est pas un retrait manqué : {v}"
+    );
+    assert_eq!(v["removed"], 0);
+    assert_eq!(titres(&app, id).await, ["A", "E"]);
 }
 
 /// Chaque ligne — locale, de service, introuvable — porte `entry_id`, et la

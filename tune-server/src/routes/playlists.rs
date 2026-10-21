@@ -493,6 +493,11 @@ async fn remove_tracks_batch(
     if let Err(r) = owned_or_404_response(&repo, id, profile.id()) {
         return r;
     }
+    // Une liste vide ne désigne aucune ligne : rien à retirer, ce n'est pas
+    // un retrait manqué. Même réponse qu'avant #6687.
+    if body.positions.is_empty() {
+        return Json(json!({"removed": 0})).into_response();
+    }
     // #6687 — tout ou rien : un rang hors bornes n'efface rien, et un lot
     // qui n'a rien effacé est un `404`, pas un succès.
     match repo.remove_tracks_at_positions(id, &body.positions) {
