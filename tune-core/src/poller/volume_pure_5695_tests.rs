@@ -178,6 +178,13 @@ impl Banc {
             .await;
     }
 
+    /// Pose un réglage clé/valeur (#6541 : les limites de volume).
+    pub(super) fn poser_reglage(&self, cle: &str, valeur: &str) {
+        SettingsRepo::with_backend(self.db.clone())
+            .set(cle, valeur)
+            .unwrap();
+    }
+
     pub(super) fn volume_en_base(&self) -> f64 {
         ZoneRepo::with_backend(self.db.clone())
             .get(self.zone_id)

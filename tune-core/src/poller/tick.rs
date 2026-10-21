@@ -157,6 +157,12 @@ impl PositionPoller {
             {
                 self.volume_100_ignore_constate(zone_id, zone.volume / 100.0, status.volume);
             }
+            // #6541 — au-dessus de la limite de sécurité de la zone, le volume
+            // de l'appareil est ramené, jamais adopté (`volume_plafond_6541`).
+            let plafond_tenu = !zone.fixed_volume
+                && !in_startup_grace
+                && !in_volume_grace
+                && self.volume_plafond_reimpose(zone_id, status.volume).await;
             if !zone.fixed_volume
                 && !in_startup_grace
                 && !in_volume_grace
@@ -170,7 +176,8 @@ impl PositionPoller {
                 // actually moved since the last poll (see decisions::
                 // should_adopt_device_volume), so a stale default (Fabien's
                 // Devialet stuck at 50%) can't overwrite the saved volume.
-                if decisions::should_adopt_device_volume(prev_device_vol, status.volume, db_vol)
+                if !plafond_tenu
+                    && decisions::should_adopt_device_volume(prev_device_vol, status.volume, db_vol)
                     && !self.volume_pure_reimpose(zone_id, status.volume).await
                 {
                     self.playback.set_volume(zone_id, status.volume).await;
@@ -1227,8 +1234,13 @@ impl PositionPoller {
                     // Edge-triggered like the main volume-sync path, so a radio
                     // renderer reporting a stale default can't keep resetting the
                     // saved volume (Fabien's Devialet Salon reverting to 50).
+                    // #6541 — la limite de sécurité, comme au site principal.
+                    let plafond_tenu = !zone_fixed_volume
+                        && !in_vol_grace
+                        && self.volume_plafond_reimpose(zone_id, status.volume).await;
                     if !zone_fixed_volume
                         && !in_vol_grace
+                        && !plafond_tenu
                         && status.volume < 0.999
                         && decisions::should_adopt_device_volume(
                             ps.last_device_volume,
@@ -1596,8 +1608,13 @@ impl PositionPoller {
             if !zone_fixed_volume && !in_vol_grace2 {
                 self.volume_100_ignore_constate(zone_id, zone_state.volume, status.volume);
             }
+            // #6541 — la limite de sécurité, comme au site principal.
+            let plafond_tenu = !zone_fixed_volume
+                && !in_vol_grace2
+                && self.volume_plafond_reimpose(zone_id, status.volume).await;
             if !zone_fixed_volume
                 && !in_vol_grace2
+                && !plafond_tenu
                 && status.volume > 0.001
                 && status.volume < 0.999
                 && decisions::should_adopt_device_volume(

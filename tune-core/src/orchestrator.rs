@@ -1847,6 +1847,9 @@ pub use dsp::PorteeDuReglage;
 // #5695 — PURE forcé : 100 % à l'appareil, sans trim, sur tous les chemins.
 #[cfg(test)]
 mod volume_pure_5695_tests;
+// #6541 — limites de sécurité et de confort, tenues sur tous les chemins.
+#[cfg(test)]
+mod volume_limites_6541_tests;
 // #4407 — l'égaliseur remplacé en vol dans un flux réseau fabriqué par Tune.
 mod eq_en_vol;
 #[cfg(test)]

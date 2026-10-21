@@ -962,12 +962,21 @@ mod eq_refresh_guard {
     /// Indexé par clé et pas seulement par fichier : dispenser `zones.rs` en
     /// bloc le retirerait aussi des deux autres clés, dont il n'a aucune raison
     /// d'être exempté. Une dispense doit être aussi étroite que son motif.
-    const LECTURE_SEULE: &[(&str, &str, &str)] = &[(
-        "_audiophile",
-        "zones.rs",
-        "n'écrit la clé que dans ses propres tests (chemin du signal en PURE) ; \
-         le code de production la LIT via `audiophile::zone_enabled`",
-    )];
+    const LECTURE_SEULE: &[(&str, &str, &str)] = &[
+        (
+            "_audiophile",
+            "zones.rs",
+            "n'écrit la clé que dans ses propres tests (chemin du signal en PURE) ; \
+             le code de production la LIT via `audiophile::zone_enabled`",
+        ),
+        (
+            "_audiophile",
+            "limites_de_volume_6541_tests.rs",
+            "module de tests (`#[cfg(test)] #[path]` de `zones/limites_de_volume_6541.rs`) : \
+             il pose une zone en PURE pour vérifier le refus des limites (#6541) ; la \
+             route de production ne fait que LIRE la clé via `mode_sans_limite`",
+        ),
+    ];
 
     /// Les réglages DSP par zone qui n'atteignent le son que si quelqu'un
     /// rafraîchit la sortie vivante, et la méthode qui le fait.

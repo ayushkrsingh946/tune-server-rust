@@ -137,6 +137,8 @@ pub mod tempo;
 #[cfg(feature = "audio-embedding")]
 pub mod text_embedding;
 pub mod thermal;
+/// #6541 — limites de sécurité et de confort du volume d'une zone.
+pub mod volume_limites;
 /// Conversion volume linéaire ↔ décibels — le seul endroit (#1274).
 pub mod volume_scale;
 pub mod wav;
