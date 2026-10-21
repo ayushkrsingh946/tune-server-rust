@@ -425,7 +425,20 @@ impl<'a> EtageNatif<'a> {
                 && !self.pure_bypass.load(Ordering::Relaxed)
                 && reaffectation.pour(canaux, self.sortie.canaux).is_some()
         });
+        // #6057 — la disposition déclarée qui réordonne des voies à nombre
+        // égal (`prepare_windows_native_pcm` l'applique au même endroit).
+        let reordonne = self.adaptation.is_some_and(|(reaffectation, disposition)| {
+            super::reorganisation_a_nombre_egal(
+                reaffectation,
+                disposition,
+                canaux,
+                canaux,
+                self.dop_latched,
+                self.pure_bypass.load(Ordering::Relaxed),
+            )
+        });
         TransformationsReelles::nouvelles(self.spec, self.sortie, dsp_actif || reaffecte)
+            .avec_reorganisation_canaux(reordonne)
     }
 }
 
@@ -878,6 +891,56 @@ mod tests {
         ));
         assert!(!creneau.appliquee());
         assert_eq!(temoin.0, bruts, "sans règle, les mots de la source");
+    }
+
+    /// #6057 — le transport natif (WASAPI, ASIO) réordonne lui aussi un DFF
+    /// 5.1 hors ordre à nombre de voies égal : ses transformations doivent le
+    /// déclarer, comme l'étage du chemin partagé. Sans disposition, rien.
+    #[test]
+    fn une_reorganisation_a_nombre_egal_est_declaree_par_l_etage_natif_6057() {
+        let dsp = Dsp::au_repos();
+        let spec = AudioSpec::nouvelle(48_000, ProfondeurPcm::Entier16, 6).unwrap();
+        let disposition: crate::outputs::local::CreneauDisposition = std::sync::Mutex::new(
+            crate::audio::disposition_canaux::depuis_dff(&[
+                *b"C   ", *b"LFE ", *b"SLFT", *b"SRGT", *b"LS  ", *b"RS  ",
+            ])
+            .map(Arc::new),
+        );
+        let reaffectation = CreneauReaffectation::vide();
+        let source: Vec<u8> = (0..32)
+            .flat_map(|_| (1..=6).map(|c| (1000 * c) as i16))
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        struct Mots(Vec<i32>);
+        impl PuitsNatif for Mots {
+            fn ecrire(&mut self, bloc: BlocPcm<'_>) -> bool {
+                self.0.extend(mots_natifs_du_bloc(bloc));
+                true
+            }
+        }
+        let mut capture = Mots(Vec::new());
+        let mut etage = dsp
+            .etage(spec)
+            .avec_l_adaptation_des_canaux(&reaffectation, &disposition);
+        etage.decoder_et_pousser(&source, &mut capture);
+        let attendue: Vec<i32> = [3000, 4000, 1000, 2000, 5000, 6000]
+            .iter()
+            .map(|v| v << 16)
+            .collect();
+        assert_eq!(
+            &capture.0[..6],
+            attendue.as_slice(),
+            "prémisse : le transport natif réordonne les voies du DFF"
+        );
+        assert!(
+            etage.transformations().reorganisation_canaux(),
+            "voies réordonnées à nombre égal : l'étage natif doit le déclarer (#6057)"
+        );
+
+        let etage = dsp
+            .etage(spec)
+            .avec_l_adaptation_des_canaux(&reaffectation, &crate::outputs::local::SANS_DISPOSITION);
+        assert!(!etage.transformations().reorganisation_canaux());
     }
 
     /// Un arrêt demandé pendant que l'anneau est plein rend `true` — ce

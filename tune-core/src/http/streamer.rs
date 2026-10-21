@@ -1438,14 +1438,50 @@ impl SuiviBlocIcy {
 pub struct AudioStreamer {
     sessions: Arc<Mutex<HashMap<String, Arc<StreamSession>>>>,
     port: u16,
+    /// #6658 — les dernières sessions retirées parce que leur producteur est
+    /// mort sans écrire un octet ([`Self::marquer_abandonnee`]). Bornée à
+    /// [`SESSIONS_ABANDONNEES_RETENUES`] entrées.
+    abandonnees: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
 }
+
+/// #6658 — combien d'identifiants de sessions abandonnées le streamer
+/// retient. Il n'en faut qu'un par lecture en cours de démarrage : la borne
+/// couvre largement toutes les zones d'une installation.
+const SESSIONS_ABANDONNEES_RETENUES: usize = 64;
 
 impl AudioStreamer {
     pub fn new(port: u16) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             port,
+            abandonnees: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
+    }
+
+    /// #6658 — note que la session `stream_id` est retirée parce que son
+    /// producteur est mort avant d'avoir écrit un octet
+    /// (`abandonner_la_session_de_transcodage`).
+    ///
+    /// `session_alive` dit qu'une session n'existe plus, pas POURQUOI : un
+    /// Stop, un saut de piste ou une nouvelle lecture la retirent aussi. Seul
+    /// ce marqueur permet à l'orchestrateur de conclure, après l'envoi, que la
+    /// sortie a reçu un flux mort-né — et pas un flux arrêté par l'auditeur.
+    pub fn marquer_abandonnee(&self, stream_id: &str) {
+        if let Ok(mut abandonnees) = self.abandonnees.lock() {
+            if abandonnees.len() >= SESSIONS_ABANDONNEES_RETENUES {
+                abandonnees.pop_front();
+            }
+            abandonnees.push_back(stream_id.to_string());
+        }
+    }
+
+    /// #6658 — la session `stream_id` a-t-elle été abandonnée par son
+    /// producteur ? Voir [`Self::marquer_abandonnee`].
+    pub fn session_abandonnee(&self, stream_id: &str) -> bool {
+        self.abandonnees
+            .lock()
+            .map(|abandonnees| abandonnees.iter().any(|id| id == stream_id))
+            .unwrap_or(false)
     }
 
     pub async fn create_session(
