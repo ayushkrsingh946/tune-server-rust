@@ -97,6 +97,11 @@ pub async fn run_with(opts: RunOptions) {
         std::process::exit(0);
     }
 
+    // #6253 — `--sans-console` (Windows) : relancer sans fenêtre de terminal
+    // et sortir. Avant tout journal, port ou base : c'est le DÉTACHÉ qui les
+    // ouvre. Sans le drapeau, ou hors Windows, rend la main aussitôt.
+    crate::lancement_sans_console::appliquer_au_demarrage();
+
     // #5617 — mode ponctuel « premier accès » de Tune OS : appelé en root par
     // une unité de l'image, HORS du bac à sable de tune.service, il applique la
     // politique du mot de passe du compte `tune` puis sort. Même place que
