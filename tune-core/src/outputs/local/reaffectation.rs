@@ -117,6 +117,23 @@ impl CreneauReaffectation {
         self.voies_de_la_matrice(canaux)
     }
 
+    /// #6230 — les voies qu'un transport EXCLUSIF (WASAPI, ASIO, CoreAudio
+    /// « hog ») doit ouvrir pour cette piste : celles de la matrice quand elle
+    /// pilote ([`Self::voies_a_demander`], mêmes exclusions : PURE, DoP,
+    /// amorce 24 bits insuffisante), sinon les canaux de la source — la règle
+    /// « format ouvert = format source » d'avant. Sert à l'ouverture et à la
+    /// frontière gapless, pour qu'elles décident pareil.
+    pub(crate) fn voies_a_ouvrir_en_exclusif(
+        &self,
+        spec: AudioSpec,
+        amorce: &[u8],
+        pure: bool,
+        dop: bool,
+    ) -> u16 {
+        self.voies_a_demander(spec, amorce, pure, dop)
+            .unwrap_or(spec.canaux())
+    }
+
     /// #6230 — noter ce que l'ouverture a fait des voies (`None` : bras qui
     /// ne les pilote pas, ou plus rien d'ouvert).
     pub(crate) fn noter_l_ouverture(&self, pilotage: Option<PilotageDesVoies>) {

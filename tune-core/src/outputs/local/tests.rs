@@ -2660,7 +2660,7 @@ fn native_windows_preparation_keeps_identity_pcm_out_of_float() {
         let convolver = std::sync::Mutex::new(None);
         let crossfeed = std::sync::Mutex::new(None);
         let pure = AtomicBool::new(false);
-        let prepared = prepare_windows_native_pcm(
+        let prepared = prepare_windows_native_pcm_a_voies_egales(
             &source,
             bit_depth,
             2,
@@ -2693,7 +2693,7 @@ fn native_windows_preparation_forces_dop_onto_the_raw_branch() {
         176400, 0.3, 0.3,
     )));
     let pure = AtomicBool::new(false);
-    let prepared = prepare_windows_native_pcm(
+    let prepared = prepare_windows_native_pcm_a_voies_egales(
         &source,
         24,
         2,
@@ -2726,7 +2726,7 @@ fn native_windows_preparation_marks_processed_pcm_as_not_bitperfect() {
     let convolver = std::sync::Mutex::new(None);
     let crossfeed = std::sync::Mutex::new(None);
     let pure = AtomicBool::new(false);
-    let prepared = prepare_windows_native_pcm(
+    let prepared = prepare_windows_native_pcm_a_voies_egales(
         &source,
         24,
         2,
