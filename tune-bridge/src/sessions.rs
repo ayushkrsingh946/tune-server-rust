@@ -348,6 +348,8 @@ impl Sessions {
                 return Err(e.0);
             }
         };
+        // Le site a répondu : il n'est pas en panne, quoi qu'on pense du jeu.
+        self.site_injoignable.store(false, Ordering::Relaxed);
         let jeu = JeuDeCles::depuis_publication(&publication, &self.racine)
             .map_err(|r| format!("jeu de cles refuse : {}", r.code()))?;
         let mut tenu = self.jeu.write().unwrap();
@@ -428,17 +430,14 @@ impl Sessions {
         .map_err(Rejet::du_refus)
     }
 
-    /// Le site est-il en panne ? Déjà constaté, ou sondé à l'instant par la
-    /// route publique du jeu de clés : un relais sans session ne bat pas, et
-    /// ne saurait pas autrement que le site est tombé.
+    /// Le site est-il en panne, à l'instant ? Sondé par la route publique du
+    /// jeu de clés, jamais déduit d'un constat ancien : un relais sans
+    /// session ne bat pas, et un drapeau posé pendant une panne passée
+    /// laisserait entrer en secours un laissez-passer expiré alors que le
+    /// site est revenu. Le constat met le drapeau à jour dans les deux sens.
     async fn site_en_panne(&self) -> bool {
-        if self.site_injoignable() {
-            return true;
-        }
         let en_panne = self.site.jeu_de_cles().await.is_err();
-        if en_panne {
-            self.site_injoignable.store(true, Ordering::Relaxed);
-        }
+        self.site_injoignable.store(en_panne, Ordering::Relaxed);
         en_panne
     }
 

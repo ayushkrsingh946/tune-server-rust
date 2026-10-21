@@ -1043,3 +1043,28 @@ async fn le_relais_n_annonce_le_laissez_passer_qu_avec_un_jeu_de_cles() {
     assert!(banc(false).await.state.sessions.actif());
     assert!(!banc_avec(false, "", false).await.state.sessions.actif());
 }
+
+#[tokio::test]
+async fn le_site_revenu_un_laissez_passer_expire_ne_passe_plus_en_secours() {
+    let b = banc(false).await;
+    // L'iPhone est connu ; son laissez-passer a expiré.
+    b.ouvrir(&iphone(), "cpt", "app-iphone", "j0").await;
+    let lp = laissez_passer(&iphone(), "cpt", "app-iphone", b.maintenant(), "j1");
+    b.avancer(3 * 3600);
+
+    // Panne constatée par le relais, puis retour du site, sans battement ni
+    // ouverture réussie entre les deux.
+    b.site.panne(true);
+    let (statut, _) = b.ouvrir_avec(&iphone(), &lp).await;
+    assert_eq!(statut, 200, "en panne, le secours doit jouer");
+    assert!(b.state.sessions.site_injoignable());
+    b.site.panne(false);
+
+    let (statut, v) = b.ouvrir_avec(&iphone(), &lp).await;
+    assert_eq!(
+        (statut, v["code"].as_str()),
+        (401, Some("expire")),
+        "site revenu : le secours ne doit plus jouer ({v})"
+    );
+    assert!(!b.state.sessions.site_injoignable());
+}
