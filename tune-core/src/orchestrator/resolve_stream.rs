@@ -668,10 +668,16 @@ impl PlaybackOrchestrator {
             // source poserait dans le `<res sampleFrequency>` du DIDL un
             // chiffre que le flux ne porte pas (#4759).
             sample_rate: Some(cadence_plafonnee.unwrap_or(stream_data.quality.sample_rate)),
-            bit_depth: Some(stream_data.quality.bit_depth as u32),
+            // #6334 — aucune profondeur pour un AAC : le « 16 bits » serait
+            // celui d'un FLAC CD.
+            bit_depth: profondeur_annoncee_par_le_service(
+                &stream_data.quality,
+                stream_data.quality.bit_depth,
+            ),
             channels: Some(2),
             origin_url,
-            bitrate_kbps: None,
+            bitrate_kbps: debit_annonce_par_le_service(&stream_data.quality),
+            format_source: format_livre_par_le_service(&stream_data.quality),
         })
     }
 
@@ -1472,10 +1478,14 @@ impl PlaybackOrchestrator {
                     stream_id: Some(session_id),
                     file_size: Some(file_size),
                     sample_rate: Some(sr_servie),
-                    bit_depth: Some(stream_data.quality.bit_depth as u32),
+                    bit_depth: profondeur_annoncee_par_le_service(
+                        &stream_data.quality,
+                        stream_data.quality.bit_depth,
+                    ),
                     channels: Some(2),
                     origin_url: None,
-                    bitrate_kbps: None,
+                    bitrate_kbps: debit_annonce_par_le_service(&stream_data.quality),
+                    format_source: format_livre_par_le_service(&stream_data.quality),
                 }));
             }
         }
@@ -1694,6 +1704,7 @@ impl PlaybackOrchestrator {
                 channels: Some(2),
                 origin_url: None,
                 bitrate_kbps: None,
+                format_source: None,
             }));
         }
         Ok(None)

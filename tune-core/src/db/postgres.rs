@@ -334,6 +334,11 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     // 077, alors que `tag_item` nomme la colonne. TEXT comme côté SQLite, NULL
     // pour l'existant.
     "ALTER TABLE item_tags ADD COLUMN IF NOT EXISTS created_at TEXT",
+    // #6257 — l'ordre des etiquettes (PG 091). Ici AUSSI : l'INSERT des
+    // etiquettes NOMME la colonne. Sans rangement : toutes a 0, la liste reste
+    // rangee par nom. Sans effet sur la colonne TEXT d'une bascule : c'est la
+    // 091 qui la convertit.
+    "ALTER TABLE tags ADD COLUMN IF NOT EXISTS position BIGINT NOT NULL DEFAULT 0",
     // #4991 (b) — marque « déjà tenté, rien trouvé » de l'identification en
     // lot (PG 080). Ici AUSSI : une base de bascule ne rejoue pas la 080, et
     // la sélection de `identify-all` nomme la colonne. NULL = jamais tenté.
@@ -368,8 +373,8 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     // colonne. L'index JUSTE APRÈS la colonne.
     "ALTER TABLE radio_stations ADD COLUMN IF NOT EXISTS external_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_radio_stations_external_id ON radio_stations(external_id)",
-    // #6474 — la provenance du nom de tri (PG 091). Ici AUSSI : une base de
-    // bascule ne rejoue pas la 091, et le scan comme l'enrichissement NOMMENT
+    // #6474 — la provenance du nom de tri (PG 095). Ici AUSSI : une base de
+    // bascule ne rejoue pas la 095, et le scan comme l'enrichissement NOMMENT
     // la colonne.
     "ALTER TABLE artists ADD COLUMN IF NOT EXISTS sort_name_source TEXT",
     // Fil 2121 — référence d'album d'une piste de service (PG 078). Ici AUSSI,

@@ -802,6 +802,10 @@ CREATE TABLE IF NOT EXISTS item_tags (
 -- CREATE IF NOT EXISTS ci-dessus ne la corrige pas. Même raison que
 -- `streaming_favorites.first_seen_at` plus haut.
 ALTER TABLE item_tags ADD COLUMN IF NOT EXISTS created_at TEXT;
+-- Ordre des etiquettes choisi par l'utilisateur (#6257, PG 091 / SQLite 127).
+-- TEXT pour la copie ; la 091, rejouee juste apres, la convertit en BIGINT et
+-- garde l'ordre copie. En ALTER pour la meme raison qu'au-dessus.
+ALTER TABLE tags ADD COLUMN IF NOT EXISTS position TEXT;
 -- Marque « déjà tenté, rien trouvé » de l'identification en lot (#4991,
 -- PG 080 / SQLite 116). En ALTER pour la même raison qu'au-dessus.
 ALTER TABLE albums ADD COLUMN IF NOT EXISTS identification_tentee_le TEXT;
@@ -1313,7 +1317,7 @@ ALTER TABLE tracks ADD COLUMN IF NOT EXISTS rating TEXT;
 -- PG 090, #6516). TEXT des deux côtés : la copie texte n'a rien à convertir.
 ALTER TABLE radio_stations ADD COLUMN IF NOT EXISTS external_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_radio_stations_external_id ON radio_stations(external_id);
--- artists: provenance du nom de tri (SQLite migration v127 / PG 091, #6474).
+-- artists: provenance du nom de tri (SQLite migration v131 / PG 095, #6474).
 ALTER TABLE artists ADD COLUMN IF NOT EXISTS sort_name_source TEXT;
 "#;
 
