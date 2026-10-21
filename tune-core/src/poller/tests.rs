@@ -1517,6 +1517,26 @@ fn rafale_de_tours_rattrapes_ne_coupe_pas_une_lecture_saine_6702() {
     assert_eq!(faux_renderer_6702(&e), None);
 }
 
+/// Le journal du .18 (21/10, 14:01:35) : pendant le blocage du sondeur, le
+/// renderer a enchaîné sans coupure sur la piste suivante. Au retour, la
+/// position est celle de la NOUVELLE piste (50 s, pic à 270 s sur l'ancienne),
+/// et le compteur d'octets est celui de l'ancien flux, servi en entier : il ne
+/// peut plus monter. La rafale ne coupe pas ; la position qui avance ensuite
+/// remet la série à zéro.
+#[test]
+fn enchainement_pendant_le_blocage_puis_rafale_ne_coupe_pas_6702() {
+    let mut e = vec![(0, 270_000, 101_411_448)];
+    for i in 0..=40u64 {
+        e.push((52_000 + i * 6, 50_000, 101_411_448));
+    }
+    assert_eq!(faux_renderer_6702(&e), None);
+    let fin = e.last().unwrap().0;
+    for k in 1..=60u64 {
+        e.push((fin + k * 1_000, 50_000 + k * 1_000, 101_411_448));
+    }
+    assert_eq!(faux_renderer_6702(&e), None);
+}
+
 /// Position figée, mais le mandataire sert toujours des octets : aucun arrêt,
 /// même au bout de deux minutes.
 #[test]
