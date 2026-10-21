@@ -4182,6 +4182,7 @@ async fn seek(
 async fn set_volume(
     State(state): State<AppState>,
     Path(zone_id): Path<i64>,
+    entetes: axum::http::HeaderMap,
     Json(body): Json<VolumeRequest>,
 ) -> impl IntoResponse {
     // Le verrou du mode PURE mord ICI, pas seulement dans l'interface : le
@@ -4225,6 +4226,7 @@ async fn set_volume(
     }
 
     let volume = tune_core::audio::audiophile::effective_volume(&state.backend, zone_id, demande);
+    journaliser_commande_de_silence(zone_id, volume, "POST /zones/{id}/volume", &entetes);
     if (volume - demande).abs() > f64::EPSILON {
         tracing::debug!(
             zone_id,
@@ -10049,5 +10051,55 @@ mod lecture_d_une_playlist_a_lignes_introuvables_6179 {
         assert_eq!(sans_les_introuvables(lignes.clone(), Some(1)).1, Some(1));
         assert_eq!(sans_les_introuvables(lignes.clone(), Some(0)).1, Some(0));
         assert_eq!(sans_les_introuvables(lignes, None).1, None);
+    }
+}
+
+/// #6700 — plus haut volume tenu pour une commande de SILENCE.
+pub(crate) const VOLUME_DE_SILENCE: f64 = 0.001;
+
+/// #6700 — une commande de volume qui fait le SILENCE dit d'où elle vient.
+///
+/// Sur le .18 (Eversolo DMP-A8, 21/10), des `SetVolume 0` isolés coupaient
+/// la zone sans qu'aucune ligne ne permette de nommer l'émetteur : les routes
+/// de volume ne journalisaient rien, et un curseur en envoie des dizaines par
+/// seconde. Seules les commandes de silence sont dites (une par geste), avec
+/// la route et l'agent HTTP du client — de quoi distinguer le client web,
+/// l'application iOS, la télécommande Android ou un script.
+pub(crate) fn journaliser_commande_de_silence(
+    zone_id: i64,
+    volume: f64,
+    route: &str,
+    entetes: &axum::http::HeaderMap,
+) -> bool {
+    if volume > VOLUME_DE_SILENCE {
+        return false;
+    }
+    let agent = entetes
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    tracing::info!(zone_id, volume, route, agent, "volume_silence_demande");
+    true
+}
+
+#[cfg(test)]
+mod commande_de_silence_6700_tests {
+    use super::journaliser_commande_de_silence;
+
+    #[test]
+    fn seule_une_commande_de_silence_est_dite() {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::USER_AGENT,
+            "Tune/21 CFNetwork".parse().unwrap(),
+        );
+        assert!(journaliser_commande_de_silence(10, 0.0, "POST", &h));
+        assert!(!journaliser_commande_de_silence(10, 0.8, "POST", &h));
+        assert!(!journaliser_commande_de_silence(
+            10,
+            0.01,
+            "PUT",
+            &axum::http::HeaderMap::new()
+        ));
     }
 }

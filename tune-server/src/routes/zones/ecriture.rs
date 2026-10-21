@@ -1423,6 +1423,7 @@ pub(super) async fn fusionner_zones(
 pub(super) async fn update_volume(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    entetes: axum::http::HeaderMap,
     Json(body): Json<UpdateVolume>,
 ) -> impl IntoResponse {
     // Normalise: web client sends 0.0–1.0, legacy clients may send 0–100.
@@ -1441,6 +1442,12 @@ pub(super) async fn update_volume(
                 .into_response();
         }
     };
+    crate::routes::playback::journaliser_commande_de_silence(
+        id,
+        volume_f,
+        "PUT /zones/{id}/volume",
+        &entetes,
+    );
     let repo = ZoneRepo::with_backend(state.backend.clone());
     let device_id = repo.get(id).ok().flatten().and_then(|z| z.output_device_id);
     // #1274 — la consigne en dB doit avoir un endroit où arriver. Si la
