@@ -1290,9 +1290,9 @@ impl LocalOutput {
         {
             let mut emplacement = self.eq.lock().unwrap();
             // #5215 (décision du 10/10) — l'égaliseur reste coupé : le
-            // préampli gardé à la coupure passe sur cette piste sans saut, et
-            // y poursuit son extinction vers 0 dB (#6524 b). Jamais sous PURE,
-            // qui ne doit rien laisser monté.
+            // préampli gardé à la coupure passe sur cette piste sans saut ; seule
+            // sa part supérieure à 1 y poursuit son extinction, jamais de hausse
+            // (#6524 b). Jamais sous PURE, qui ne doit rien laisser monté.
             if eq.is_none() && !self.pure_bypass.load(Ordering::Relaxed) {
                 eq = emplacement
                     .as_ref()
@@ -1419,8 +1419,8 @@ impl LocalOutput {
 
     /// #6211 (décision du 19/10) — sur un flux sans fin, le préampli gardé
     /// par un égaliseur coupé s'éteint en fondu dès la coupure ; sur une
-    /// piste, il s'éteint après le fondu de la courbe (#6524 b, dans
-    /// `EqProcessor`).
+    /// piste, seule sa part supérieure à 1 s'éteint, après le fondu de la
+    /// courbe (#6524 b, jamais de hausse, dans `EqProcessor`).
     fn eteindre_si_flux_sans_fin(&self, eq: &mut Option<super::super::audio::eq::EqProcessor>) {
         if self.flux_sans_fin.load(Ordering::Relaxed)
             && let Some(eq) = eq.as_mut()
