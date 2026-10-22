@@ -2897,7 +2897,7 @@ impl PlaybackOrchestrator {
             );
             return Ok(());
         }
-        let mut sortie = output.lock().await;
+        let sortie = output.lock().await;
         let device_volume = if pure_force {
             1.0
         } else {

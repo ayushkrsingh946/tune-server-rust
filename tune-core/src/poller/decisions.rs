@@ -993,7 +993,10 @@ pub fn natural_end(
 /// [`silence_rouvert_par_l_appareil`].
 ///
 /// #6739 — et jamais à la HAUSSE : un relevé plus haut que la consigne n'est
-/// pas adopté (voir [`juger_le_releve_de_volume`]).
+/// pas adopté (voir [`juger_le_releve_de_volume`]). Les trois sites de
+/// `tick.rs` passent désormais par ce jugement ; ce prédicat ne sert plus
+/// qu'aux tests qui gardent la règle.
+#[cfg(test)]
 pub fn should_adopt_device_volume(
     prev_device_vol: Option<f64>,
     device_vol: f64,
