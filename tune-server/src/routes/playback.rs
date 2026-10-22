@@ -4296,9 +4296,13 @@ async fn set_volume(
         );
     }
     let device_id = get_zone_device_id(&state, zone_id);
+    // #6721 — la DEMANDE part à l'orchestrateur, pas la valeur effective : sous
+    // PURE verrouillé, une demande sous 100 % y est refusée (rien n'est envoyé
+    // à l'appareil). Passer `volume`, déjà remonté à 1,0, transformait un geste
+    // pour baisser en ordre de plein volume (fil 2366, tweeter détruit).
     match state
         .orchestrator
-        .set_volume(zone_id, volume, device_id.as_deref())
+        .set_volume(zone_id, demande, device_id.as_deref())
         .await
     {
         // #1274 — la réponse rend la valeur EFFECTIVE dans les deux unités.

@@ -144,10 +144,6 @@ impl PositionPoller {
                 .await
                 .last_volume_set_at
                 .is_some_and(|t| t.elapsed().as_secs() < VOLUME_GRACE_SECS);
-            if !zone.fixed_volume {
-                self.volume_pure_concilie(zone_id, zone.volume / 100.0, status.volume)
-                    .await;
-            }
             // #5662 — le seuil < 0,999 ci-dessous écarte un renderer à 100 % :
             // le dire au journal, une fois par épisode.
             if !zone.fixed_volume
@@ -178,7 +174,6 @@ impl PositionPoller {
                 // Devialet stuck at 50%) can't overwrite the saved volume.
                 if !plafond_tenu
                     && decisions::should_adopt_device_volume(prev_device_vol, status.volume, db_vol)
-                    && !self.volume_pure_reimpose(zone_id, status.volume).await
                 {
                     self.playback.set_volume(zone_id, status.volume).await;
                     // #2886 — `as i32` TRONQUAIT : le volume adopte du renderer
@@ -1223,10 +1218,6 @@ impl PositionPoller {
                     let in_vol_grace = zone_state
                         .last_volume_set_at
                         .is_some_and(|t| t.elapsed().as_secs() < VOLUME_GRACE_SECS);
-                    if !zone_fixed_volume {
-                        self.volume_pure_concilie(zone_id, zone_state.volume, status.volume)
-                            .await;
-                    }
                     // #5662 — un renderer à 100 % ignoré est dit une fois.
                     if !zone_fixed_volume && !in_vol_grace {
                         self.volume_100_ignore_constate(zone_id, zone_state.volume, status.volume);
@@ -1247,7 +1238,6 @@ impl PositionPoller {
                             status.volume,
                             zone_state.volume,
                         )
-                        && !self.volume_pure_reimpose(zone_id, status.volume).await
                     {
                         self.playback.set_volume(zone_id, status.volume).await;
                         // #2886 — `as i32` TRONQUAIT : le volume adopte du renderer
@@ -1600,10 +1590,6 @@ impl PositionPoller {
             let in_vol_grace2 = zone_state
                 .last_volume_set_at
                 .is_some_and(|t| t.elapsed().as_secs() < VOLUME_GRACE_SECS);
-            if !zone_fixed_volume {
-                self.volume_pure_concilie(zone_id, zone_state.volume, status.volume)
-                    .await;
-            }
             // #5662 — un renderer à 100 % ignoré est dit une fois.
             if !zone_fixed_volume && !in_vol_grace2 {
                 self.volume_100_ignore_constate(zone_id, zone_state.volume, status.volume);
@@ -1622,7 +1608,6 @@ impl PositionPoller {
                     status.volume,
                     zone_state.volume,
                 )
-                && !self.volume_pure_reimpose(zone_id, status.volume).await
             {
                 self.playback.set_volume(zone_id, status.volume).await;
                 // #2886 — `as i32` TRONQUAIT : le volume adopte du renderer

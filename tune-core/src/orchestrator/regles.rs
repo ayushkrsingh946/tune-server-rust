@@ -275,6 +275,36 @@ pub fn volume_avec_trim(volume: f64, trim_db: f64) -> f64 {
     (volume * gain_trim_factor(trim_db)).clamp(0.0, 1.0)
 }
 
+/// #6721 — sous PURE verrouillé (« Forcer à 100 % »), une consigne de volume
+/// sous 100 % est REFUSÉE ; elle n'est plus convertie en un ordre à 100 %.
+///
+/// Fil 2366 (Marantz NR1200, tweeter détruit) : « je saisis le curseur pour
+/// diminuer le volume : résultat volume à fond ». Depuis #5695, `set_volume`
+/// remplaçait toute consigne par 1,0 dès que la zone était en PURE
+/// verrouillé, et l'envoyait à l'appareil : un geste pour BAISSER devenait un
+/// ordre de plein volume. Le test `en_pure_force_une_consigne_basse_est_
+/// ramenee_a_100_5695` le gardait comme voulu.
+///
+/// Règle : une commande de volume ne monte jamais au-delà de ce qu'elle
+/// demande. Le 100 % de PURE ne part que d'un geste qui le demande (armement
+/// confirmé, `set_volume_pure_force`, ou consigne à 1,0). Rien n'est envoyé à
+/// l'appareil, rien n'est écrit ; l'appelant reçoit une erreur qui le dit.
+pub fn refuser_une_baisse_sous_pure_verrouille(
+    zone_id: i64,
+    volume: f64,
+    pure_force: bool,
+) -> OutputCommandResult<()> {
+    if !pure_force || volume >= 1.0 - 1e-6 {
+        return Ok(());
+    }
+    tracing::warn!(zone_id, demande = volume, "volume_refuse_pure_verrouille");
+    Err(OutputCommandError::failed(
+        OutputCommand::SetVolume,
+        "le mode PURE de cette zone tient le volume à 100 % : la consigne est refusée, \
+         rien n'a été envoyé à l'appareil. Désactivez « Forcer à 100 % » pour régler le volume.",
+    ))
+}
+
 /// Niveau à donner à une sortie locale qui vient de naître, d'après ce que la
 /// base dit de sa zone. Une zone « Volume fixe (bit-perfect) » reste à pleine
 /// échelle — c'est son contrat, le DoP ne survit pas à une multiplication.

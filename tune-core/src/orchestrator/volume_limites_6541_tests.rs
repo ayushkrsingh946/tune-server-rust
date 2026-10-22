@@ -137,7 +137,9 @@ async fn pure_verrouille_ignore_la_limite_enregistree_6541() {
         r#"{"enabled":true,"lock_volume":true}"#,
     )])
     .await;
-    orch.set_volume(zone_id, 0.2, Some(APPAREIL)).await.unwrap();
+    // #6721 — une consigne basse est refusée sous PURE verrouillé ; seule une
+    // consigne à 100 % y part.
+    orch.set_volume(zone_id, 1.0, Some(APPAREIL)).await.unwrap();
     orch.set_volume_pure_force(zone_id, Some(APPAREIL))
         .await
         .unwrap();

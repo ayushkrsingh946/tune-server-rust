@@ -597,13 +597,6 @@ pub struct PositionPoller {
     /// nulle : seules celles-là peuvent être dites « figées à 0 ». Certains
     /// renderers rendent 0 en permanence tout en jouant.
     zones_a_position_prouvee: std::sync::Mutex<std::collections::HashSet<i64>>,
-    /// #5695 — zones PURE verrouillées dont le volume a déjà été réimposé et
-    /// DIT : l'avertissement part une fois par zone, pas à chaque écart.
-    volumes_pure_reimposes: std::sync::Mutex<std::collections::HashSet<i64>>,
-    /// #5695 — zones dont l'épisode « PURE verrouillé » a déjà été rattrapé
-    /// une fois (voir `volume_pure_concilie`). Une zone en sort dès qu'elle
-    /// est vue hors verrou, pour que le prochain armement soit rattrapé.
-    volumes_pure_concilies: std::sync::Mutex<std::collections::HashSet<i64>>,
     /// #6541 — dernier volume rapporté au-dessus de la limite de sécurité,
     /// par zone : la consigne n'est recommandée qu'une fois par valeur.
     volumes_plafonnes: std::sync::Mutex<std::collections::HashMap<i64, f64>>,
@@ -652,8 +645,6 @@ impl PositionPoller {
             zones_masquees_signalees: std::sync::Mutex::new(std::collections::HashSet::new()),
             relances_demarrage_fige: std::sync::Mutex::new(std::collections::HashMap::new()),
             zones_a_position_prouvee: std::sync::Mutex::new(std::collections::HashSet::new()),
-            volumes_pure_reimposes: std::sync::Mutex::new(std::collections::HashSet::new()),
-            volumes_pure_concilies: std::sync::Mutex::new(std::collections::HashSet::new()),
             volumes_plafonnes: std::sync::Mutex::new(std::collections::HashMap::new()),
             volumes_100_ignores: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
@@ -1065,9 +1056,9 @@ mod demarrage_fige_5522_tests;
 mod volume_plafond_6541;
 #[cfg(test)]
 mod volume_plafond_6541_tests;
-/// #5695 — sous PURE verrouillé, réimposer 100 % au lieu d'adopter le volume
-/// du renderer.
-mod volume_pure_5695;
+/// #6721 — sous PURE verrouillé, le sondeur respecte une baisse faite sur
+/// l'appareil : il ne remonte jamais le volume tout seul (le banc `Banc` sert
+/// aussi à #6008, #6541 et à la sourdine).
 #[cfg(test)]
 mod volume_pure_5695_tests;
 
