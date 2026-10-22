@@ -545,6 +545,26 @@ pub(crate) async fn demarrer_enrich_all(
                                 .ok();
                             mbid_artiste_pose = Some(aid);
                         }
+                        // #6474, point 2 — le nom de tri MusicBrainz de
+                        // l'artiste de la piste, tiré des crédits que cette
+                        // réponse porte déjà : posé si la fiche n'en a pas,
+                        // jamais sur une balise ni une saisie. APRÈS le MBID,
+                        // qui le rattache.
+                        if let Some(aid) = artist_id {
+                            match tune_core::metadata::artistes_du_pressage::poser_le_nom_de_tri(
+                                &backend_ecriture,
+                                aid,
+                                &details.artist_credits,
+                            ) {
+                                Ok(true) => {
+                                    debug!(artist_id = aid, "enrich_nom_de_tri_musicbrainz")
+                                }
+                                Ok(false) => {}
+                                Err(e) => {
+                                    warn!(artist_id = aid, error = %e, "enrich_nom_de_tri_echec")
+                                }
+                            }
+                        }
                         (result, details, mbid_artiste_pose)
                     },
                 )
@@ -908,6 +928,9 @@ async fn mb_fetch_recording_details(
         release_id,
         release_group_id,
         musicbrainz_artist_id,
+        // #6474 — les crédits et leur `sort-name`, déjà dans la réponse
+        // (`inc=artist-credits`) : aucune requête de plus.
+        artist_credits: tune_core::metadata::musicbrainz_release::credits_d_artiste(&data),
     })
 }
 

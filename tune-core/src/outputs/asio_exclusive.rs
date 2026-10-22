@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 use super::canaux_de_carte_6171::{CanauxDeCarte, Dispersion, PlanDeCanaux, remplir_le_tampon};
 use super::local::{NativePcmRing, RingBuf};
 use super::silence_avant_liberation_6133::{
-    BORNE_SILENCE_AVANT_LIBERATION, SilenceAvantLiberation,
+    BORNE_SILENCE_AVANT_LIBERATION, SilenceAvantLiberation, remplir_le_bloc_dsd_natif,
 };
 use super::traits::RingStarvation;
 
@@ -1092,6 +1092,9 @@ pub struct AsioDsdNatifOutput {
     stream: Option<cpal::Stream>,
     anneau: Arc<crate::audio::dsd_brut::AnneauDsd>,
     counters: Arc<RealtimeCounters>,
+    /// #6133 — le silence armé avant la libération, comme le chemin PCM : sans
+    /// lui, le pilote rejouait le dernier bloc DSD en boucle après l'arrêt.
+    silence: Arc<SilenceAvantLiberation>,
     /// Déclaré en DERNIER : rendu après le flux et après le délai de relâche.
     #[allow(dead_code)]
     device_guard: MutexGuard<'static, ()>,
@@ -1141,13 +1144,16 @@ impl AsioDsdNatifOutput {
         let anneau_rappel = anneau.clone();
         let compteurs_rappel = counters.clone();
         let erreurs = counters.clone();
+        let silence = Arc::new(SilenceAvantLiberation::default());
+        let silence_rappel = silence.clone();
         let stream = device
             .build_output_stream_raw(
                 &config,
                 SampleFormat::DsdU8,
                 move |data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| {
-                    let famine = crate::audio::dsd_brut::remplir_tampon_dsd(
+                    let famine = remplir_le_bloc_dsd_natif(
                         &anneau_rappel,
+                        &silence_rappel,
                         paused.load(Ordering::Relaxed),
                         data.bytes_mut(),
                     );
@@ -1171,6 +1177,7 @@ impl AsioDsdNatifOutput {
             stream: Some(stream),
             anneau,
             counters,
+            silence,
             device_guard,
         })
     }
@@ -1211,12 +1218,29 @@ impl AsioDsdNatifOutput {
 impl Drop for AsioDsdNatifOutput {
     fn drop(&mut self) {
         if let Some(stream) = self.stream.take() {
-            if let Err(e) = stream.pause() {
-                warn!(error = %e, "asio_dsd_natif_pause_failed");
+            // #6133 — taire AVANT de mettre en pause, comme `release()` du
+            // chemin PCM : au `pause()`, cpal ne réécrit plus le double tampon
+            // et le pilote rejoue ce qu'il contient jusqu'à `ASIOStop`. Le
+            // silence DSD (0x69) y est écrit d'abord.
+            let confirme = self
+                .silence
+                .taire_puis_liberer(BORNE_SILENCE_AVANT_LIBERATION, || {
+                    if let Err(e) = stream.pause() {
+                        warn!(error = %e, "asio_dsd_natif_pause_failed");
+                    }
+                    // `cpal::Stream::drop` libère les tampons DSD et remet le pilote
+                    // en PCM (`kAsioSetIoFormat`).
+                    drop(stream);
+                });
+            if !confirme {
+                warn!(
+                    device = %self.device_name,
+                    blocs_muets = self.silence.blocs_muets(),
+                    borne_ms = BORNE_SILENCE_AVANT_LIBERATION.as_millis() as u64,
+                    "asio_dsd_natif_silence_avant_liberation_non_confirme — le pilote n'a pas \
+                     rappelé assez tôt : le double tampon peut encore contenir du DSD"
+                );
             }
-            // `cpal::Stream::drop` libère les tampons DSD et remet le pilote
-            // en PCM (`kAsioSetIoFormat`).
-            drop(stream);
         }
         info!(
             device = %self.device_name,
