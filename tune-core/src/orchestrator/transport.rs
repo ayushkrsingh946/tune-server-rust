@@ -566,6 +566,10 @@ impl PlaybackOrchestrator {
             }
             repo.update_output_type(zone_id, &new_type)?;
             repo.update_online(zone_id, true)?;
+            // #6774 — PURE / volume fixe désarmés par le rebond : l'état de
+            // lecture ne reste pas au-dessus de la base.
+            crate::audio::reglages_de_volume::aligner_la_lecture(&self.db, &self.playback, zone_id)
+                .await;
             info!(
                 zone_id,
                 zone_name = %zone.name,
