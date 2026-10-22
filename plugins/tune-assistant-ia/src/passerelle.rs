@@ -362,8 +362,9 @@ impl Passerelle {
                 famille, statut, &texte,
             )));
         }
-        let v: Value = serde_json::from_str(&texte)
-            .map_err(|_| ErreurAppel::Fournisseur(fournisseur::ErreurFournisseur::Autre(statut)))?;
+        let v: Value = serde_json::from_str(&texte).map_err(|_| {
+            ErreurAppel::Fournisseur(fournisseur::ErreurFournisseur::corps_illisible(statut))
+        })?;
         let (entree, sortie) = jetons(&v);
         let cout = appel::compter(
             &self.backend,

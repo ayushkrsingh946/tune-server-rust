@@ -128,8 +128,14 @@ pub enum ErreurFournisseur {
     Reseau,
     /// Le modèle a refusé de répondre.
     Refus,
-    /// Toute autre réponse : le statut, sans le corps.
-    Autre(u16),
+    /// #6730 — Anthropic : une clé d'ORGANISATION, rattachée à aucun espace de
+    /// travail, exige l'en-tête `anthropic-workspace-id` (400 « not scoped to
+    /// a workspace »). Une clé créée dans un espace de travail suffit.
+    CleSansEspaceDeTravail,
+    /// Toute autre réponse : le statut, et le motif que le fournisseur a
+    /// donné (`error.message`), tronqué et expurgé de tout ce qui ressemble à
+    /// une clé ([`motif_du_fournisseur`]). `None` : le corps n'en portait pas.
+    Autre { statut: u16, motif: Option<String> },
 }
 
 impl ErreurFournisseur {
@@ -141,7 +147,8 @@ impl ErreurFournisseur {
             Self::ModeleInconnu => "modele_inconnu",
             Self::Reseau => "reseau",
             Self::Refus => "refus",
-            Self::Autre(_) => "erreur_fournisseur",
+            Self::CleSansEspaceDeTravail => "cle_sans_espace_de_travail",
+            Self::Autre { .. } => "erreur_fournisseur",
         }
     }
 
@@ -153,9 +160,90 @@ impl ErreurFournisseur {
             Self::ModeleInconnu => "Ce modèle n'existe pas chez ce fournisseur.".into(),
             Self::Reseau => "Fournisseur injoignable (réseau).".into(),
             Self::Refus => "Le modèle a refusé de répondre.".into(),
-            Self::Autre(s) => format!("Le fournisseur a répondu {s}."),
+            Self::CleSansEspaceDeTravail => "Cette clé Anthropic n'est rattachée à aucun espace de travail : créez-en une dans un espace de travail (console.anthropic.com › API keys).".into(),
+            Self::Autre {
+                statut,
+                motif: Some(m),
+            } => format!("Le fournisseur a répondu {statut} : « {m} »"),
+            Self::Autre { statut, motif: None } => format!("Le fournisseur a répondu {statut}."),
         }
     }
+
+    /// Le motif du fournisseur, déjà expurgé, pour le corps de la réponse.
+    pub fn motif(&self) -> Option<&str> {
+        match self {
+            Self::Autre { motif, .. } => motif.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Une réponse 2xx dont le corps n'est pas du JSON lisible.
+    pub(crate) fn corps_illisible(statut: u16) -> Self {
+        Self::Autre {
+            statut,
+            motif: None,
+        }
+    }
+}
+
+/// Longueur maximale du motif rendu à l'écran et au journal.
+const MOTIF_MAX: usize = 300;
+
+/// #6730 — le motif lisible d'une réponse d'erreur : `error.message`
+/// (Anthropic, compatible OpenAI, Gemini), `[0].error.message` (Gemini sous
+/// forme de liste), ou `error` quand c'est une chaîne (Ollama). Tronqué à
+/// [`MOTIF_MAX`] caractères, et tout mot qui ressemble à une clé d'API est
+/// remplacé par `[masqué]` : certains fournisseurs recopient un fragment de
+/// la clé dans leur message (« Incorrect API key provided: sk-… »). Le corps
+/// brut, lui, n'est jamais rendu ni journalisé.
+pub(crate) fn motif_du_fournisseur(corps: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(corps).ok()?;
+    let v = match &v {
+        Value::Array(a) => a.first()?.clone(),
+        _ => v,
+    };
+    let brut = match v.get("error")? {
+        Value::String(s) => s.clone(),
+        e => e.get("message")?.as_str()?.to_string(),
+    };
+    let expurge: Vec<String> = brut
+        .split_whitespace()
+        .map(|mot| {
+            if ressemble_a_une_cle(mot) {
+                "[masqué]".to_string()
+            } else {
+                mot.to_string()
+            }
+        })
+        .collect();
+    let texte = expurge.join(" ");
+    let texte = texte.trim();
+    if texte.is_empty() {
+        return None;
+    }
+    Some(if texte.chars().count() > MOTIF_MAX {
+        format!("{}…", texte.chars().take(MOTIF_MAX).collect::<String>())
+    } else {
+        texte.to_string()
+    })
+}
+
+/// Un mot qui pourrait être (un fragment de) clé : préfixe connu (`sk-`,
+/// `sk_`, `AIza`, `gsk_`, `xai-`), ou longue suite de 24 caractères ou plus
+/// mêlant lettres et chiffres sans espace.
+fn ressemble_a_une_cle(mot: &str) -> bool {
+    let m = mot.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+    if ["sk-", "sk_", "AIza", "gsk_", "xai-"]
+        .iter()
+        .any(|p| m.starts_with(p))
+    {
+        return true;
+    }
+    m.len() >= 24
+        && m.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && m.chars().any(|c| c.is_ascii_digit())
+        && m.chars().any(|c| c.is_ascii_alphabetic())
 }
 
 /// L'interface commune.
@@ -219,12 +307,15 @@ pub(crate) fn erreur_reseau(famille: Famille, e: &reqwest::Error) -> ErreurFourn
     ErreurFournisseur::Reseau
 }
 
-/// Un statut d'échec, traduit. `corps` ne sert qu'à reconnaître un crédit
-/// épuisé ou un modèle inconnu ; il n'est jamais journalisé.
+/// Un statut d'échec, traduit. Le corps brut n'est jamais journalisé : seul
+/// son motif expurgé l'est ([`motif_du_fournisseur`], #6730).
 pub(crate) fn erreur_de_statut(famille: Famille, statut: u16, corps: &str) -> ErreurFournisseur {
+    let motif = motif_du_fournisseur(corps);
     warn!(
         fournisseur = famille.nom(),
-        statut, "assistant_ia_fournisseur_erreur"
+        statut,
+        motif = motif.as_deref().unwrap_or("-"),
+        "assistant_ia_fournisseur_erreur"
     );
     let bas = corps.to_ascii_lowercase();
     match statut {
@@ -239,8 +330,11 @@ pub(crate) fn erreur_de_statut(famille: Famille, statut: u16, corps: &str) -> Er
         {
             ErreurFournisseur::ModeleInconnu
         }
+        400 if famille == Famille::Anthropic && bas.contains("not scoped to a workspace") => {
+            ErreurFournisseur::CleSansEspaceDeTravail
+        }
         500..=599 => ErreurFournisseur::Surcharge,
-        s => ErreurFournisseur::Autre(s),
+        statut => ErreurFournisseur::Autre { statut, motif },
     }
 }
 
@@ -293,7 +387,7 @@ impl Fournisseur for Anthropic {
             return Err(erreur_de_statut(Famille::Anthropic, statut, &texte));
         }
         let v: Value =
-            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::Autre(statut))?;
+            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::corps_illisible(statut))?;
         if v.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
             return Err(ErreurFournisseur::Refus);
         }
@@ -364,7 +458,7 @@ impl Fournisseur for CompatibleOpenai {
             return Err(erreur_de_statut(famille, statut, &texte));
         }
         let v: Value =
-            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::Autre(statut))?;
+            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::corps_illisible(statut))?;
         let sortie = v
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
@@ -417,7 +511,7 @@ impl Fournisseur for Ollama {
             return Err(erreur_de_statut(Famille::Ollama, statut, &texte));
         }
         let v: Value =
-            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::Autre(statut))?;
+            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::corps_illisible(statut))?;
         Ok(Reponse {
             texte: v
                 .pointer("/message/content")
@@ -449,7 +543,83 @@ mod tests {
             erreur_de_statut(f, 404, ""),
             ErreurFournisseur::ModeleInconnu
         );
-        assert_eq!(erreur_de_statut(f, 418, ""), ErreurFournisseur::Autre(418));
+        assert_eq!(
+            erreur_de_statut(f, 418, ""),
+            ErreurFournisseur::Autre {
+                statut: 418,
+                motif: None
+            }
+        );
+    }
+
+    /// #6730 — la réponse réelle d'Anthropic à une clé d'organisation
+    /// (relevée par curl le 22/10/2026 sur le .18).
+    const SANS_ESPACE: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use."}}"#;
+
+    #[test]
+    fn une_cle_sans_espace_de_travail_est_nommee_6730() {
+        let e = erreur_de_statut(Famille::Anthropic, 400, SANS_ESPACE);
+        assert_eq!(
+            e,
+            ErreurFournisseur::CleSansEspaceDeTravail,
+            "#6730 : le 400 « not scoped to a workspace » est retombé en « Autre »"
+        );
+        assert_eq!(e.code(), "cle_sans_espace_de_travail");
+        assert!(e.message().contains("espace de travail"), "{}", e.message());
+    }
+
+    #[test]
+    fn un_400_inconnu_garde_le_motif_du_fournisseur_6730() {
+        // Compatible OpenAI.
+        let e = erreur_de_statut(
+            Famille::CompatibleOpenai,
+            400,
+            r#"{"error":{"message":"Unsupported parameter: 'temperature'","type":"invalid_request_error"}}"#,
+        );
+        assert_eq!(
+            e.motif(),
+            Some("Unsupported parameter: 'temperature'"),
+            "#6730 : le motif du fournisseur est perdu"
+        );
+        assert!(
+            e.message().contains("Unsupported parameter"),
+            "{}",
+            e.message()
+        );
+        // Gemini, réponse en liste.
+        let e = erreur_de_statut(
+            Famille::Gemini,
+            400,
+            r#"[{"error":{"code":400,"message":"API key not valid for this project","status":"INVALID_ARGUMENT"}}]"#,
+        );
+        assert_eq!(e.motif(), Some("API key not valid for this project"));
+        // Ollama : `error` est une chaîne.
+        let e = erreur_de_statut(Famille::Ollama, 400, r#"{"error":"invalid format"}"#);
+        assert_eq!(e.motif(), Some("invalid format"));
+        // Un corps qui n'est pas du JSON : pas de motif, pas de corps brut.
+        let e = erreur_de_statut(Famille::Anthropic, 400, "<html>Bad Request</html>");
+        assert_eq!(e.motif(), None);
+    }
+
+    #[test]
+    fn le_motif_ne_porte_jamais_la_cle_et_reste_court_6730() {
+        let corps = r#"{"error":{"message":"Incorrect API key provided: sk-proj-AbCdEf0123456789. You can find your key at https://platform.openai.com.","type":"invalid_request_error"}}"#;
+        let m = motif_du_fournisseur(corps).unwrap();
+        assert!(
+            !m.contains("sk-proj") && !m.contains("0123456789"),
+            "#6730 : un fragment de clé part dans le motif : {m}"
+        );
+        assert!(m.contains("[masqué]"), "{m}");
+        let long = format!(r#"{{"error":{{"message":"{}"}}}}"#, "mot ".repeat(400));
+        let m = motif_du_fournisseur(&long).unwrap();
+        assert!(m.chars().count() <= MOTIF_MAX + 1, "{}", m.chars().count());
+        let m =
+            motif_du_fournisseur(r#"{"error":{"message":"clé AIzaSyD-abcdefghijklmnop rejetée"}}"#)
+                .unwrap();
+        assert!(
+            !m.contains("AIza"),
+            "#6730 : une clé Gemini part dans le motif : {m}"
+        );
     }
 
     #[test]
