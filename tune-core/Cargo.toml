@@ -741,6 +741,13 @@ path = "tests/crossfeed_renderer_sans_lpcm_2742.rs"
 name = "sonde_lpcm_hors_dlna_4894"
 path = "tests/sonde_lpcm_hors_dlna_4894.rs"
 
+# #6718 — la sonde LPCM d'un renderer OpenHome (`Playlist:1 ProtocolInfo`,
+# sinon le Sink du `ConnectionManager`). `autotests = false` en tête de ce
+# manifeste : sans cette cible, ce fichier ne serait jamais compilé.
+[[test]]
+name = "sonde_lpcm_openhome_6718"
+path = "tests/sonde_lpcm_openhome_6718.rs"
+
 # Édition d'album, tranche 4 — « Écrire dans les fichiers » : un vrai fichier
 # par format courant, relu par le lecteur du scan, audio prouvé intact
 # (empreinte ET PCM décodé). `autotests = false` en tête de ce manifeste : sans
