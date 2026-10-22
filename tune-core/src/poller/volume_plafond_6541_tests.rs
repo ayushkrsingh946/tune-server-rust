@@ -44,13 +44,22 @@ async fn un_renderer_a_100_est_ramene_sous_la_limite_6541() {
     assert_eq!(banc.commandes_depuis(deja).await, vec![0.4]);
 }
 
-/// Sous la limite, l'adoption historique (#6008) reste : 60 % < 70 %.
+/// Sous la limite, l'adoption historique (#6008) reste pour une BAISSE :
+/// 25 % < 40 %. #6739 (décision du 22/10) : une montée sous la limite
+/// (60 % > 40 %) n'est plus adoptée, et rien n'est commandé.
 #[tokio::test]
 async fn sous_la_limite_le_volume_de_l_appareil_est_adopte_6541() {
     let mut banc = banc_limite().await;
     let deja = banc.appareil_a(0.6).await;
     banc.tic().await;
-    assert!((banc.volume_en_base() - 60.0).abs() < 1e-6);
+    assert!(
+        (banc.volume_en_base() - 40.0).abs() < 1e-6,
+        "#6739 : un relevé plus haut que la consigne ne remonte jamais la zone"
+    );
+    assert!(banc.commandes_depuis(deja).await.is_empty());
+    let deja = banc.appareil_a(0.25).await;
+    banc.tic().await;
+    assert!((banc.volume_en_base() - 25.0).abs() < 1e-6);
     assert!(banc.commandes_depuis(deja).await.is_empty());
 }
 
