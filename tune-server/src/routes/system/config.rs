@@ -1714,7 +1714,13 @@ pub(super) async fn update_config(
     // lit avec la même fonction, arguments inversés.
     let ajoutees = racines_retirees(&racines_apres, &racines_avant);
     if !ajoutees.is_empty() {
-        super::scan::spawn_library_scan(state.clone(), false, None).await;
+        super::scan::spawn_library_scan_par(
+            state.clone(),
+            false,
+            None,
+            super::scan::ORIGINE_AJOUT_DE_DOSSIER,
+        )
+        .await;
     }
 
     let retirees = racines_retirees(&racines_avant, &racines_apres);
@@ -2748,7 +2754,13 @@ pub(super) async fn add_music_dir(
     // folder added later was neither scanned nor watched — it only showed up
     // after a restart (Jean-Pierre).
     if newly_added {
-        super::scan::spawn_library_scan(state.clone(), false, None).await;
+        super::scan::spawn_library_scan_par(
+            state.clone(),
+            false,
+            None,
+            super::scan::ORIGINE_AJOUT_DE_DOSSIER,
+        )
+        .await;
     }
     Ok(Json(json!({ "dirs": dirs })).into_response())
 }

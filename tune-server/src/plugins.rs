@@ -544,8 +544,13 @@ struct ScanDuDisque {
 impl tune_cd::extraction::ScanCible for ScanDuDisque {
     async fn scanner(&self, dossier: String) -> bool {
         let cible = tune_core::scanner::walker::normalize_path(&dossier);
-        crate::routes::system::scan::spawn_library_scan(self.state.clone(), false, Some(cible))
-            .await
+        crate::routes::system::scan::spawn_library_scan_par(
+            self.state.clone(),
+            false,
+            Some(cible),
+            crate::routes::system::scan::ORIGINE_EXTRACTION_CD,
+        )
+        .await
     }
 }
 

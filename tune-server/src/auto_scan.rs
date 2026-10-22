@@ -313,6 +313,7 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
             scan_done_clone.store(true, Ordering::Release);
             return;
         };
+        scan_lease.annoncer(crate::routes::system::scan::ORIGINE_DEMARRAGE, None);
         let _scan_lease = scan_lease;
 
         // Make the startup scan first-class, exactly like the manual one:
@@ -3850,6 +3851,10 @@ mod champs_tenus_scan_tests;
 #[cfg(test)]
 #[path = "arret_du_scan_de_demarrage_tests_5552.rs"]
 mod arret_du_scan_de_demarrage_tests_5552;
+
+#[cfg(test)]
+#[path = "arret_puis_scan_cible_tests_6729.rs"]
+mod arret_puis_scan_cible_tests_6729;
 
 #[cfg(test)]
 #[path = "mise_a_jour_pendant_un_scan_tests_5531.rs"]
