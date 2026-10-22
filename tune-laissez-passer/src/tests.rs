@@ -115,9 +115,40 @@ fn sans_racine_aucun_jeu_de_cles_n_est_accepte() {
         JeuDeCles::depuis_publication(&publication(), "").unwrap_err(),
         Refus::RacineAbsente
     );
+    // La racine embarquée n'a pas signé le jeu de test : il est refusé.
     assert_eq!(
         JeuDeCles::depuis_publication(&publication(), RACINE_EMBARQUEE).unwrap_err(),
-        Refus::RacineAbsente
+        Refus::JeuDeClesSignature
+    );
+}
+
+/// Le jeu de clés réellement publié le 22/10/2026, signé par la racine de
+/// production, passe avec `RACINE_EMBARQUEE` et avec la copie de `racine.pub`.
+#[test]
+fn le_jeu_publie_le_22_10_passe_avec_la_racine_embarquee() {
+    let jeu = include_str!("../vecteurs/jeu-publie-20261022/jeu.json");
+    let minisig = include_str!("../vecteurs/jeu-publie-20261022/jeu.json.minisig");
+    let pub_fichier = include_str!("../vecteurs/jeu-publie-20261022/racine.pub");
+    assert_eq!(
+        pub_fichier.lines().nth(1).map(str::trim),
+        Some(RACINE_EMBARQUEE),
+        "RACINE_EMBARQUEE doit être la 2e ligne de racine.pub"
+    );
+    let p = Publication {
+        jeu: jeu.to_string(),
+        minisig: minisig.to_string(),
+    };
+    let jeu = JeuDeCles::depuis_publication(&p, RACINE_EMBARQUEE)
+        .expect("le jeu publié doit passer avec la racine embarquée");
+    assert_eq!(jeu.version(), 1);
+    // Un octet changé dans le document publié : refusé.
+    let retouche = Publication {
+        jeu: p.jeu.replacen("\"version\":1", "\"version\":2", 1),
+        minisig: p.minisig.clone(),
+    };
+    assert_eq!(
+        JeuDeCles::depuis_publication(&retouche, RACINE_EMBARQUEE).unwrap_err(),
+        Refus::JeuDeClesSignature
     );
 }
 
