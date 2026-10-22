@@ -244,21 +244,63 @@ async fn playlist(
             "Le modèle n'a pas rendu un objet JSON.",
         );
     };
+    let recues = brut.get("rules").and_then(Value::as_array);
     match regles::valider(&brut, &offerts, cible, &refs) {
-        Ok(p) => Json(json!({
-            "ok": true,
-            "cible": cible.nom(),
-            "proposition": p,
-            "depuis_cache": res.depuis_cache,
-            "cout_eur": couts::micro_en_euros(res.cout_micro_eur),
-            "plafond": appel::etat_plafond(&etat.backend),
-        }))
-        .into_response(),
-        Err(code) => erreur(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            code,
-            "La réponse du modèle ne suit pas le schéma demandé.",
-        ),
+        // #6731 — une proposition sans AUCUNE règle exploitable n'est pas une
+        // proposition : enregistrée telle quelle, elle rendrait toute la
+        // bibliothèque. On la refuse, en disant pourquoi (les règles écartées
+        // et ce que le modèle n'a pas su traduire), au lieu de la rendre `ok`.
+        Ok(p) if p.rules.is_empty() => {
+            warn!(
+                cible = cible.nom(),
+                recues = recues.map(Vec::len).unwrap_or(0),
+                regles_recues = %regles::resume_pour_journal(recues.map(Vec::as_slice).unwrap_or(&[])),
+                ecartees = %regles::resume_des_refusees(&p.refusees),
+                non_traduit = p.untranslated.len(),
+                "assistant_ia_playlist_sans_regle"
+            );
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "ok": false,
+                    "error": "aucune_regle",
+                    "message": "Le modèle n'a proposé aucune règle utilisable : rien n'est créé. Reformulez avec un critère concret (genre, artiste, années, durée…).",
+                    "refusees": p.refusees,
+                    "untranslated": p.untranslated,
+                })),
+            )
+                .into_response()
+        }
+        Ok(p) => {
+            info!(
+                cible = cible.nom(),
+                recues = recues.map(Vec::len).unwrap_or(0),
+                retenues = p.rules.len(),
+                regles_retenues = %regles::resume_pour_journal(&p.rules),
+                ecartees = %regles::resume_des_refusees(&p.refusees),
+                "assistant_ia_playlist_regles"
+            );
+            Json(json!({
+                "ok": true,
+                "cible": cible.nom(),
+                "proposition": p,
+                "depuis_cache": res.depuis_cache,
+                "cout_eur": couts::micro_en_euros(res.cout_micro_eur),
+                "plafond": appel::etat_plafond(&etat.backend),
+            }))
+            .into_response()
+        }
+        Err(code) => {
+            warn!(
+                cible = cible.nom(),
+                code, "assistant_ia_playlist_reponse_hors_schema"
+            );
+            erreur(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                code,
+                "La réponse du modèle ne suit pas le schéma demandé.",
+            )
+        }
     }
 }
 
