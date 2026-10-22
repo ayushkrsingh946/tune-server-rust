@@ -836,6 +836,22 @@ pub(super) fn runtime_signal_reason_detail_lang(
     (!details.is_empty()).then(|| details.join(" ; "))
 }
 
+/// #6734 — le détail de l'étape « Transport » d'une sortie locale sans
+/// contrat dont l'anneau flottant tronque la source : le verdict tombe, la
+/// cause est dite.
+pub(super) fn detail_de_l_anneau_flottant(
+    lang: &str,
+    output_type: &str,
+    contrat_publie: bool,
+    bit_depth: i32,
+    is_dsd: bool,
+) -> Option<String> {
+    (output_type == "local"
+        && !contrat_publie
+        && anneau_flottant_tronque_la_source(bit_depth, is_dsd))
+    .then(|| ts(lang, "float_precision").to_string())
+}
+
 /// #6452 — le détail de l'étape « Transport ». Sous le repli de démarrage,
 /// une zone locale dit pourquoi elle ne joue pas en ASIO : le démarrage
 /// précédent n'a pas abouti, celui-ci s'est fait sur l'hôte par défaut.
@@ -1864,7 +1880,17 @@ fn assembler_les_etapes_lang(
         "bit_perfect": transport_bit_perfect,
         "detail": detail_du_transport(
             output_type,
-            runtime_signal_path.and_then(|r| runtime_signal_reason_detail_lang(lang, r)),
+            runtime_signal_path
+                .and_then(|r| runtime_signal_reason_detail_lang(lang, r))
+                .or_else(|| {
+                    detail_de_l_anneau_flottant(
+                        lang,
+                        output_type,
+                        runtime_signal_path.is_some(),
+                        bit_depth,
+                        is_dsd,
+                    )
+                }),
             tune_core::demarrage_inacheve::repli_actif(),
         ),
     }));
@@ -2070,6 +2096,19 @@ pub(super) fn transport_partage_est_intact(audio_backend: &str, pcm_alsa: Option
     }
 }
 
+/// #6734 — l'anneau des sorties locales SANS contrat de signal (CPAL partagé
+/// sous Linux/ALSA, CoreAudio, WASAPI partagé) porte des `f32` : 24 bits de
+/// mantisse. Une source PCM plus profonde y perd ses bits de poids faible,
+/// même ouverte en `hw:` et en i32 (`RingBuf` de `outputs/local.rs`, puis
+/// `build_int_stream::<i32>` qui reconvertit dans le rappel). Seuls les bras
+/// exclusifs (`Puits::Natif`, WASAPI et ASIO) transportent les octets tels
+/// quels, et ceux-là publient leur contrat.
+///
+/// Le DSD (profondeur 1, DoP sur 24 bits utiles) n'est pas concerné.
+pub(super) fn anneau_flottant_tronque_la_source(bit_depth: i32, is_dsd: bool) -> bool {
+    !is_dsd && bit_depth > 24
+}
+
 /// Fil 2161 — ce PCM ALSA est-il un greffon logiciel, et non le matériel ?
 ///
 /// `None` (PCM inconnu : parc pas encore publié, zone sans périphérique) ne
@@ -2248,9 +2287,11 @@ fn decrire_le_transport<'a>(
             let exclusif_observe = runtime_signal_path.is_some();
             let transport =
                 etiquette_du_transport_local(audio_backend, exclusif_observe, pcm_local);
+            // #6734 — sans contrat, l'anneau f32 ne garde que 24 bits.
+            let anneau_intact = !anneau_flottant_tronque_la_source(bit_depth, is_dsd);
             let intact = match runtime_signal_path {
                 Some(status) => runtime_transport_is_intact(status),
-                None => transport_partage_est_intact(audio_backend, pcm_local),
+                None => transport_partage_est_intact(audio_backend, pcm_local) && anneau_intact,
             };
             (intact, transport, format_name)
         }
