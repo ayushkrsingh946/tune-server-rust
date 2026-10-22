@@ -2631,9 +2631,14 @@ fn artiste_au_dessus_de(dossier_album: &Path) -> Option<String> {
     let mut composants: Vec<&str> = composants.into_iter().filter(|c| !c.is_empty()).collect();
     // Le dernier composant est le dossier d'album lui-même.
     composants.pop()?;
+    // #6737 — un point de montage de partage réseau borne la remontée : ni
+    // lui, ni ce qui est au-dessus (`/mnt`, `…/Tune/montages`) n'appartient à
+    // la bibliothèque. Sans cette borne, `192.168.1.20_Musique` devenait
+    // l'artiste de tout album rangé juste sous le partage.
     composants
         .into_iter()
         .rev()
+        .take_while(|n| !point_de_montage_de_partage(n))
         .find(|n| !dossier_muet_pour_l_artiste(n))
         .map(str::to_string)
 }
@@ -2679,6 +2684,37 @@ pub(crate) fn dossier_muet_pour_l_artiste(nom: &str) -> bool {
         return true;
     }
     capacite_de_volume(&n)
+}
+
+/// #6737 (Gerard, fil 2374) — le nom que Tune donne au point de montage d'un
+/// partage réseau : `<hôte>_<partage>` (`mount_smb_share`,
+/// `tune-server/src/routes/network.rs`), par exemple `192.168.1.20_Musique`
+/// sous `/mnt`. Un album rangé juste sous ce point recevait ce nom pour
+/// artiste quand ses fichiers n'avaient pas de balise artiste. Le montage
+/// n'est jamais un artiste.
+///
+/// L'hôte est reconnu quand il ne peut pas être un nom d'artiste : une
+/// adresse IPv4, ou un nom de machine du réseau local (`.local`, `.lan`,
+/// `.home`, `.internal`). Un nom de machine nu (`DS918_music`) reste parlant :
+/// rien ne le distingue d'un nom de groupe écrit avec un souligné.
+fn point_de_montage_de_partage(nom: &str) -> bool {
+    let n = nom.trim().to_lowercase();
+    let Some((hote, partage)) = n.split_once('_') else {
+        return false;
+    };
+    if partage.trim().is_empty() {
+        return false;
+    }
+    let ipv4 = {
+        let octets: Vec<&str> = hote.split('.').collect();
+        octets.len() == 4
+            && octets
+                .iter()
+                .all(|o| !o.is_empty() && o.len() <= 3 && o.parse::<u8>().is_ok())
+    };
+    ipv4 || [".local", ".lan", ".home", ".internal"]
+        .iter()
+        .any(|suffixe| hote.len() > suffixe.len() && hote.ends_with(suffixe))
 }
 
 /// `^\d+(\.\d+)?\s?(GB|TB|Go|To|G|T)$`, insensible à la casse (reçoit du
@@ -3770,6 +3806,9 @@ mod ogg_fallback_tests_4412;
 
 #[cfg(test)]
 mod sans_balise_tests_4412;
+
+#[cfg(test)]
+mod point_de_montage_tests_6737;
 
 #[cfg(test)]
 mod coffret_multicanal_tests_4846;
