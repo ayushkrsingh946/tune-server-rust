@@ -127,8 +127,10 @@ pub struct EqProcessor {
     /// jusqu'à la borne de [`Self::borner_la_remontee`].
     extinction: Option<Extinction>,
     /// #6741 — rapport « volume d'avant l'égaliseur / volume courant » : la
-    /// remontée d'un gain gardé ne le franchit jamais. 1,0 (le défaut) quand
-    /// le volume n'a pas bougé ou n'est pas connu ici.
+    /// remontée d'un gain gardé ne le franchit jamais. 1,0 quand le volume
+    /// n'a pas monté. 0 (le défaut) tant que la sortie n'a posé aucune borne :
+    /// sans niveau d'avant connu, le gain reste gardé jusqu'au prochain
+    /// réglage, comme le voulait la décision du 21/10 (#6708).
     borne_de_remontee: f32,
     clipping: CompteurDEcretage,
     closed: AtomicBool,
@@ -184,7 +186,8 @@ impl EqProcessor {
             gain_moyen_db,
             gain_garde: None,
             extinction: None,
-            borne_de_remontee: 1.0,
+            // #6741 — 0 : sans borne posée par la sortie, rien ne remonte.
+            borne_de_remontee: 0.0,
             clipping: Default::default(),
             closed: AtomicBool::new(false),
         }
@@ -466,17 +469,19 @@ impl EqProcessor {
     /// jusqu'au signal sec. Si l'auditeur a monté le volume pendant que
     /// l'égaliseur jouait (pour compenser son préampli), le signal sec
     /// dépasserait le niveau d'avant : la remontée s'arrête alors à `borne`,
-    /// et le reste est gardé jusqu'au prochain réglage.
+    /// et le reste est gardé jusqu'au prochain réglage. Une borne nulle,
+    /// négative ou illisible ne libère rien.
     ///
     /// Appelée à l'installation et à chaque geste de volume. Elle ne fait
     /// jamais baisser le gain (la cible n'est jamais sous le gain courant), et
     /// ne fait jamais sauter le niveau : une rampe en cours repart du gain
     /// atteint, vers la nouvelle cible. Sans effet hors d'un égaliseur coupé.
     pub fn borner_la_remontee(&mut self, borne: f64) {
+        // Une borne illisible ne libère rien : le gain reste gardé.
         let borne = if borne.is_finite() && borne > 0.0 {
             borne.min(1.0) as f32
         } else {
-            1.0
+            0.0
         };
         if (borne - self.borne_de_remontee).abs() < 1e-5 {
             return;
@@ -489,7 +494,11 @@ impl EqProcessor {
         let atteint: Option<Vec<f32>> = match self.extinction.take() {
             Some(ext) => {
                 let coefs = ext.depart.len().max(1);
-                Some((0..coefs).map(|c| Self::gain_de_la_rampe(&ext, 0, c)).collect())
+                Some(
+                    (0..coefs)
+                        .map(|c| Self::gain_de_la_rampe(&ext, 0, c))
+                        .collect(),
+                )
             }
             None => self.gain_garde.clone(),
         };
@@ -509,7 +518,9 @@ impl EqProcessor {
         let gains: Vec<f32> = match &self.extinction {
             Some(ext) => {
                 let coefs = ext.depart.len().max(1);
-                (0..coefs).map(|c| Self::gain_de_la_rampe(ext, 0, c)).collect()
+                (0..coefs)
+                    .map(|c| Self::gain_de_la_rampe(ext, 0, c))
+                    .collect()
             }
             None => self.gain_garde.clone()?,
         };

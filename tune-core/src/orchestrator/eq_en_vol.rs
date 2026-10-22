@@ -84,15 +84,26 @@ impl EqEnVol {
         }
     }
 
-    /// #6741 — le rapport `volume d'avant l'égaliseur / volume courant`,
-    /// borné à 1 ; 1 quand l'un des deux est inconnu ou le volume nul.
+    /// #6741 — la borne de remontée d'un flux servi à un APPAREIL : 1 (retour
+    /// complet au signal sec) quand la consigne de la zone n'est pas au-dessus
+    /// de celle d'avant l'égaliseur, 0 (gain gardé) sinon, ou quand l'une des
+    /// deux est inconnue.
+    ///
+    /// Ce poste sert des sorties à volume MATÉRIEL (DLNA, OAAT…) : la courbe
+    /// qui change le pourcentage envoyé en niveau appartient à l'appareil, et
+    /// beaucoup sont en dB. Le rapport des pourcentages n'y borne rien : de
+    /// 25 % à 50 % sur une courbe de 50 dB, le niveau monte de 12,5 dB, pas
+    /// de 6. Seule la comparaison tient sur toute courbe croissante : à une
+    /// consigne inférieure ou égale à celle d'avant, le signal sec ne dépasse
+    /// pas le niveau d'avant. Au-dessus, le préampli reste gardé jusqu'à un
+    /// réglage qui redescend à ce niveau.
     fn borne_de_remontee(&self) -> f64 {
         let avant = self.volume_avant.load(Ordering::SeqCst);
         let courant = self.volume_zone.load(Ordering::SeqCst);
-        if avant == VOLUME_INCONNU || courant == VOLUME_INCONNU || courant == 0 {
-            1.0
+        if avant == VOLUME_INCONNU || courant == VOLUME_INCONNU || courant > avant {
+            0.0
         } else {
-            (f64::from(avant) / f64::from(courant)).min(1.0)
+            1.0
         }
     }
 
@@ -435,50 +446,100 @@ mod tests {
         );
     }
 
-    /// #6741 — la borne : sur une radio réseau, l'auditeur monte le volume de
-    /// la zone pendant que l'égaliseur joue (25 % → 50 %, +6 dB). Le niveau
-    /// rendu par l'appareil est `signal × consigne`. Après la coupure, il ne
-    /// dépasse JAMAIS celui d'avant l'égaliseur : la remontée s'arrête à
-    /// −6 dB, le reste est gardé. Une consigne revenue à 25 % le libère.
+    /// Un appareil dont la courbe de volume est en dB (50 dB de course, le cas
+    /// de beaucoup de renderers DLNA) : le niveau rendu n'est PAS
+    /// proportionnel au pourcentage envoyé.
+    fn appareil_en_db(consigne: f64) -> f64 {
+        if consigne <= 0.0 {
+            0.0
+        } else {
+            10f64.powf((consigne - 1.0) * 50.0 / 20.0)
+        }
+    }
+
+    /// #6741 — la borne, sur un APPAREIL dont Tune ignore la courbe de volume.
+    /// L'auditeur monte la consigne de la zone pendant que l'égaliseur joue
+    /// (25 % → 50 %). Sur une courbe de 50 dB, c'est +12,5 dB, et non les
+    /// +6 dB qu'un rapport de pourcentages supposerait : borner la remontée à
+    /// ce rapport ferait passer le niveau 6,5 dB AU-DESSUS de celui d'avant
+    /// l'égaliseur. Après la coupure, le préampli est donc GARDÉ tel quel
+    /// (aucune hausse) ; une consigne revenue à 25 % le libère, et le niveau
+    /// rejoint celui d'avant sans le dépasser.
     #[test]
     fn sur_une_radio_volume_monte_pendant_l_egaliseur_jamais_au_dessus_du_niveau_d_avant_6741() {
         let mut radio = RadioFactice::new();
         let mut consigne = 0.25;
         radio.poste.noter_le_volume(consigne);
-        let avant = rms_f32(&radio.passer(8)) * consigne;
+        let avant = rms_f32(&radio.passer(8)) * appareil_en_db(consigne);
         radio.poste.poser(Some(profil()));
         radio.passer(20);
+        let preampli = radio
+            .eq
+            .as_ref()
+            .and_then(|e| e.preamp_db(0))
+            .expect("égaliseur monté");
         consigne = 0.5;
         radio.poste.noter_le_volume(consigne);
-        radio.passer(20);
+        let avant_la_coupure = {
+            radio.passer(20);
+            rms_f32(&radio.passer(4)) * appareil_en_db(consigne)
+        };
         radio.poste.poser(None);
         for n in 0..300 {
-            let rendu = rms_f32(&radio.passer(1)) * consigne;
+            let rendu = rms_f32(&radio.passer(1)) * appareil_en_db(consigne);
             assert!(
-                rendu <= avant * 1.012,
-                "radio, consigne montée à 50 % : niveau rendu {rendu:.5} au bloc {n}, au-dessus                  de celui d'avant l'égaliseur {avant:.5} (#6741)"
+                rendu <= avant_la_coupure * 1.012,
+                "radio, consigne montée à 50 % : niveau rendu {rendu:.6} au bloc {n}, \
+                 au-dessus de celui d'avant la coupure {avant_la_coupure:.6} — la coupure ne \
+                 doit rien faire monter quand la courbe de l'appareil est inconnue (#6741)"
             );
         }
         let garde = radio
             .eq
             .as_ref()
             .and_then(|e| e.preampli_garde())
-            .expect("le reste du préampli est gardé jusqu'au prochain réglage");
+            .expect("le préampli est gardé jusqu'au prochain réglage");
         assert!(
-            !garde.en_retour && (garde.db + 6.02).abs() < 0.2,
-            "gardé {garde:?}, attendu ≈ −6,02 dB, rampe finie"
+            !garde.en_retour && (garde.db - preampli).abs() < 0.3,
+            "gardé {garde:?}, attendu le préampli entier ({preampli:.2} dB)"
         );
         // Le prochain réglage : la consigne revient à 25 %.
         consigne = 0.25;
         radio.poste.noter_le_volume(consigne);
         for n in 0..300 {
-            let rendu = rms_f32(&radio.passer(1)) * consigne;
-            assert!(rendu <= avant * 1.012, "bloc {n} : {rendu:.5} > {avant:.5}");
+            let rendu = rms_f32(&radio.passer(1)) * appareil_en_db(consigne);
+            assert!(rendu <= avant * 1.012, "bloc {n} : {rendu:.6} > {avant:.6}");
         }
-        let fin = rms_f32(&radio.passer(8)) * consigne;
+        let fin = rms_f32(&radio.passer(8)) * appareil_en_db(consigne);
         assert!(
             (fin / avant - 1.0).abs() < 0.02,
-            "consigne revenue à 25 % : {fin:.5}, attendu {avant:.5}"
+            "consigne revenue à 25 % : {fin:.6}, attendu {avant:.6}"
+        );
+    }
+
+    /// #6741 — un poste dont la consigne de la zone est inconnue ne fait rien
+    /// remonter : sans niveau d'avant, le préampli est gardé (#6708).
+    #[test]
+    fn sans_consigne_connue_le_preampli_reste_garde_6741() {
+        let mut radio = RadioFactice::new();
+        radio.passer(8);
+        radio.poste.poser(Some(profil()));
+        radio.passer(20);
+        let preampli = radio
+            .eq
+            .as_ref()
+            .and_then(|e| e.preamp_db(0))
+            .expect("égaliseur monté");
+        radio.poste.poser(None);
+        radio.passer(300);
+        let garde = radio
+            .eq
+            .as_ref()
+            .and_then(|e| e.preampli_garde())
+            .expect("le préampli est gardé");
+        assert!(
+            (garde.db - preampli).abs() < 0.3,
+            "gardé {garde:?}, attendu {preampli:.2} dB : sans consigne connue, rien ne remonte"
         );
     }
 

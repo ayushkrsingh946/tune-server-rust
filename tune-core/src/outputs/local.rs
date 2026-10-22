@@ -1348,11 +1348,15 @@ impl LocalOutput {
 
     /// #6741 — le rapport `volume d'avant l'égaliseur / volume courant`, borné
     /// à 1 : la remontée d'un préampli gardé ne dépasse jamais le niveau
-    /// d'avant l'égaliseur. 1 sans référence ou à volume nul (rien ne sort).
+    /// d'avant l'égaliseur. Ce rapport est exact ICI : le volume de la sortie
+    /// locale est un gain numérique linéaire (`effective_volume_units`). 0
+    /// (gain gardé) sans référence ; 1 à volume nul (rien ne sort).
     fn borne_de_remontee(&self) -> f64 {
         let avant = self.volume_avant_egaliseur.load(Ordering::SeqCst);
         let courant = self.volume_de_l_auditeur();
-        if avant == u32::MAX || courant == 0 {
+        if avant == u32::MAX {
+            0.0
+        } else if courant == 0 {
             1.0
         } else {
             (f64::from(avant) / f64::from(courant)).min(1.0)
