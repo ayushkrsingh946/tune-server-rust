@@ -990,7 +990,14 @@ async fn handle_ssdp_discovered(
         // zones meant the toggle was set on a zone that was never the one
         // playing, so Tidal FLAC kept being transcoded to WAV).
         seen_hosts.insert(dev.host.clone());
-        let _ = zone_repo.update_device_id(existing_zone_id, &dev.id);
+        let _ = zone_repo.changer_d_appareil(
+            existing_zone_id,
+            &dev.id,
+            tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                origine: "ssdp_reconnexion_par_adresse",
+                mac: dev.mac_address.as_deref(),
+            },
+        );
         let _ = zone_repo.set_host(existing_zone_id, &dev.host);
         set_zone_online(event_bus, db, &dev.id, true);
         let vol = zone_repo
@@ -1046,7 +1053,14 @@ async fn handle_ssdp_discovered(
         // Place APRES les deux barreaux existants : il ne prend jamais la
         // place d'un rattrapage qui fonctionne deja.
         seen_hosts.insert(dev.host.clone());
-        let _ = zone_repo.update_device_id(zid, &dev.id);
+        let _ = zone_repo.changer_d_appareil(
+            zid,
+            &dev.id,
+            tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                origine: "ssdp_reancrage_par_mac",
+                mac: dev.mac_address.as_deref(),
+            },
+        );
         let _ = zone_repo.set_identity(zid, &dev.host, dev.mac_address.as_deref());
         // Une zone SUPPRIMEE se re-ancre sans se demasquer : la suppression
         // reste une suppression, et `is_device_hidden` redevient operant des le
@@ -1695,7 +1709,14 @@ pub fn spawn_mdns_handler(
                             // son identifiant sans la remettre en ligne, sinon
                             // la mise a jour ressusciterait ce que
                             // l'utilisateur avait efface.
-                            let _ = zone_repo.update_output_device(zid, &dev.id);
+                            let _ = zone_repo.changer_d_appareil(
+                                zid,
+                                &dev.id,
+                                tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                                    origine: "mdns_reancrage_identifiant_herite",
+                                    mac: dev.mac_address.as_deref(),
+                                },
+                            );
                             if !was_hidden {
                                 set_zone_online(&event_bus, &db, &dev.id, true);
                             }
@@ -1769,7 +1790,14 @@ pub fn spawn_mdns_handler(
                                 if let Some(ref old_dev_id) = z.output_device_id {
                                     reg.remove(old_dev_id);
                                 }
-                                let _ = zone_repo.update_output_device(zid, &dev.id);
+                                let _ = zone_repo.changer_d_appareil(
+                                    zid,
+                                    &dev.id,
+                                    tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                                        origine: "mdns_montee_de_priorite",
+                                        mac: dev.mac_address.as_deref(),
+                                    },
+                                );
                                 let _ = zone_repo.update_output_type(zid, output_type_str);
                                 set_zone_online(&event_bus, &db, &dev.id, true);
                                 info!(
@@ -1826,7 +1854,14 @@ pub fn spawn_mdns_handler(
                                 } else if let Some(z) = same_name_zone
                                     && let Some(zid) = z.id
                                 {
-                                    let _ = zone_repo.update_output_device(zid, &dev.id);
+                                    let _ = zone_repo.changer_d_appareil(
+                                        zid,
+                                        &dev.id,
+                                        tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                                            origine: "mdns_meme_nom",
+                                            mac: dev.mac_address.as_deref(),
+                                        },
+                                    );
                                     let _ = zone_repo.update_output_type(zid, output_type_str);
                                     set_zone_online(&event_bus, &db, &dev.id, true);
                                     info!(name = %dev.name, id = %dev.id, old_id = ?z.output_device_id, "mdns_zone_device_updated");
@@ -1847,7 +1882,14 @@ pub fn spawn_mdns_handler(
                                     // SANS la demasquer : la suppression reste
                                     // une suppression, et le garde-fou redevient
                                     // operant des le tour suivant.
-                                    let _ = zone_repo.update_output_device(zid, &dev.id);
+                                    let _ = zone_repo.changer_d_appareil(
+                                        zid,
+                                        &dev.id,
+                                        tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                                            origine: "mdns_zone_masquee_meme_nom",
+                                            mac: dev.mac_address.as_deref(),
+                                        },
+                                    );
                                     info!(name = %dev.name, id = %dev.id, zone_id = zid, "mdns_hidden_zone_reanchored");
                                 } else if let Some((zid, masquee)) = zone_reseau_a_reancrer_par_mac(
                                     &zone_repo,
@@ -1866,7 +1908,14 @@ pub fn spawn_mdns_handler(
                                     // suppression reste une suppression, et le
                                     // garde-fou `is_device_hidden` redevient
                                     // operant des le tour suivant.
-                                    let _ = zone_repo.update_output_device(zid, &dev.id);
+                                    let _ = zone_repo.changer_d_appareil(
+                                        zid,
+                                        &dev.id,
+                                        tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                                            origine: "mdns_reancrage_par_mac",
+                                            mac: dev.mac_address.as_deref(),
+                                        },
+                                    );
                                     let _ = zone_repo.set_identity(
                                         zid,
                                         &dev.host,
@@ -2989,7 +3038,7 @@ mod reancrage_4520 {
             .find("\"mdns_zone_device_update_deferred_while_in_use\"")
             .expect("le report est journalisé");
         let ecrit = source[differe..]
-            .find("zone_repo.update_output_device(zid,&dev.id)")
+            .find("zone_repo.changer_d_appareil(zid,&dev.id,")
             .map(|i| i + differe)
             .expect("l'écriture suit le report");
         assert!(regle < differe && differe < ecrit);
