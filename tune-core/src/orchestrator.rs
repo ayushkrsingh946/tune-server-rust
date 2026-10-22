@@ -1838,6 +1838,10 @@ mod prepa_lecture_5871_tests;
 #[cfg(test)]
 mod service_wav_progressif_5080;
 
+// #6718 — la même chose vers un renderer OpenHome qui annonce le LPCM.
+#[cfg(test)]
+mod service_wav_progressif_openhome_6718;
+
 mod dsp;
 // #5662 — une commande de volume à la fois par sortie, la dernière valeur gagne.
 mod volume_coalescent;

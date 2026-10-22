@@ -3919,7 +3919,7 @@ pub struct RendererCapabilities {
 }
 
 impl RendererCapabilities {
-    fn inconclusive(reason: &'static str) -> Self {
+    pub(crate) fn inconclusive(reason: &'static str) -> Self {
         Self {
             reason: Some(reason),
             ..Self::default()
@@ -3955,7 +3955,7 @@ pub fn canaux_annonces_par_le_sink(sink: &[String]) -> Option<u16> {
 
 /// Pure Sink → capabilities mapping (unit-tested; `probe_capabilities` wraps it
 /// around the SOAP call).
-fn renderer_caps_from_sink(sink: Vec<String>) -> RendererCapabilities {
+pub(crate) fn renderer_caps_from_sink(sink: Vec<String>) -> RendererCapabilities {
     // Param-aware match: LPCM entries carry `;rate=…;channels=…` after the MIME
     // (`audio/L16;rate=44100;channels=2`), so we compare the base MIME only.
     // Also accepts the `audio/x-…` legacy variant and the `*` wildcard, like

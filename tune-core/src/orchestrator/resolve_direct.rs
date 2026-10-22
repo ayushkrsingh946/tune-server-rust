@@ -62,14 +62,19 @@ impl PlaybackOrchestrator {
         };
         let caps = {
             let locked = output.lock().await;
-            let Some(dlna) = locked
-                .as_any()
-                .downcast_ref::<crate::outputs::dlna::DlnaOutput>()
-            else {
+            let sortie = locked.as_any();
+            if let Some(dlna) = sortie.downcast_ref::<crate::outputs::dlna::DlnaOutput>() {
+                dlna.probe_capabilities().await
+            } else if let Some(oh) =
+                sortie.downcast_ref::<crate::outputs::openhome::OpenHomeOutput>()
+            {
+                // #6718 — un renderer OpenHome annonce ce qu'il lit
+                // (`Playlist:1 ProtocolInfo`) : on le lit, comme un Sink.
+                oh.probe_capabilities().await
+            } else {
                 let t = locked.output_type();
                 return super::capacite_lpcm_par_sortie::repli_sans_sonde(Some(t), hi_res);
-            };
-            dlna.probe_capabilities().await
+            }
         };
         if !caps.probed {
             return false;
