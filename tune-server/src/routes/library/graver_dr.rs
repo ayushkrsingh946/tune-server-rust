@@ -38,7 +38,9 @@
 //! (`tache_de_fond_ralentie_pour_la_lecture`). Et elle n'écrit JAMAIS dans le
 //! fichier d'une piste qu'une zone tient, en lecture ou en pause : ce fichier
 //! est reporté (`dr_gravure_reportee_fichier_en_lecture`) et gravé après les
-//! autres, une fois libéré (`dr_gravure_reprise_apres_la_lecture`). Cette
+//! autres, une fois libéré (`dr_gravure_reprise_apres_la_lecture`). Le
+//! fichier de la piste SUIVANTE de chaque zone qui joue, celle que le poller
+//! arme pour l'enchaînement, est reporté de même (#6692). Cette
 //! attente est bornée ([`ATTENTE_MAX_DES_REPORTEES`]) : au-delà, le fichier
 //! est compté `skipped` et la passe finit `done`. L'autorisation d'écrire
 //! dans les fichiers est relue avant CHAQUE gravure : retirée en cours de
@@ -314,6 +316,85 @@ pub(super) async fn fichier_en_lecture(
     false
 }
 
+/// #6692 — le fichier est-il celui de la piste SUIVANTE d'une zone qui joue
+/// ou est en pause ? Près de la fin de la piste en cours, le poller l'arme
+/// (`prepare_gapless`) : session préchargée ou `SetNext` côté renderer, qui
+/// en ouvre déjà le flux. La réécrire à ce moment-là ferait lire au flux
+/// pré-armé un fichier en cours de réécriture (`lofty` réécrit le fichier
+/// entier quand il ajoute un bloc PADDING).
+///
+/// La suivante est celle que désigne `PositionPoller::prochaine_position_jouable`,
+/// la fonction même dont `prepare_gapless` tire la position qu'il arme
+/// (aléatoire, répétition et lignes bannies compris) : une seule décision
+/// « piste suivante », jamais une seconde déduite de `queue_position + 1`.
+///
+/// Comme pour la piste tenue : on compare des CHEMINS (feuilles CUE), et une
+/// base illisible reporte le fichier au lieu de l'écrire. Aucune zone qui
+/// joue : aucune requête.
+pub(super) async fn fichier_de_la_piste_suivante(
+    playback: &tune_core::playback::PlaybackManager,
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    pistes: &tune_core::db::track_repo::TrackRepo,
+    chemin: &str,
+) -> bool {
+    let mut file: Option<tune_core::db::play_queue_repo::PlayQueueRepo> = None;
+    for zone in playback.all_states().await {
+        if zone.state == tune_core::playback::PlayState::Stopped {
+            continue;
+        }
+        let Some(position) = tune_core::poller::PositionPoller::prochaine_position_jouable(
+            backend,
+            zone.zone_id,
+            &zone,
+        ) else {
+            continue;
+        };
+        let file = file.get_or_insert_with(|| {
+            tune_core::db::play_queue_repo::PlayQueueRepo::with_backend(backend.clone())
+        });
+        let ligne = match file.get_at(zone.zone_id, position) {
+            Ok(Some(ligne)) => ligne,
+            Ok(None) => continue,
+            Err(e) => {
+                warn!(zone_id = zone.zone_id, position, error = %e, "dr_gravure_suivante_illisible");
+                return true;
+            }
+        };
+        let chemin_suivant = match ligne.track_id {
+            Some(track_id) => match pistes.get(track_id) {
+                Ok(Some(piste)) => piste.file_path,
+                Ok(None) => ligne.file_path,
+                Err(e) => {
+                    warn!(track_id, error = %e, "dr_gravure_suivante_illisible");
+                    return true;
+                }
+            },
+            None => ligne.file_path,
+        };
+        if chemin_suivant.as_deref() == Some(chemin) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Pourquoi un fichier ne peut pas être gravé maintenant, s'il ne le peut
+/// pas : tenu par une zone (#6212), ou armé comme sa suivante (#6692).
+async fn fichier_tenu(
+    playback: &tune_core::playback::PlaybackManager,
+    backend: &std::sync::Arc<dyn tune_core::db::backend::DbBackend>,
+    pistes: &tune_core::db::track_repo::TrackRepo,
+    chemin: &str,
+) -> Option<&'static str> {
+    if fichier_en_lecture(playback, pistes, chemin).await {
+        return Some("piste_tenue");
+    }
+    if fichier_de_la_piste_suivante(playback, backend, pistes, chemin).await {
+        return Some("piste_suivante");
+    }
+    None
+}
+
 /// Entre deux relectures des fichiers reportés : la pause de la politique de
 /// lecture, au moins une seconde — même freins coupés, la boucle ne tourne
 /// pas à vide pendant qu'un morceau joue.
@@ -382,10 +463,11 @@ async fn derouler_la_passe(
         // freinées (#4681) : pendant qu'une zone joue, une pause entre
         // deux fichiers, et la passe nommée au relevé.
         priorite::ceder_a_la_lecture(priorite::ID_GRAVER_DR).await;
-        if fichier_en_lecture(playback, &pistes, &candidate.1).await {
+        if let Some(motif) = fichier_tenu(playback, backend, &pistes, &candidate.1).await {
             info!(
                 track_id = candidate.0,
                 chemin = %candidate.1,
+                motif,
                 "dr_gravure_reportee_fichier_en_lecture"
             );
             reportees.push(candidate);
@@ -416,7 +498,10 @@ async fn derouler_la_passe(
         let mut encore = Vec::with_capacity(reportees.len());
         for candidate in reportees {
             priorite::ceder_a_la_lecture(priorite::ID_GRAVER_DR).await;
-            if fichier_en_lecture(playback, &pistes, &candidate.1).await {
+            if fichier_tenu(playback, backend, &pistes, &candidate.1)
+                .await
+                .is_some()
+            {
                 encore.push(candidate);
                 continue;
             }
