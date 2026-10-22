@@ -188,6 +188,55 @@ async fn une_regle_inconnue_est_refusee_par_la_route() {
     assert_eq!(nombre_de_smart_playlists(&b.db), avant);
 }
 
+/// #6731 — le .18, 22/10 : une proposition SANS règle exploitable ne doit
+/// jamais revenir `ok`, sinon l'écran peut l'enregistrer et la playlist rend
+/// toute la bibliothèque. Réponses du modèle simulées : toutes les règles
+/// écartées, puis aucune règle du tout.
+#[tokio::test]
+async fn une_proposition_sans_regle_exploitable_est_refusee_6731() {
+    let b = banc();
+    configurer(&b, "5").await;
+    let avant = nombre_de_smart_playlists(&b.db);
+    for (phrase, texte) in [
+        (
+            "musique d'ambiance douce",
+            json!({
+                "name": "Démo",
+                "match_mode": "all",
+                "rules": [
+                    {"field": "ambiance", "op": "=", "value": "douce"},
+                    {"field": "year", "op": "contains", "value": "196"}
+                ],
+                "untranslated": ["douce"]
+            }),
+        ),
+        (
+            "quelque chose de joyeux",
+            json!({"name": "Démo", "match_mode": "all", "rules": [], "untranslated": ["joyeux"]}),
+        ),
+    ] {
+        *b.texte.lock().unwrap() = texte.to_string();
+        let (s, v) = appel(&b.app, "POST", "/playlist", Some(json!({"phrase": phrase}))).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{phrase} : {v}");
+        assert_eq!(v["ok"], false, "{v}");
+        assert_eq!(v["error"], "aucune_regle", "{v}");
+        assert!(
+            v.get("proposition").is_none(),
+            "aucune proposition à enregistrer : {v}"
+        );
+        assert!(v["untranslated"].is_array(), "{v}");
+    }
+    // Les règles écartées sont rendues, avec leur raison, pour l'écran.
+    *b.texte.lock().unwrap() = json!({
+        "name": "Démo",
+        "rules": [{"field": "ambiance", "op": "=", "value": "zen"}]
+    })
+    .to_string();
+    let (_, v) = appel(&b.app, "POST", "/playlist", Some(json!({"phrase": "zen"}))).await;
+    assert_eq!(v["refusees"][0]["raison"], "critere_inconnu", "{v}");
+    assert_eq!(nombre_de_smart_playlists(&b.db), avant, "rien n'est créé");
+}
+
 fn nombre_de_smart_playlists(db: &Arc<dyn DbBackend>) -> i64 {
     db.query_one("SELECT COUNT(*) FROM smart_playlists", &[])
         .unwrap()

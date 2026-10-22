@@ -23,6 +23,30 @@ struct CreateSmartPlaylist {
     sort_by: Option<String>,
     sort_order: Option<String>,
     max_tracks: Option<i64>,
+    /// #6731 — `"assistant"` quand les règles viennent de l'Assistant IA.
+    /// Absent pour une saisie à la main, où une playlist sans règle reste
+    /// légitime (« Recently Added » : toute la bibliothèque, coupée).
+    #[serde(default)]
+    origine: Option<String>,
+}
+
+/// #6731 — une playlist issue de l'assistant SANS règle rendrait toute la
+/// bibliothèque : on la refuse. La raison du refus, ou `None` si elle passe.
+fn refus_assistant_sans_regle(origine: Option<&str>, rules: &Value) -> Option<&'static str> {
+    if origine != Some("assistant") {
+        return None;
+    }
+    let vide = match rules {
+        Value::Array(a) => a.is_empty(),
+        Value::String(t) => serde_json::from_str::<Value>(t)
+            .ok()
+            .and_then(|v| v.as_array().map(Vec::is_empty))
+            .unwrap_or(true),
+        _ => true,
+    };
+    vide.then_some(
+        "aucune_regle : une playlist proposée par l'assistant doit porter au moins une règle",
+    )
 }
 
 #[derive(Deserialize)]
@@ -104,6 +128,10 @@ async fn create_smart_playlist(
     State(state): State<SmartHttpState>,
     Json(body): Json<CreateSmartPlaylist>,
 ) -> Result<impl IntoResponse, AppError> {
+    if let Some(raison) = refus_assistant_sans_regle(body.origine.as_deref(), &body.rules) {
+        tracing::warn!(nom = %body.name, "smart_playlist_assistant_sans_regle_refusee");
+        return Err(AppError::bad_request(raison));
+    }
     let rules_json = body.rules.to_string();
     let match_mode = body.match_mode.clone().unwrap_or_else(|| "all".into());
     let sort_by = body.sort_by.clone().unwrap_or_else(|| "title".into());
@@ -1254,7 +1282,27 @@ pub(crate) fn strip_accents(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_smart_query, build_smart_query_rapport};
+    use super::{build_smart_query, build_smart_query_rapport, refus_assistant_sans_regle};
+
+    /// #6731 — l'assistant ne crée jamais une playlist vide de règles ; une
+    /// saisie à la main le peut toujours.
+    #[test]
+    fn une_playlist_de_l_assistant_sans_regle_est_refusee_6731() {
+        use serde_json::json;
+        let a = Some("assistant");
+        assert!(refus_assistant_sans_regle(a, &json!([])).is_some());
+        assert!(refus_assistant_sans_regle(a, &json!("[]")).is_some());
+        assert!(refus_assistant_sans_regle(a, &json!(null)).is_some());
+        assert!(
+            refus_assistant_sans_regle(
+                a,
+                &json!([{"field": "genre", "op": "contains", "value": "Jazz"}])
+            )
+            .is_none()
+        );
+        // La contre-épreuve : sans origine, `[]` reste permis.
+        assert!(refus_assistant_sans_regle(None, &json!([])).is_none());
+    }
     use crate::smart_refs::{EmptyResolver, RefCtx};
 
     fn where_of(rules: &str) -> String {
