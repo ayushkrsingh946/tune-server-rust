@@ -361,3 +361,47 @@ async fn relever_une_limite_n_envoie_aucune_commande_6541() {
     );
     assert_eq!(state.playback.get_state(id).await.volume, 0.5);
 }
+
+/// #6721 (fil 2366, Marantz NR1200, tweeter détruit) — zone en PURE avec
+/// « Forcer à 100 % », appareil à 20 % (télécommande). Le curseur du client web
+/// envoie une consigne pour BAISSER : par `PUT` comme par `POST`
+/// `/zones/{id}/volume`, l'appareil ne reçoit plus RIEN. Avant ce correctif,
+/// chacune de ces deux requêtes faisait partir `1.0` vers l'appareil.
+#[tokio::test]
+async fn sous_pure_verrouille_baisser_ne_fait_jamais_partir_100_6721() {
+    let (app, state, id) = serveur().await;
+    tune_core::db::settings_repo::SettingsRepo::with_backend(state.backend.clone())
+        .set(
+            &format!("zone_{id}_audiophile"),
+            r#"{"enabled":true,"lock_volume":true}"#,
+        )
+        .unwrap();
+    for methode in ["PUT", "POST"] {
+        let (statut, corps) = appeler(
+            &app,
+            methode,
+            &format!("/api/v1/zones/{id}/volume"),
+            json!({ "volume": 0.18 }),
+        )
+        .await;
+        assert!(
+            !statut.is_success(),
+            "{methode} : une baisse sous PURE verrouillé doit être refusée ({statut} {corps})"
+        );
+    }
+    assert_eq!(
+        recus(&state).await,
+        Vec::<f64>::new(),
+        "#6721 : aucun ordre de volume, et surtout pas 100 %, pour un geste qui baisse"
+    );
+    // TÉMOIN : la consigne explicite à 100 % passe toujours.
+    let (statut, corps) = appeler(
+        &app,
+        "PUT",
+        &format!("/api/v1/zones/{id}/volume"),
+        json!({ "volume": 1.0 }),
+    )
+    .await;
+    assert_eq!(statut, StatusCode::NO_CONTENT, "{corps}");
+    assert_eq!(recus(&state).await, vec![1.0]);
+}

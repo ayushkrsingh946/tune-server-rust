@@ -2726,6 +2726,7 @@ impl PlaybackOrchestrator {
         // volume de groupe, alarmes…) le contournaient.
         let pure_force = crate::audio::audiophile::volume_lock_enabled(&self.db, zone_id)
             && crate::audio::audiophile::zone_enabled(&self.db, zone_id);
+        refuser_une_baisse_sous_pure_verrouille(zone_id, volume, pure_force)?;
         self.appliquer_volume(
             zone_id,
             volume,
@@ -2749,6 +2750,7 @@ impl PlaybackOrchestrator {
     ) -> OutputCommandResult<()> {
         let pure_force = crate::audio::audiophile::volume_lock_enabled(&self.db, zone_id)
             && crate::audio::audiophile::zone_enabled(&self.db, zone_id);
+        refuser_une_baisse_sous_pure_verrouille(zone_id, volume, pure_force)?;
         self.appliquer_volume(
             zone_id,
             volume,
