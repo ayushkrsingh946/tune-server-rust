@@ -57,10 +57,12 @@ pub const TAILLE_MAX: usize = 4096;
 
 /// Clé publique RACINE minisign (la ligne base64 du fichier `.pub`).
 ///
-/// Vide tant que la racine n'est pas générée : aucun jeu de clés ne peut alors
-/// être accepté sans qu'on fournisse explicitement une racine (variable
-/// d'environnement du relais), et donc aucun laissez-passer ne passe.
-pub const RACINE_EMBARQUEE: &str = "";
+/// Générée par Bertrand le 22/10/2026 ; la clé secrète reste hors ligne, sur
+/// son poste. Elle signe le jeu de clés publié par le site
+/// (`GET /api/v1/remote/keys`). Le relais peut la remplacer par la variable
+/// `TUNE_REMOTE_RACINE` (rotation de la racine). Copie publique et jeu signé
+/// du jour : `vecteurs/jeu-publie-20261022/`.
+pub const RACINE_EMBARQUEE: &str = "RWTS2M4Wa1nnskW3GczP9flXOlSejFnyH3g6bqtb1R1ubq9veWi2sGTp";
 
 /// Préfixe du message que l'appareil signe pour ouvrir une session.
 pub const DOMAINE_DEFI_SESSION: &str = "tune-remote/session/v1";
