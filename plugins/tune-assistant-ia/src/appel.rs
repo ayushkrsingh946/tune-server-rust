@@ -105,12 +105,21 @@ impl ErreurAppel {
             Self::NonConfigure | Self::CleIllisible | Self::TarifInconnu => StatusCode::BAD_REQUEST,
             Self::PlafondAtteint => StatusCode::CONFLICT,
             Self::Fournisseur(ErreurFournisseur::CleRefusee) => StatusCode::BAD_REQUEST,
+            Self::Fournisseur(ErreurFournisseur::CleSansEspaceDeTravail) => StatusCode::BAD_REQUEST,
             Self::Fournisseur(_) => StatusCode::BAD_GATEWAY,
         }
     }
 
     pub fn corps(&self) -> Value {
-        json!({ "ok": false, "error": self.code(), "message": self.message() })
+        let mut corps = json!({ "ok": false, "error": self.code(), "message": self.message() });
+        // #6730 — le motif du fournisseur, à part : l'écran le montre sous son
+        // message traduit. Absent quand le fournisseur n'en a pas donné.
+        if let Self::Fournisseur(e) = self
+            && let Some(m) = e.motif()
+        {
+            corps["motif"] = json!(m);
+        }
+        corps
     }
 }
 
@@ -353,8 +362,27 @@ mod tests {
             ErreurAppel::PlafondAtteint,
             ErreurAppel::Fournisseur(ErreurFournisseur::CleRefusee),
             ErreurAppel::Fournisseur(ErreurFournisseur::Quota),
+            ErreurAppel::Fournisseur(ErreurFournisseur::CleSansEspaceDeTravail),
         ] {
             assert_ne!(e.statut(), StatusCode::UNAUTHORIZED, "{e:?}");
         }
+    }
+
+    /// #6730 — l'écran reçoit le motif du fournisseur à part, et le message.
+    #[test]
+    fn le_corps_d_erreur_porte_le_motif_du_fournisseur_6730() {
+        let e = ErreurAppel::Fournisseur(crate::fournisseur::erreur_de_statut(
+            crate::fournisseur::Famille::CompatibleOpenai,
+            400,
+            r#"{"error":{"message":"Invalid model parameter"}}"#,
+        ));
+        let c = e.corps();
+        assert_eq!(c["error"], "erreur_fournisseur");
+        assert_eq!(
+            c["motif"], "Invalid model parameter",
+            "#6730 : le corps rendu à l'écran perd le motif du fournisseur : {c}"
+        );
+        let sans = ErreurAppel::Fournisseur(ErreurFournisseur::Quota).corps();
+        assert!(sans.get("motif").is_none(), "{sans}");
     }
 }
