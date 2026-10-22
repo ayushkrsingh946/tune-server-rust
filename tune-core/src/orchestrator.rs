@@ -1838,6 +1838,10 @@ mod prepa_lecture_5871_tests;
 #[cfg(test)]
 mod service_wav_progressif_5080;
 
+// #6718 — la même chose vers un renderer OpenHome qui annonce le LPCM.
+#[cfg(test)]
+mod service_wav_progressif_openhome_6718;
+
 mod dsp;
 // #5662 — une commande de volume à la fois par sortie, la dernière valeur gagne.
 mod volume_coalescent;
@@ -1850,6 +1854,10 @@ mod volume_pure_5695_tests;
 // #6541 — limites de sécurité et de confort, tenues sur tous les chemins.
 #[cfg(test)]
 mod volume_limites_6541_tests;
+// #6774 — PURE verrouillé et volume fixe ne suivent pas la zone sur un
+// autre appareil.
+#[cfg(test)]
+mod securite_volume_changement_d_appareil_6774_tests;
 // #4407 — l'égaliseur remplacé en vol dans un flux réseau fabriqué par Tune.
 mod eq_en_vol;
 #[cfg(test)]
