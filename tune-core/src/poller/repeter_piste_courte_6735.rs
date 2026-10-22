@@ -38,7 +38,7 @@ struct Banc {
     orchestrator: Arc<PlaybackOrchestrator>,
     playback: Arc<PlaybackManager>,
     outputs: Arc<Mutex<OutputRegistry>>,
-    appareil: &'static str,
+    appareil: String,
     zone_id: i64,
     _fichier: tempfile::NamedTempFile,
 }
@@ -46,7 +46,7 @@ struct Banc {
 impl Banc {
     /// Une zone dont la file ne porte qu'UNE piste de 3,8 s, en Répéter la
     /// piste, et dont la sortie est du type demandé.
-    async fn monter(type_de_sortie: &str, appareil: &'static str) -> Self {
+    async fn monter(type_de_sortie: &str, appareil: &str) -> Self {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_schema().unwrap();
         run_migrations(&db).unwrap();
@@ -96,7 +96,7 @@ impl Banc {
             orchestrator,
             playback,
             outputs,
-            appareil,
+            appareil: appareil.to_string(),
             zone_id,
             _fichier: fichier,
         }
@@ -106,7 +106,7 @@ impl Banc {
     /// est-il reparti ? », et seul l'appareil peut y répondre.
     async fn play_recus(&self) -> usize {
         let reg = self.outputs.lock().await;
-        let arc = reg.get(self.appareil).unwrap();
+        let arc = reg.get(&self.appareil).unwrap();
         let sortie = arc.lock().await;
         sortie
             .as_any()
@@ -139,7 +139,7 @@ impl Banc {
     }
 }
 
-async fn repeter_la_piste_relance_le_morceau_court(type_de_sortie: &str, appareil: &'static str) {
+async fn repeter_la_piste_relance_le_morceau_court(type_de_sortie: &str, appareil: &str) {
     let banc = Banc::monter(type_de_sortie, appareil).await;
     banc.lancer().await;
 
