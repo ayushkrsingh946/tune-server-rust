@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 const ITUNES_SEARCH_URL: &str = "https://itunes.apple.com/search";
+const ITUNES_LOOKUP_URL: &str = "https://itunes.apple.com/lookup";
 const APPLE_TOP_BASE: &str = "https://rss.marketingtools.apple.com/api/v2";
 const USER_AGENT: &str = "Tune/2.0 (https://mozaiklabs.fr)";
 /// Cache TTL for top podcasts (1 hour).
@@ -142,6 +143,48 @@ pub struct FluxPodcast {
 
 pub struct PodcastService {
     client: Client,
+    /// Adresse de la recherche Apple par identifiant. Fixe en production ;
+    /// un banc la pointe vers un faux Apple local (#6770).
+    lookup_base: String,
+}
+
+/// Pourquoi un identifiant Apple du palmarès n'a pas donné de flux (#6770).
+///
+/// Le palmarès Apple ne porte que l'identifiant : le flux RSS se résout par
+/// `lookup`. Les deux échecs ne se valent pas et ne se disent pas pareil :
+/// un podcast que la boutique ne connaît pas, et un podcast qu'elle connaît
+/// mais qui n'a AUCUN flux public (exclusivité Apple, par exemple).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EchecResolution {
+    /// Apple ne rend aucun résultat pour cet identifiant, ni dans la boutique
+    /// du pays, ni dans la boutique par défaut.
+    Introuvable,
+    /// Apple connaît le podcast, mais ne publie pas d'adresse de flux.
+    SansFluxPublic,
+    /// Apple n'a pas répondu, ou pas en JSON.
+    Reseau(String),
+}
+
+impl EchecResolution {
+    /// Code stable, lu par les clients.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Introuvable => "podcast_introuvable",
+            Self::SansFluxPublic => "podcast_sans_flux_public",
+            Self::Reseau(_) => "podcast_resolution_reseau",
+        }
+    }
+
+    /// Phrase à montrer telle quelle.
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::Introuvable => "Ce podcast est introuvable chez Apple.",
+            Self::SansFluxPublic => {
+                "Ce podcast n'a pas de flux public : il ne peut être ni suivi ni écouté hors d'Apple Podcasts."
+            }
+            Self::Reseau(_) => "Apple Podcasts ne répond pas. Réessayez dans un instant.",
+        }
+    }
 }
 
 impl PodcastService {
@@ -153,12 +196,25 @@ impl PodcastService {
                 .redirect(reqwest::redirect::Policy::limited(10))
                 .build()
                 .unwrap(),
+            lookup_base: ITUNES_LOOKUP_URL.to_string(),
         }
     }
 
     /// Create a PodcastService reusing an existing reqwest client.
     pub fn with_client(client: Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            lookup_base: ITUNES_LOOKUP_URL.to_string(),
+        }
+    }
+
+    /// Comme [`Self::with_client`], avec une autre adresse de `lookup` :
+    /// réservé aux bancs, qui servent un faux Apple local.
+    pub fn with_lookup_base(client: Client, lookup_base: &str) -> Self {
+        Self {
+            client,
+            lookup_base: lookup_base.to_string(),
+        }
     }
 
     pub async fn search(
@@ -640,14 +696,76 @@ impl PodcastService {
         Self::curated_french_podcasts()
     }
 
-    /// Resolve a podcast feed URL from an Apple podcast ID via iTunes lookup.
-    pub async fn resolve_feed_url(&self, apple_id: &str) -> Option<String> {
-        let url = format!("https://itunes.apple.com/lookup?id={apple_id}&entity=podcast");
-        let resp = self.client.get(&url).send().await.ok()?;
-        let data: serde_json::Value = resp.json().await.ok()?;
-        data["results"].as_array()?.first()?["feedUrl"]
+    /// L'adresse de `lookup` pour un identifiant Apple, dans la boutique d'un
+    /// pays (#6770).
+    ///
+    /// Sans `country`, Apple cherche dans la boutique AMÉRICAINE : un podcast
+    /// classé seulement en France y revient sans résultat (constaté le 22/10
+    /// sur « Chroniques criminelles », 1509742508 : `resultCount` 0 sans
+    /// pays, 1 avec `country=fr`).
+    pub fn lookup_url(base: &str, apple_id: &str, country: Option<&str>) -> String {
+        let mut url = format!("{base}?id={apple_id}&entity=podcast");
+        if let Some(cc) = country.map(str::trim).filter(|c| !c.is_empty()) {
+            url.push_str("&country=");
+            url.push_str(&cc.to_lowercase());
+        }
+        url
+    }
+
+    /// Lit la réponse de `lookup` : le flux, ou la raison de son absence.
+    fn flux_du_lookup(data: &serde_json::Value) -> Result<String, EchecResolution> {
+        let Some(premier) = data["results"].as_array().and_then(|r| r.first()) else {
+            return Err(EchecResolution::Introuvable);
+        };
+        premier["feedUrl"]
             .as_str()
+            .filter(|u| !u.is_empty())
             .map(String::from)
+            .ok_or(EchecResolution::SansFluxPublic)
+    }
+
+    async fn lookup(
+        &self,
+        apple_id: &str,
+        country: Option<&str>,
+    ) -> Result<String, EchecResolution> {
+        let url = Self::lookup_url(&self.lookup_base, apple_id, country);
+        debug!(url = %url, "podcast_lookup");
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| EchecResolution::Reseau(e.to_string()))?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| EchecResolution::Reseau(e.to_string()))?;
+        Self::flux_du_lookup(&data)
+    }
+
+    /// Résout le flux RSS d'un podcast du palmarès Apple (#6770).
+    ///
+    /// La recherche part dans la boutique du PAYS du palmarès. Si cette
+    /// boutique ne connaît pas l'identifiant, on retente une fois sans pays :
+    /// un podcast du palmarès d'un pays peut n'être référencé qu'ailleurs.
+    /// Un podcast connu mais sans flux public ne se retente pas — la réponse
+    /// est déjà la bonne. Tout échec est journalisé : il ne disparaît plus en
+    /// silence.
+    pub async fn resolve_feed_url(
+        &self,
+        apple_id: &str,
+        country: Option<&str>,
+    ) -> Result<String, EchecResolution> {
+        let pays = country.map(str::trim).filter(|c| !c.is_empty());
+        let mut issue = self.lookup(apple_id, pays).await;
+        if pays.is_some() && issue == Err(EchecResolution::Introuvable) {
+            issue = self.lookup(apple_id, None).await;
+        }
+        if let Err(e) = &issue {
+            warn!(apple_id, country = pays.unwrap_or(""), echec = ?e, "podcast_flux_non_resolu");
+        }
+        issue
     }
 
     // ── Apple Top Podcasts ──────────────────────────────────────────
@@ -1041,5 +1159,119 @@ mod tests {
         let genres = PodcastService::available_genres();
         assert!(genres.len() >= 18);
         assert!(genres.iter().any(|g| g["name"] == "Music"));
+    }
+
+    // ── #6770 : le pays du palmarès part avec la recherche du flux ──────
+
+    /// Faux Apple local : rend `reponse(requete)` à chaque requête et garde
+    /// les lignes de requête reçues.
+    async fn faux_apple(
+        reponse: fn(&str) -> String,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/lookup", ecoute.local_addr().unwrap());
+        let recues = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let journal = recues.clone();
+        tokio::spawn(async move {
+            while let Ok((mut flux, _)) = ecoute.accept().await {
+                let mut tampon = vec![0u8; 4096];
+                let n = flux.read(&mut tampon).await.unwrap_or(0);
+                let texte = String::from_utf8_lossy(&tampon[..n]).to_string();
+                let ligne = texte.lines().next().unwrap_or("").to_string();
+                journal.lock().unwrap().push(ligne.clone());
+                let corps = reponse(&ligne);
+                let http = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{corps}",
+                    corps.len()
+                );
+                let _ = flux.write_all(http.as_bytes()).await;
+            }
+        });
+        (base, recues)
+    }
+
+    /// Le comportement d'Apple relevé le 22/10 pour un podcast classé
+    /// seulement en France : rien dans la boutique par défaut, le flux dans
+    /// la boutique française.
+    fn classe_seulement_en_france(ligne: &str) -> String {
+        if ligne.contains("country=fr") {
+            r#"{"resultCount":1,"results":[{"feedUrl":"https://flux.exemple.test/fr.xml"}]}"#.into()
+        } else {
+            r#"{"resultCount":0,"results":[]}"#.into()
+        }
+    }
+
+    #[test]
+    fn lookup_url_porte_le_pays_6770() {
+        let url = PodcastService::lookup_url(ITUNES_LOOKUP_URL, "1509742508", Some("FR"));
+        assert!(
+            url.contains("country=fr"),
+            "la recherche Apple doit partir avec le pays du palmarès : {url}"
+        );
+        let sans = PodcastService::lookup_url(ITUNES_LOOKUP_URL, "1509742508", None);
+        assert!(!sans.contains("country="), "{sans}");
+    }
+
+    #[tokio::test]
+    async fn resolve_feed_url_transmet_le_pays_6770() {
+        let (base, recues) = faux_apple(classe_seulement_en_france).await;
+        let svc = PodcastService::with_lookup_base(reqwest::Client::new(), &base);
+
+        let flux = svc.resolve_feed_url("1509742508", Some("fr")).await;
+
+        assert_eq!(
+            flux,
+            Ok("https://flux.exemple.test/fr.xml".to_string()),
+            "un podcast classé seulement en France doit se résoudre dans la boutique française ; requêtes reçues : {:?}",
+            recues.lock().unwrap()
+        );
+        assert!(
+            recues.lock().unwrap()[0].contains("country=fr"),
+            "la PREMIÈRE recherche doit porter le pays : {:?}",
+            recues.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn sans_flux_public_est_dit_et_pas_retente_6770() {
+        fn connu_sans_flux(_: &str) -> String {
+            r#"{"resultCount":1,"results":[{"collectionName":"Affaires sensibles"}]}"#.into()
+        }
+        let (base, recues) = faux_apple(connu_sans_flux).await;
+        let svc = PodcastService::with_lookup_base(reqwest::Client::new(), &base);
+
+        let flux = svc.resolve_feed_url("912451024", Some("fr")).await;
+
+        assert_eq!(flux, Err(EchecResolution::SansFluxPublic));
+        assert_eq!(recues.lock().unwrap().len(), 1, "inutile de retenter");
+    }
+
+    #[tokio::test]
+    async fn inconnu_du_pays_se_retente_sans_pays_6770() {
+        fn seulement_par_defaut(ligne: &str) -> String {
+            if ligne.contains("country=") {
+                r#"{"resultCount":0,"results":[]}"#.into()
+            } else {
+                r#"{"resultCount":1,"results":[{"feedUrl":"https://flux.exemple.test/us.xml"}]}"#
+                    .into()
+            }
+        }
+        let (base, _) = faux_apple(seulement_par_defaut).await;
+        let svc = PodcastService::with_lookup_base(reqwest::Client::new(), &base);
+        assert_eq!(
+            svc.resolve_feed_url("1", Some("fr")).await,
+            Ok("https://flux.exemple.test/us.xml".to_string())
+        );
+
+        fn rien(_: &str) -> String {
+            r#"{"resultCount":0,"results":[]}"#.into()
+        }
+        let (base, _) = faux_apple(rien).await;
+        let svc = PodcastService::with_lookup_base(reqwest::Client::new(), &base);
+        assert_eq!(
+            svc.resolve_feed_url("2", Some("fr")).await,
+            Err(EchecResolution::Introuvable)
+        );
     }
 }
