@@ -146,7 +146,21 @@ pub struct PodcastService {
     /// Adresse de la recherche Apple par identifiant. Fixe en production ;
     /// un banc la pointe vers un faux Apple local (#6770).
     lookup_base: String,
+    /// Racine du palmarès Apple (`…/api/v2`). Fixe en production ; un banc
+    /// la pointe vers le même faux Apple (#6770).
+    top_base: String,
 }
+
+/// #6770 — le pays du palmarès d'où vient chaque identifiant Apple servi,
+/// pour qu'une résolution demandée SANS pays (aucun client n'en envoie)
+/// parte quand même dans la bonne boutique. Bornée : vidée au-delà.
+fn pays_des_palmares() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static PAYS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        OnceLock::new();
+    PAYS.get_or_init(Default::default)
+}
+
+const PAYS_DES_PALMARES_MAX: usize = 10_000;
 
 /// Pourquoi un identifiant Apple du palmarès n'a pas donné de flux (#6770).
 ///
@@ -197,6 +211,7 @@ impl PodcastService {
                 .build()
                 .unwrap(),
             lookup_base: ITUNES_LOOKUP_URL.to_string(),
+            top_base: APPLE_TOP_BASE.to_string(),
         }
     }
 
@@ -205,6 +220,7 @@ impl PodcastService {
         Self {
             client,
             lookup_base: ITUNES_LOOKUP_URL.to_string(),
+            top_base: APPLE_TOP_BASE.to_string(),
         }
     }
 
@@ -214,6 +230,16 @@ impl PodcastService {
         Self {
             client,
             lookup_base: lookup_base.to_string(),
+            top_base: APPLE_TOP_BASE.to_string(),
+        }
+    }
+
+    /// Comme [`Self::with_lookup_base`], palmarès compris : réservé aux bancs.
+    pub fn with_apple_bases(client: Client, top_base: &str, lookup_base: &str) -> Self {
+        Self {
+            client,
+            lookup_base: lookup_base.to_string(),
+            top_base: top_base.to_string(),
         }
     }
 
@@ -757,7 +783,14 @@ impl PodcastService {
         apple_id: &str,
         country: Option<&str>,
     ) -> Result<String, EchecResolution> {
-        let pays = country.map(str::trim).filter(|c| !c.is_empty());
+        let retenu = pays_des_palmares()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(apple_id).cloned());
+        let pays = country
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .or(retenu.as_deref());
         let mut issue = self.lookup(apple_id, pays).await;
         if pays.is_some() && issue == Err(EchecResolution::Introuvable) {
             issue = self.lookup(apple_id, None).await;
@@ -777,10 +810,104 @@ impl PodcastService {
     /// fournisseur lui-même qui filtre, le serveur ne trie rien. Extraite
     /// pour que le passage du pays soit vérifiable sans réseau (#3395).
     pub fn top_chart_url(genre: Option<u32>, country: &str) -> String {
+        Self::top_chart_url_sur(APPLE_TOP_BASE, genre, country)
+    }
+
+    fn top_chart_url_sur(base: &str, genre: Option<u32>, country: &str) -> String {
         let cc = country.to_lowercase();
         match genre {
-            Some(gid) => format!("{APPLE_TOP_BASE}/{cc}/podcasts/top/50/podcasts.json?genre={gid}"),
-            None => format!("{APPLE_TOP_BASE}/{cc}/podcasts/top/50/podcasts.json"),
+            Some(gid) => format!("{base}/{cc}/podcasts/top/50/podcasts.json?genre={gid}"),
+            None => format!("{base}/{cc}/podcasts/top/50/podcasts.json"),
+        }
+    }
+
+    /// #6770 — `identifiant Apple → flux` d'une réponse `lookup` groupée ;
+    /// un résultat sans `feedUrl` (aucun flux public) n'y figure pas.
+    fn flux_du_lookup_groupe(
+        data: &serde_json::Value,
+    ) -> std::collections::HashMap<String, String> {
+        data["results"]
+            .as_array()
+            .map(|r| {
+                r.iter()
+                    .filter_map(|x| {
+                        let id = x["collectionId"]
+                            .as_u64()
+                            .or_else(|| x["trackId"].as_u64())?
+                            .to_string();
+                        let flux = x["feedUrl"].as_str().filter(|u| !u.is_empty())?;
+                        Some((id, flux.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// #6770 — UNE recherche `lookup` pour plusieurs identifiants (Apple les
+    /// accepte séparés par des virgules), dans la boutique d'un pays.
+    async fn lookup_groupe(
+        &self,
+        ids: &[&str],
+        country: Option<&str>,
+    ) -> std::collections::HashMap<String, String> {
+        let url = Self::lookup_url(&self.lookup_base, &ids.join(","), country);
+        let data = match self.client.get(&url).send().await {
+            Ok(resp) => resp.json::<serde_json::Value>().await.ok(),
+            Err(e) => {
+                warn!(error = %e, "podcast_lookup_groupe_injoignable");
+                None
+            }
+        };
+        data.map(|d| Self::flux_du_lookup_groupe(&d))
+            .unwrap_or_default()
+    }
+
+    /// #6770 — le palmarès Apple ne porte que l'identifiant : sans adresse de
+    /// flux, aucun client ne pouvait ouvrir ni suivre un podcast des onglets
+    /// « Populaires » et « Tous » (le web s'arrête sur un `feed_url` vide).
+    /// Les flux se résolvent ici, en UNE recherche groupée dans la boutique
+    /// du pays du palmarès, puis une seconde sans pays pour ceux qu'elle ne
+    /// connaît pas. Un podcast sans flux public garde un `feed_url` vide ;
+    /// son abonnement le dit (`EchecResolution::SansFluxPublic`).
+    async fn completer_les_flux(&self, podcasts: &mut [Podcast], cc: &str) {
+        let ids_manquants = |podcasts: &[Podcast]| -> Vec<String> {
+            podcasts
+                .iter()
+                .filter(|p| p.feed_url.is_empty())
+                .filter_map(|p| p.source_id.strip_prefix("apple-").map(String::from))
+                .collect()
+        };
+        if let Ok(mut m) = pays_des_palmares().lock() {
+            if m.len() > PAYS_DES_PALMARES_MAX {
+                m.clear();
+            }
+            for id in ids_manquants(podcasts) {
+                m.insert(id, cc.to_string());
+            }
+        }
+        for pays in [Some(cc), None] {
+            let ids = ids_manquants(podcasts);
+            if ids.is_empty() {
+                break;
+            }
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            let flux = self.lookup_groupe(&refs, pays).await;
+            for p in podcasts.iter_mut().filter(|p| p.feed_url.is_empty()) {
+                if let Some(f) = p
+                    .source_id
+                    .strip_prefix("apple-")
+                    .and_then(|id| flux.get(id))
+                {
+                    p.feed_url = f.clone();
+                }
+            }
+        }
+        let restants = ids_manquants(podcasts).len();
+        if restants > 0 {
+            debug!(
+                country = cc,
+                restants, "podcasts_du_palmares_sans_flux_public"
+            );
         }
     }
 
@@ -793,7 +920,7 @@ impl PodcastService {
         country: &str,
     ) -> Result<Vec<Podcast>, String> {
         let cc = country.to_lowercase();
-        let url = Self::top_chart_url(genre, &cc);
+        let url = Self::top_chart_url_sur(&self.top_base, genre, &cc);
         let cache_key = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             std::hash::Hash::hash(&cc, &mut h);
@@ -870,6 +997,8 @@ impl PodcastService {
             .collect();
 
         debug!(count = podcasts.len(), "apple_top_podcasts_parsed");
+        let mut podcasts = podcasts;
+        self.completer_les_flux(&mut podcasts, &cc).await;
 
         // Update cache.
         {
@@ -1272,6 +1401,90 @@ mod tests {
         assert_eq!(
             svc.resolve_feed_url("2", Some("fr")).await,
             Err(EchecResolution::Introuvable)
+        );
+    }
+
+    /// #6770 — la cause du signalement : le palmarès Apple ne porte pas
+    /// d'adresse de flux, et le web s'arrête sur un `feed_url` vide. Le
+    /// palmarès servi par Tune porte désormais le flux, résolu dans la
+    /// boutique du PAYS du palmarès (une requête groupée), puis sans pays
+    /// pour le reste ; un podcast sans flux public garde un flux vide.
+    #[tokio::test]
+    async fn le_palmares_porte_l_adresse_du_flux_6770() {
+        fn apple(ligne: &str) -> String {
+            if ligne.contains("/podcasts/top/") {
+                return r#"{"feed":{"results":[
+                    {"id":"111","name":"Classé en France","artistName":"A"},
+                    {"id":"222","name":"Boutique par défaut","artistName":"B"},
+                    {"id":"333","name":"Exclusivité Apple","artistName":"C"}]}}"#
+                    .into();
+            }
+            if ligne.contains("id=333&") {
+                // Recherche d'un seul identifiant : la boutique du pays ne le
+                // connaît pas, la boutique par défaut le connaît sans flux.
+                return if ligne.contains("country=") {
+                    r#"{"resultCount":0,"results":[]}"#.into()
+                } else {
+                    r#"{"resultCount":1,"results":[{"collectionId":333}]}"#.into()
+                };
+            }
+            if ligne.contains("country=zz") {
+                r#"{"resultCount":1,"results":[
+                    {"collectionId":111,"feedUrl":"https://flux.exemple.test/111.xml"}]}"#
+                    .into()
+            } else {
+                r#"{"resultCount":2,"results":[
+                    {"collectionId":222,"feedUrl":"https://flux.exemple.test/222.xml"},
+                    {"collectionId":333,"collectionName":"Exclusivité Apple"}]}"#
+                    .into()
+            }
+        }
+        let (lookup, recues) = faux_apple(apple).await;
+        let top = lookup.trim_end_matches("/lookup").to_string();
+        let svc = PodcastService::with_apple_bases(reqwest::Client::new(), &top, &lookup);
+
+        // « zz » : un pays qu'aucun autre banc ne met dans le cache du palmarès.
+        let palmares = svc.top_podcasts(None, "zz").await.expect("palmarès");
+
+        let flux: Vec<&str> = palmares.iter().map(|p| p.feed_url.as_str()).collect();
+        assert_eq!(
+            flux,
+            [
+                "https://flux.exemple.test/111.xml",
+                "https://flux.exemple.test/222.xml",
+                ""
+            ],
+            "le palmarès doit porter le flux de chaque podcast qui en a un ; requêtes : {:?}",
+            recues.lock().unwrap()
+        );
+        let lignes = recues.lock().unwrap().clone();
+        assert_eq!(
+            lignes.len(),
+            3,
+            "palmarès + deux recherches groupées : {lignes:?}"
+        );
+        assert!(
+            lignes[1].contains("id=111,222,333") && lignes[1].contains("country=zz"),
+            "UNE recherche pour tout le palmarès, dans la boutique du pays : {}",
+            lignes[1]
+        );
+        assert!(
+            lignes[2].contains("id=222,333") && !lignes[2].contains("country="),
+            "la seconde, sans pays, ne porte que les restants : {}",
+            lignes[2]
+        );
+
+        // Un client qui n'envoie pas de pays (aucun n'en envoie) : la
+        // résolution part dans la boutique du palmarès d'où vient l'id.
+        assert_eq!(
+            svc.resolve_feed_url("333", None).await,
+            Err(EchecResolution::SansFluxPublic),
+            "connu sans flux public : dit comme tel"
+        );
+        let premiere = recues.lock().unwrap().get(3).cloned().unwrap_or_default();
+        assert!(
+            premiere.contains("id=333&") && premiere.contains("country=zz"),
+            "sans pays du client, le pays retenu du palmarès doit partir : {premiere}"
         );
     }
 }
