@@ -1515,10 +1515,20 @@ impl PlaybackOrchestrator {
             crate::audio::canaux_reseau_4573::plafond_de_canaux(canaux_renderer, canaux_declares),
         );
         if let Some(cible) = canaux_reduits {
+            // #6599 — la ligne dit QUI a fixé la cible : l'annonce du
+            // renderer (sondée ou en cache), la disposition déclarée pour la
+            // zone, ou les deux. Le rapport de l'A6 n'en disait rien.
             info!(
                 zone_id = req.zone_id,
                 canaux_source,
                 canaux_cible = cible,
+                canaux_renderer = ?canaux_renderer,
+                canaux_declares = ?canaux_declares,
+                origine = crate::audio::canaux_reseau_4573::origine_du_plafond(
+                    canaux_renderer,
+                    canaux_declares,
+                    cible,
+                ),
                 "reduction_de_canaux_pour_le_renderer"
             );
         }
