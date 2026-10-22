@@ -2283,7 +2283,9 @@ pub(crate) mod scenarios_zones {
         serde_json::json!({
             "name": nom,
             "output_type": "dlna",
-            "output_device_id": "dev-p2c",
+            // #6774 — un appareil PAR zone : la restauration rapproche par
+            // appareil, deux zones sur le même seraient la même zone.
+            "output_device_id": format!("dev-p2c-{nom}"),
             "volume": vol,
             "muted": 0,
             "gapless_enabled": 1,
