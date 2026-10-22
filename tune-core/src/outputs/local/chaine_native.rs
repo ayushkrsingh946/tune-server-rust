@@ -28,10 +28,10 @@
 use std::io::Read;
 
 use super::enchainement_exclusif::{EnchainementNatif, EnteteEnchainee};
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 use super::etage_natif::{EcritureNative, EtageNatif};
 use super::*;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 use crate::outputs::traits::PuitsNatif;
 
 /// Ce que [`HoteDeChaineNative::preparer_la_suivante`] a trouvé.
@@ -65,7 +65,7 @@ pub(super) trait ReserveDeLaChaine {
 
 /// Ce que la chaîne emprunte au bras WASAPI : la réserve, plus les témoins
 /// d'arrêt et la publication vers la zone que sa boucle de lecture consulte.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(super) trait HoteDeChaineNative: ReserveDeLaChaine {
     /// Un ordre d'arrêt est-il arrivé ? (consomme le message, comme le bras.)
     fn arret_recu(&mut self) -> bool;
@@ -78,7 +78,10 @@ pub(super) trait HoteDeChaineNative: ReserveDeLaChaine {
 /// Pourquoi la chaîne s'est arrêtée.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // `LectureEchouee` n'est construite que par la boucle propre de WASAPI.
-#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "windows", target_os = "linux", test)),
+    allow(dead_code)
+)]
 pub(super) enum FinDeChaine {
     /// Arrêt demandé, ou silence forcé.
     Interrompue,
@@ -106,7 +109,7 @@ pub(super) struct IssueDeLaChaine {
     pub(super) pistes_enchainees: u32,
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 enum LectureDePiste {
     FinDeFlux,
     Interrompue,
@@ -114,7 +117,7 @@ enum LectureDePiste {
 }
 
 /// Décode `octets`, pousse, publie le verdict ; rend les trames consommées.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn pousser<H: HoteDeChaineNative>(
     hote: &mut H,
     etage: &mut EtageNatif<'_>,
@@ -142,7 +145,7 @@ fn pousser<H: HoteDeChaineNative>(
 }
 
 /// La boucle de lecture d'UNE piste, telle que le bras WASAPI l'écrivait.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn lire_la_piste<H: HoteDeChaineNative>(
     hote: &mut H,
     lecteur: &mut H::Lecteur,
@@ -189,7 +192,7 @@ fn lire_la_piste<H: HoteDeChaineNative>(
 /// la première piste. Ni la queue du DSP, ni le signal de fin naturelle, ni le
 /// vidage ne sont faits ici : ils appartiennent à la FIN de la chaîne, et le
 /// bras les fait au retour.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(super) fn jouer_la_chaine_native<H: HoteDeChaineNative>(
     hote: &mut H,
     premier: H::Lecteur,
@@ -265,7 +268,7 @@ pub(super) trait FrontiereExclusive {
     ) -> Result<(), EnchainementNatif>;
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 impl FrontiereExclusive for EtageNatif<'_> {
     fn spec_courante(&self) -> AudioSpec {
         self.spec()
@@ -332,7 +335,7 @@ pub(super) fn accepter_la_suivante<R: ReserveDeLaChaine, F: FrontiereExclusive +
 /// Moins de 32 trames 24 bits initiales ne se classent pas, mais l'anneau
 /// entier peut les porter : elles partent brutes et à l'unité plutôt que
 /// devinées PCM (ce que le bras faisait à l'EOF).
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn forcer_le_reliquat(etage: &mut EtageNatif<'_>, puits: &mut dyn PuitsNatif, trames: &mut u64) {
     if let Some(reliquat) = etage.vider(puits) {
         *trames += reliquat.trames;
@@ -348,7 +351,7 @@ fn forcer_le_reliquat(etage: &mut EtageNatif<'_>, puits: &mut dyn PuitsNatif, tr
 /// #5451) : la piste que `set_next_media` a préparée, son flux HTTP, et ce
 /// qu'il faut publier à la zone quand elle est enchaînée. Un seul exemplaire
 /// pour les trois bras (#5204) : c'était le corps de `HoteWasapi`.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub(super) struct ReserveHttp<'a> {
     pub(super) force_silent: &'a Arc<AtomicBool>,
     pub(super) position_ms: &'a AtomicU64,
@@ -368,7 +371,7 @@ pub(super) struct ReserveHttp<'a> {
     pub(super) rg_factor: &'a Arc<AtomicU32>,
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl ReserveDeLaChaine for ReserveHttp<'_> {
     type Lecteur = super::LecteurHttpAnnulable;
 

@@ -18,7 +18,7 @@ use super::traits::{
     OutputSignalPathStatus, OutputStatus, OutputTarget, ProfondeurPcm, PuitsDEchantillons,
     RingStarvation, TransformationsReelles, TransportState,
 };
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 use super::traits::{OutputDspState, OutputSampleTransport, OutputSignalReason, OutputVolumeState};
 use crate::poller::TRACK_END_NOTIFY;
 
@@ -432,11 +432,15 @@ mod bras_asio;
 mod bras_coreaudio;
 #[cfg(target_os = "windows")]
 mod bras_wasapi;
+// #6734 — le chemin natif S32 de Linux (ALSA `hw:`), sur l'étage, le puits et
+// la chaîne des bras Windows exclusifs.
+#[cfg(target_os = "linux")]
+mod bras_alsa_natif;
 
 // REF-8 (#2219) : l'étage natif des bras Windows exclusifs — octets source
 // → mots `i32` alignés à gauche → `PuitsNatif` — et le puits de tout
 // `NativePcmRing`. Même `cfg` que les aides qu'il appelle : jugé sur Shrek.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 mod etage_natif;
 
 // #5204 — l'enchaînement sans blanc en mode exclusif : quel bras enchaîne, la
@@ -446,7 +450,7 @@ mod enchainement_exclusif;
 // #5204 — la boucle d'un bras natif exclusif et son enchaînement, générique
 // sur la source : jugée sur Shrek avec des pistes en mémoire. #5451 : sa
 // réserve et sa frontière servent aussi le bras CoreAudio (macOS).
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
 mod chaine_native;
 // #5204 — la route native du bras ASIO et son enchaînement par la boucle
 // commune, sortis de `bras_asio.rs` (que seule l'étape « ASIO » de la CI
@@ -1944,7 +1948,7 @@ pub struct RingBuf {
 /// 24-bit words bits 31..8, and 32-bit words use the whole value. This is the
 /// representation expected by an ASIO I32 callback and lets WASAPI recover
 /// the original little-endian word by copying the high 2/3/4 bytes.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(crate) struct NativePcmRing {
     buf: Box<[UnsafeCell<i32>]>,
     write: AtomicU64,
@@ -1956,12 +1960,12 @@ pub(crate) struct NativePcmRing {
 
 // SAFETY: same strict SPSC contract and Acquire/Release cursor discipline as
 // `RingBuf`; the only difference is the `i32` cell payload.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 unsafe impl Send for NativePcmRing {}
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 unsafe impl Sync for NativePcmRing {}
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 impl NativePcmRing {
     pub(crate) fn new(capacity: usize) -> Self {
@@ -3711,7 +3715,7 @@ fn pcm_bytes_to_f32(bytes: &[u8], bit_depth: u16) -> Vec<f32> {
 /// Decode little-endian signed PCM into the left-aligned integer words used by
 /// [`NativePcmRing`]. No arithmetic is performed: every source bit keeps the
 /// same relative position and the unused low bits are zero.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(crate) fn pcm_bytes_to_native_i32(bytes: &[u8], bit_depth: u16) -> Vec<i32> {
     match bit_depth {
         16 => bytes
@@ -3756,7 +3760,7 @@ pub(crate) fn native_i32_to_pcm_bytes(samples: &[i32], bit_depth: u16, out: &mut
     count * bytes_per_sample
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn f32_to_native_i32(samples: &[f32], bit_depth: u16) -> Vec<i32> {
     let (scale, max, shift) = match bit_depth {
         16 => (32_768.0, i16::MAX as f64, 16),
@@ -3774,7 +3778,7 @@ fn f32_to_native_i32(samples: &[f32], bit_depth: u16) -> Vec<i32> {
         .collect()
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn local_dsp_is_identity(
     eq: &std::sync::Mutex<Option<crate::audio::eq::EqProcessor>>,
     convolver: &std::sync::Mutex<Option<crate::audio::convolver::Convolver>>,
@@ -3797,7 +3801,7 @@ fn local_dsp_is_identity(
         && crossfeed.lock().is_ok_and(|guard| guard.is_none())
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn local_dsp_runtime_state(
     eq: &std::sync::Mutex<Option<crate::audio::eq::EqProcessor>>,
     convolver: &std::sync::Mutex<Option<crate::audio::convolver::Convolver>>,
@@ -3877,7 +3881,7 @@ fn verdict_pure_selon_les_reglages(
 /// décident si le producteur peut conserver les octets source ou doit faire un
 /// aller-retour en espace flottant. DoP force les deux contournements à
 /// l'unité : toucher son marqueur rendrait le flux illisible par le DAC.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 #[allow(clippy::too_many_arguments)]
 fn windows_signal_path_status(
     native_transport: bool,
@@ -3928,7 +3932,7 @@ fn windows_signal_path_status(
     }
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 #[allow(clippy::too_many_arguments)]
 fn publish_windows_signal_path_status(
     slot: &std::sync::Mutex<Option<OutputSignalPathStatus>>,
@@ -3966,7 +3970,7 @@ fn publish_windows_signal_path_status(
     status
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 struct PreparedNativePcm {
     samples: Vec<i32>,
     dop: bool,
@@ -3977,7 +3981,7 @@ struct PreparedNativePcm {
 /// ASIO natif) : la réaffectation de la zone ou de l'album (#6044), à défaut
 /// la disposition déclarée par le fichier (#6057). Le périphérique est ouvert
 /// aux canaux de la source, donc la matrice va de N à N.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(super) type AdaptationNative<'a> = (&'a CreneauReaffectation, &'a CreneauDisposition);
 
 /// La disposition déclarée déplace-t-elle une voie, à nombre de canaux égal ?
@@ -4055,7 +4059,7 @@ fn prepare_windows_native_pcm_a_voies_egales(
 /// échelle. L'ouverture ne pilote jamais un flux dont l'amorce est un DoP
 /// (`CreneauReaffectation::voies_a_demander`) : ce cas ne se produit pas en
 /// lecture ordinaire.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 #[allow(clippy::too_many_arguments)]
 fn prepare_windows_native_pcm(
     bytes: &[u8],
@@ -4154,7 +4158,7 @@ fn prepare_windows_native_pcm(
 /// est dit au journal ; à nombre égal le bloc part alors tel quel, sinon il
 /// part en silence plutôt qu'avec un nombre de voies faux, qui décalerait
 /// toutes les trames de l'anneau.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn adapter_les_voies_natives(
     float: Vec<f32>,
     channels: u16,
@@ -5457,7 +5461,7 @@ impl OutputTarget for LocalOutput {
         self.reaffectation.noter_l_ouverture(None);
         let open_failure = self.open_failure.clone();
         let transformations_reelles = self.transformations_reelles.clone();
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let signal_path_status = self.signal_path_status.clone();
         let track_ended_naturally = self.track_ended_naturally.clone();
         let track_ended_generation = self.track_ended_generation.clone();
@@ -6590,6 +6594,130 @@ impl OutputTarget for LocalOutput {
                     seek_offset_ms: seek_offset_arc,
                 });
                 return;
+            }
+            // ------- #6734 — chemin natif S32 (Linux, ALSA hw:) -------
+            //
+            // Une source PCM entière 32 bits, au volume unité, sans DSP, sur
+            // un PCM `hw:` qui annonce S32 : les mots partent entiers jusqu'au
+            // DAC, sans l'anneau `f32` qui en gardait 24 bits. Tout refus —
+            // règle ou périphérique — retombe sur le chemin partagé ci-dessous,
+            // inchangé. Voir `local/bras_alsa_natif.rs`.
+            #[cfg(target_os = "linux")]
+            {
+                let conditions = bras_alsa_natif::ConditionsDuNatif {
+                    spec,
+                    volume_units: volume.load(Ordering::SeqCst),
+                    dsp_identite: local_dsp_is_identity(
+                        &eq,
+                        &convolver,
+                        &crossfeed,
+                        &pure_bypass,
+                        &mono_downmix,
+                    ),
+                    voies_pilotees: reaffectation
+                        .voies_a_demander(
+                            spec,
+                            header_buf.get(data_offset..).unwrap_or_default(),
+                            pure_bypass.load(Ordering::Relaxed),
+                            dop_active.load(Ordering::Relaxed),
+                        )
+                        .is_some_and(|voies| voies != channels),
+                    fondu_ms: fondu_ms.load(Ordering::Relaxed),
+                };
+                match bras_alsa_natif::chemin_natif_s32(&conditions) {
+                    Ok(()) => {
+                        let demande = DemandeDOuverture {
+                            spec,
+                            voies_de_la_matrice: None,
+                            device_name: &device_name,
+                            endpoint_id: endpoint_id.as_deref(),
+                            origin_host: origin_host.as_deref(),
+                            audio_backend: &audio_backend,
+                            exclusive: exclusive_mode,
+                            strict_bitperfect,
+                            stop_rx: &stop_rx,
+                            paused: &paused,
+                            force_silent: &force_silent,
+                            volume: &volume,
+                            device_gone: &device_gone,
+                            starvation: &starvation,
+                            soft_mute: soft_mute.clone(),
+                            position_ms: &position_ms,
+                        };
+                        match bras_alsa_natif::BackendAlsaNatif::tenter(&demande) {
+                            Ok(backend) => {
+                                bras_alsa_natif::jouer_via_alsa_natif(
+                                    backend,
+                                    bras_alsa_natif::ContexteAlsaNatif {
+                                        device_name: &device_name,
+                                        spec,
+                                        data_offset,
+                                        header_buf: &header_buf,
+                                        reader,
+                                        seek_offset,
+                                        // Même calcul que le chemin partagé.
+                                        octets_a_sauter: if seek_offset > 0 && !pre_seeked {
+                                            (seek_offset as f64 / 1000.0 * sample_rate as f64)
+                                                as u64
+                                                * channels as u64
+                                                * bytes_per_sample as u64
+                                        } else {
+                                            0
+                                        },
+                                        my_generation,
+                                        volume: &volume,
+                                        user_volume: &user_volume_ref,
+                                        rg_factor: &rg_factor_ref,
+                                        playing: &playing,
+                                        force_silent: &force_silent,
+                                        stop_rx: &stop_rx,
+                                        open_failure: &open_failure,
+                                        signal_path_status: &signal_path_status,
+                                        transformations_reelles: &transformations_reelles,
+                                        position_ms: &position_ms,
+                                        play_generation: &play_generation,
+                                        track_ended_naturally: &track_ended_naturally,
+                                        track_ended_generation: &track_ended_generation,
+                                        eq: &eq,
+                                        convolver: &convolver,
+                                        crossfeed: &crossfeed,
+                                        pure_bypass: &pure_bypass,
+                                        mono_downmix: &mono_downmix,
+                                        reaffectation: &reaffectation,
+                                        disposition: &disposition,
+                                        dop_active: &dop_active,
+                                        next_media: &next_media_ref,
+                                        chain_exhausted: &chain_exhausted_ref,
+                                        current_uri: &uri_ref,
+                                        track_title: &title_ref,
+                                        track_artist: &artist_ref,
+                                        duration_ms: &duration_ms_arc,
+                                        seek_offset_ms: &seek_offset_arc,
+                                    },
+                                );
+                                return;
+                            }
+                            Err(motif) => info!(
+                                device = %device_name,
+                                motif = %motif,
+                                "local_audio_alsa_natif_s32_ecarte_a_l_ouverture"
+                            ),
+                        }
+                    }
+                    // Seul un 32 bits mérite une ligne : pour le reste, le
+                    // chemin partagé EST le bon, il n'y a rien à expliquer.
+                    Err(motif)
+                        if motif
+                            != bras_alsa_natif::MotifDuCheminPartage::SourcePasEntiere32Bits =>
+                    {
+                        info!(
+                            device = %device_name,
+                            motif = motif.code(),
+                            "local_audio_alsa_natif_s32_non_retenu"
+                        );
+                    }
+                    Err(_) => {}
+                }
             }
             // ------- Open cpal device (shared mode) -------
             //
