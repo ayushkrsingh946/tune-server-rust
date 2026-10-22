@@ -495,14 +495,34 @@ impl HostContext for AppStateHost {
         let playlist = repo
             .get_for_profile(playlist_id, profil)?
             .ok_or_else(|| format!("playlist introuvable : {playlist_id}"))?;
-        let ids = repo.get_track_ids(playlist_id)?;
-        let pistes = TrackRepo::with_backend(self.backend.clone())
+        // #6499 — TOUTES les lignes, dans l'ordre de la playlist : les pistes
+        // de la bibliothèque ET les titres de service (#4889). `get_track_ids`
+        // ne rend que les premières ; le convertisseur ne voyait donc jamais
+        // les titres Qobuz d'une playlist locale, et la playlist créée chez
+        // Qobuz les perdait sans même les compter parmi les introuvables.
+        // Une ligne introuvable (#6179) n'a ni piste ni identifiant de service
+        // à transmettre : elle reste hors de la liste, comme avant.
+        let entrees = repo.get_entries(playlist_id)?;
+        let ids: Vec<i64> = entrees.iter().filter_map(|e| e.track_id()).collect();
+        let par_id: HashMap<i64, Track> = TrackRepo::with_backend(self.backend.clone())
             .get_multiple(&ids)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|t| Some((t.id?, t)))
+            .collect();
         // Ce que le convertisseur a besoin de lire pour apparier : titre,
         // artiste, durée, ISRC — la fiche commune à toutes les capacités qui
-        // rendent des pistes locales.
-        let pistes: Vec<Value> = pistes.iter().map(fiche_piste).collect();
+        // rendent des pistes locales. Un titre de service porte en plus
+        // `source` / `source_id` : c'est ce qui permet de le reprendre tel
+        // quel quand la cible est son propre service.
+        let pistes: Vec<Value> = entrees
+            .iter()
+            .filter_map(|e| match (e.track_id(), e.service()) {
+                (Some(id), _) => par_id.get(&id).map(fiche_piste),
+                (None, Some(s)) => Some(s.to_json()),
+                (None, None) => None,
+            })
+            .collect();
         Ok(json!({
             "playlist_id": playlist_id,
             "name": playlist.name,

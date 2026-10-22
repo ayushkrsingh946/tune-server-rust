@@ -931,6 +931,24 @@ pub(super) async fn get_album_rating(
     }
 }
 
+/// #6545 — « ★ 4,2 (37 notes) · 1 240 écoutes dans la communauté » : les
+/// agrégats publics de cet album, lus au site et gardés quelques heures.
+/// `available: false` quand le serveur n'est pas relié ou que le site ne
+/// répond pas ; `rating` / `listens` nuls sous trois personnes distinctes.
+pub(super) async fn album_community(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Json<Value> {
+    Json(
+        tune_core::cloud::notes_communautaires::agregats_d_album(
+            &state.backend,
+            &state.http_client,
+            id,
+        )
+        .await,
+    )
+}
+
 pub(super) async fn top_rated_albums(
     State(state): State<AppState>,
     Query(p): Query<Pagination>,
@@ -2450,6 +2468,13 @@ pub(super) async fn update_album(
                 id,
                 body.apply_genre_to_tracks,
             );
+            // #6418 — la recopie a réécrit `albums.genres` EN BASE ; `album`
+            // en porte encore la valeur d'avant l'édition. La modale reporte
+            // cette réponse dans le magasin, et l'onglet Genres groupe sur ce
+            // tableau d'abord : l'album restait sous son ancien genre.
+            if let Ok(Some(relu)) = repo.get(id) {
+                album.genres = relu.genres;
+            }
         }
     }
 
@@ -3495,6 +3520,9 @@ mod tests_regroupement;
 
 #[cfg(test)]
 mod tests_contenu;
+
+#[cfg(test)]
+mod tests_genres_reponse_6418;
 
 /// #3397 — le témoin qui empêche les deux chemins de `GET /library/albums` de
 /// diverger.
@@ -4775,5 +4803,44 @@ mod tests_recherche_1684 {
                 "{uri} : pas de champ `q` sans recherche"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod communaute_tests_6545 {
+    use crate::state::AppState;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    /// La route est montée et, sans compte relié, ne demande rien au site.
+    #[tokio::test]
+    async fn la_route_communaute_est_montee_et_muette_sans_compte() {
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        state
+            .backend
+            .execute_batch(
+                "INSERT INTO artists (id, name) VALUES (20, 'Miles Davis');\
+                 INSERT INTO albums (id, title, artist_id) VALUES (10, 'Kind of Blue', 20);",
+            )
+            .unwrap();
+        let reponse = crate::routes::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/library/albums/10/community")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reponse.status(), StatusCode::OK);
+        let corps: Value =
+            serde_json::from_slice(&to_bytes(reponse.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            corps,
+            json!({"available": false, "reason": "account_not_linked"})
+        );
     }
 }

@@ -168,6 +168,11 @@ fn condition(rule: &Value, objet: Objet) -> String {
         // #6121 — l'artiste d'un favori ALBUM est l'artiste de l'album ; un
         // favori PISTE ne connaît que son interprète, la règle y est fausse.
         ("album_artist", Objet::Album) => Some("sf.artist"),
+        // #6232 — « Interprète » : un favori ne connaît qu'un artiste, celui
+        // que le service annonce. C'est l'interprète d'une piste, et, pour un
+        // album, celui de ses pistes — le même repli que la bibliothèque, où
+        // une piste sans balise ARTIST prend l'artiste de son album.
+        ("track_artist", _) => Some("sf.artist"),
         // Dans une PLAYLIST, `title` est le titre de la piste et `album` celui
         // de son album ; dans une COLLECTION, `title` est le titre de l'album.
         ("title", Objet::Piste) => Some("sf.title"),

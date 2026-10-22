@@ -22,12 +22,70 @@ pub struct IcyMetadata {
 
 /// Fetch metadata for the given radio station.
 ///
-/// The function first checks whether the station URL matches a known metadata
-/// API (Radio France / FIP, Radio Paradise, BBC) and uses those richer
-/// endpoints. As a fallback it attempts to read raw ICY metadata from the audio
-/// stream.
+/// Une station suivie par radio-metadata.fr est lue d'abord sur le relais de
+/// mozaiklabs.fr (#6516, décision du 13/10 avec Rémi). Sinon — station non
+/// suivie, relais muet — the function checks whether the station URL matches a
+/// known metadata API (Radio France / FIP, Radio Paradise, BBC) and uses those
+/// richer endpoints. As a fallback it attempts to read raw ICY metadata from
+/// the audio stream.
 pub async fn fetch_radio_metadata(station_name: &str, stream_url: &str) -> Option<IcyMetadata> {
-    fetch_radio_metadata_depuis(VoiesRadioFrance::REELLES, station_name, stream_url).await
+    fetch_radio_metadata_suivie(station_name, stream_url)
+        .await
+        .0
+}
+
+/// Le même parcours, qui dit en plus si le titre vient du relais.
+///
+/// Le sondeur s'en sert pour passer la zone à la cadence du relais
+/// (`RADIO_METADATA_CLIENT_REFRESH_PERIOD`) — et seulement elle : une station
+/// lue chez son diffuseur garde le rythme d'avant.
+pub async fn fetch_radio_metadata_suivie(
+    station_name: &str,
+    stream_url: &str,
+) -> (Option<IcyMetadata>, bool) {
+    fetch_radio_metadata_liee(None, station_name, stream_url).await
+}
+
+/// Le même parcours pour une station de « Mes radios » liée à sa fiche
+/// d'annuaire (`external_id`, #6516) : le relais la retrouve d'abord par ce
+/// lien, puis par l'adresse, puis par le nom — et la retrouve donc encore
+/// quand l'annuaire a changé l'adresse de son flux.
+pub async fn fetch_radio_metadata_liee(
+    external_id: Option<&str>,
+    station_name: &str,
+    stream_url: &str,
+) -> (Option<IcyMetadata>, bool) {
+    titre_relais_puis_diffuseur(
+        crate::radio_metadata_relais::RELAIS_URL,
+        VoiesRadioFrance::REELLES,
+        external_id,
+        station_name,
+        stream_url,
+    )
+    .await
+}
+
+/// radio-metadata.fr AVANT le code propre à chaque diffuseur (Rémi, 13/10) :
+/// ce code est très partiel, et radio-metadata.fr le couvre déjà pour les
+/// stations qu'il suit. Le diffuseur puis l'ICY restent le repli.
+async fn titre_relais_puis_diffuseur(
+    relais: &str,
+    voies: VoiesRadioFrance<'_>,
+    external_id: Option<&str>,
+    station_name: &str,
+    stream_url: &str,
+) -> (Option<IcyMetadata>, bool) {
+    if let Some(cle) =
+        crate::radio_metadata_relais::cle_pour_lien(external_id, station_name, stream_url)
+        && let Some(meta) = crate::radio_metadata_relais::titre_par_le_relais(relais, &cle).await
+    {
+        debug!(station = %station_name, cle = %cle, "radio_metadata_par_le_relais");
+        return (Some(meta), true);
+    }
+    (
+        fetch_radio_metadata_depuis(voies, station_name, stream_url).await,
+        false,
+    )
 }
 
 /// Le même parcours, les racines Radio France en paramètre.
@@ -1136,17 +1194,24 @@ async fn fetch_icy_metadata_dans(
         .await
         .ok()?;
 
-    let icy_metaint: usize = resp
-        .headers()
-        .get("icy-metaint")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())?;
-
     let station = resp
         .headers()
         .get("icy-name")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+
+    // Un flux Ogg (Vorbis, Opus) ne porte pas de bloc ICY : Icecast n'en
+    // insère que dans le MP3 et l'AAC. Le titre voyage dans les commentaires
+    // du flux logique en cours, que le serveur renvoie en tête de CHAQUE
+    // connexion.
+    let Some(icy_metaint) = resp
+        .headers()
+        .get("icy-metaint")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+    else {
+        return titre_ogg_du_flux(resp, station).await;
+    };
 
     // We need to read `icy_metaint` bytes of audio, then one length byte,
     // then `length * 16` bytes of metadata text.
@@ -1259,6 +1324,104 @@ fn decoder_bloc_icy(octets: &[u8]) -> std::borrow::Cow<'_, str> {
     match std::str::from_utf8(octets) {
         Ok(texte) => std::borrow::Cow::Borrowed(texte),
         Err(_) => std::borrow::Cow::Owned(octets.iter().map(|&o| o as char).collect()),
+    }
+}
+
+/// Ce que l'on lit, au plus, de la tête d'un flux Ogg pour y trouver les
+/// commentaires : les en-têtes tiennent d'ordinaire en quelques Kio, mais une
+/// pochette incrustée (`METADATA_BLOCK_PICTURE`) peut en peser des dizaines.
+const OGG_TETE_MAX: usize = 256 * 1024;
+
+/// Le titre en cours d'un flux Ogg, lu dans ses commentaires (Vorbis ou
+/// `OpusTags`). `None` si le flux n'est pas de l'Ogg ou n'a pas de titre.
+async fn titre_ogg_du_flux(
+    mut resp: reqwest::Response,
+    station: Option<String>,
+) -> Option<IcyMetadata> {
+    let mut octets: Vec<u8> = Vec::new();
+    // On relit la tête à chaque morceau reçu : la sonde ne lit que les
+    // en-têtes, et un direct ne « finit » jamais — attendre un seuil d'octets
+    // qu'un serveur avare n'envoie pas d'un coup ferait expirer la requête.
+    while let Some(morceau) = resp.chunk().await.ok().flatten() {
+        octets.extend_from_slice(&morceau);
+        if octets.len() >= 4 && &octets[..4] != b"OggS" {
+            return None;
+        }
+        // `Some` : les en-têtes sont entiers, avec ou sans titre. Au-delà,
+        // relire plus loin n'apprendrait rien.
+        if let Some(lu) = titre_ogg_des_octets(&octets) {
+            return lu.map(|(artist, title)| IcyMetadata {
+                title,
+                artist,
+                station,
+                cover_url: None,
+            });
+        }
+        if octets.len() >= OGG_TETE_MAX {
+            return None;
+        }
+    }
+    None
+}
+
+/// `(artiste, titre)` des commentaires de la tête d'un flux Ogg. Le lecteur
+/// Ogg de symphonia rassemble les pages et range les commentaires ; il échoue
+/// tant que les en-têtes ne sont pas entiers : `None`, et l'on relit plus
+/// loin. `Some(None)` : en-têtes entiers, aucun titre.
+fn titre_ogg_des_octets(octets: &[u8]) -> Option<Option<(Option<String>, String)>> {
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+
+    let source = std::io::Cursor::new(octets.to_vec());
+    let mss = MediaSourceStream::new(Box::new(source), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension("ogg");
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .ok()?;
+    let mut metadonnees = format.metadata();
+    Some(
+        metadonnees
+            .skip_to_latest()
+            .and_then(artiste_et_titre_des_commentaires),
+    )
+}
+
+/// `(artiste, titre)` d'une révision de commentaires Vorbis ou `OpusTags`.
+/// Sert aussi au lecteur radio, au changement de flux logique.
+pub(crate) fn artiste_et_titre_des_commentaires(
+    revision: &symphonia::core::meta::MetadataRevision,
+) -> Option<(Option<String>, String)> {
+    use symphonia::core::meta::StandardTag;
+    let (mut artiste, mut titre) = (None::<String>, None::<String>);
+    for tag in &revision.media.tags {
+        match tag.std.as_ref() {
+            Some(StandardTag::Artist(v)) if artiste.is_none() => {
+                artiste = Some(v.trim().to_string()).filter(|a| !a.is_empty());
+            }
+            Some(StandardTag::TrackTitle(v)) if titre.is_none() => {
+                titre = Some(v.trim().to_string()).filter(|t| !t.is_empty());
+            }
+            _ => {}
+        }
+    }
+    match (artiste, titre) {
+        (Some(a), Some(t)) => Some((Some(a), t)),
+        // Bien des sources (ices, liquidsoap mal réglé) n'écrivent que
+        // `TITLE=Artiste - Titre`, à la manière d'un `StreamTitle` ICY.
+        (None, Some(t)) => match t.find(" - ") {
+            Some(sep) => Some((Some(t[..sep].to_string()), t[sep + 3..].to_string())),
+            None => Some((None, t)),
+        },
+        (Some(a), None) => Some((None, a)),
+        (None, None) => None,
     }
 }
 
@@ -3125,6 +3288,69 @@ mod tests {
         corps["now_playing"]["song"]["title"] = json!("");
         assert!(lire_now_playing_azuracast(&corps, "Reggae Classic Mix").is_none());
     }
+
+    /// Une station Ogg comme les sert Icecast : pas d'`icy-metaint`, la tête
+    /// du flux logique en cours, puis la connexion reste ouverte (un direct
+    /// ne finit pas).
+    fn station_ogg_en_direct(content_type: &'static str, corps: Vec<u8>) -> String {
+        let ecoute = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let adresse = ecoute.local_addr().expect("adresse");
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for mut s in ecoute.incoming().flatten() {
+                let corps = corps.clone();
+                std::thread::spawn(move || {
+                    let mut tampon = [0u8; 2048];
+                    let _ = s.read(&mut tampon);
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nicy-name: Station Ogg\r\n\r\n"
+                    );
+                    let _ = s.write_all(&corps);
+                    let _ = s.flush();
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                });
+            }
+        });
+        format!("http://{adresse}/live")
+    }
+
+    /// Ogg Vorbis : le titre se lit dans les commentaires Vorbis, `ARTIST`
+    /// et `TITLE` séparés, sans bloc ICY et sans attendre la fin d'un direct.
+    #[tokio::test]
+    async fn un_flux_ogg_vorbis_donne_son_titre_par_ses_commentaires() {
+        let corps = crate::ogg_factice::ogg_vorbis(
+            7,
+            &[
+                ("ARTIST", "Brigitte Fontaine"),
+                ("TITLE", "Comme à la radio"),
+            ],
+        );
+        let url = station_ogg_en_direct("application/ogg", corps);
+        let meta =
+            tokio::time::timeout(std::time::Duration::from_secs(8), fetch_icy_metadata(&url))
+                .await
+                .expect("la tête du flux suffit : pas d'attente de la fin du direct")
+                .expect("les commentaires Vorbis portent le titre");
+        assert_eq!(meta.artist.as_deref(), Some("Brigitte Fontaine"));
+        assert_eq!(meta.title, "Comme à la radio");
+        assert_eq!(meta.station.as_deref(), Some("Station Ogg"));
+    }
+
+    /// Ogg Opus : les `OpusTags`, ici un seul `TITLE` « Artiste - Titre »,
+    /// comme l'écrivent bien des sources Icecast.
+    #[tokio::test]
+    async fn un_flux_ogg_opus_donne_son_titre_par_ses_opustags() {
+        let corps = crate::ogg_factice::ogg_opus(9, 1.0, &[("TITLE", "Areski - Le Bonheur")]);
+        let url = station_ogg_en_direct("audio/ogg; codecs=opus", corps);
+        let meta =
+            tokio::time::timeout(std::time::Duration::from_secs(8), fetch_icy_metadata(&url))
+                .await
+                .expect("la tête du flux suffit")
+                .expect("les OpusTags portent le titre");
+        assert_eq!(meta.artist.as_deref(), Some("Areski"));
+        assert_eq!(meta.title, "Le Bonheur");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3368,3 +3594,7 @@ mod tests_icy_direct_6373 {
         assert_eq!(blocs, vec![bloc]);
     }
 }
+
+#[cfg(test)]
+#[path = "radio_metadata_relais_ordre_tests.rs"]
+mod tests_relais_avant_diffuseur_6516;
