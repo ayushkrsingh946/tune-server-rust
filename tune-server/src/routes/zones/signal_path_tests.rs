@@ -3521,6 +3521,11 @@ fn le_transport_local_dit_son_mode_et_son_verdict_4172() {
         bloc.contains("None => transport_partage_est_intact(audio_backend, pcm_local)"),
         "sans contrat, le verdict est celui du mode partagé, PCM compris (fil 2161)"
     );
+    // #6734 — et celui de l'anneau flottant.
+    assert!(
+        bloc.contains("pcm_local) && anneau_intact,"),
+        "sans contrat, l'anneau f32 qui tronque la source fait tomber le verdict (#6734)"
+    );
     // Fil 2161 — le PCM qui arrive au bras est celui du parc, pour la zone.
     assert!(
         src.contains("pcm_de_la_zone_locale(zone.output_device_id.as_deref())"),
@@ -5091,4 +5096,119 @@ fn air_6542_flac_24_192_vers_devialet_air_affiche_le_reechantillonnage_a_96_khz(
         step_desc(&sp, "Resampler").as_deref(),
         Some("192kHz \u{2192} 96kHz (mesuré)")
     );
+}
+
+// ── #6734 — sortie locale sans contrat : l'anneau f32 ne garde que 24 bits ──
+
+/// Le WAV 32 bits entiers du fil 2358 (test RME « 192 kHz 32 bit ADI-2 Pro
+/// Bit Test »), joué sur une zone locale ALSA sans contrat de signal publié.
+fn wav32_local_alsa() -> (Zone, ZoneState, Arc<dyn DbBackend>) {
+    let db = SqliteDb::open_in_memory().unwrap();
+    db.init_schema().unwrap();
+    let backend: Arc<dyn DbBackend> = Arc::new(db);
+    let repo = ZoneRepo::with_backend(backend.clone());
+    let id = repo
+        .create("ADI-2 DAC", Some("local"), Some("local:adi-2-dac-6734"))
+        .unwrap();
+    let zone = repo.get(id).unwrap().unwrap();
+    let mut ps = wav24_playing();
+    if let Some(np) = ps.now_playing.as_mut() {
+        np.sample_rate = Some(192_000);
+        np.bit_depth = Some(32);
+    }
+    (zone, ps, backend)
+}
+
+fn step_bit_perfect(v: &Value, name: &str) -> Option<bool> {
+    v.get("steps")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("name").and_then(|n| n.as_str()) == Some(name))
+        .and_then(|s| s.get("bit_perfect").and_then(Value::as_bool))
+}
+
+/// **LA MESURE DU TICKET.** Sans contrat de signal (Linux/ALSA, la sortie
+/// CPAL partagée), un PCM 32 bits entiers traverse l'anneau `f32` et y perd
+/// ses 8 bits de poids faible : le panneau ne doit plus dire « bit-perfect ».
+#[test]
+fn wav_32_bits_sur_la_sortie_locale_alsa_n_est_pas_bit_perfect_6734() {
+    let (zone, ps, backend) = wav32_local_alsa();
+    assert!(ps.output_signal_path.is_none(), "aucun contrat publié");
+
+    let sp = build_signal_path(&ps, &zone, &backend, Some("ADI-2 DAC"), "ALSA", None).unwrap();
+
+    assert_eq!(
+        step_bit_perfect(&sp, "Transport"),
+        Some(false),
+        "étape Transport : une source PCM 32 bits traverse l'anneau f32 (24 bits \
+         de mantisse) de la sortie locale ALSA, ses 8 bits de poids faible sont \
+         perdus — le transport ne peut pas se dire bit-perfect (#6734)"
+    );
+    assert_eq!(
+        sp.get("bit_perfect").and_then(Value::as_bool),
+        Some(false),
+        "verdict global : « bit-perfect » annoncé alors que l'anneau f32 tronque \
+         la source 32 bits (#6734)"
+    );
+    assert_eq!(
+        step_detail(&sp, "Transport").as_deref(),
+        Some(
+            "Anneau flottant 32 bits : une source de plus de 24 bits y perd ses bits \
+             de poids faible"
+        ),
+        "la cause est dite dans le détail de l'étape"
+    );
+}
+
+/// Contre-témoin : 24 bits tiennent dans la mantisse d'un `f32`, le verdict
+/// d'avant ne bouge pas (ni détail, ni rouge).
+#[test]
+fn wav_24_bits_sur_la_sortie_locale_alsa_reste_bit_perfect_6734() {
+    let (zone, mut ps, backend) = wav32_local_alsa();
+    if let Some(np) = ps.now_playing.as_mut() {
+        np.bit_depth = Some(24);
+    }
+
+    let sp = build_signal_path(&ps, &zone, &backend, Some("ADI-2 DAC"), "ALSA", None).unwrap();
+
+    assert_eq!(step_bit_perfect(&sp, "Transport"), Some(true));
+    assert_eq!(sp.get("bit_perfect").and_then(Value::as_bool), Some(true));
+    assert_eq!(step_detail(&sp, "Transport"), None);
+}
+
+/// Un bras exclusif qui PUBLIE son contrat (WASAPI exclusif, ASIO :
+/// `Puits::Natif`, octets tels quels) reste cru sur parole : la règle de
+/// l'anneau flottant ne vaut que sans contrat.
+#[test]
+fn un_contrat_natif_publie_reste_autoritaire_en_32_bits_6734() {
+    use tune_core::outputs::traits::{
+        OutputDspState, OutputSampleTransport, OutputSignalPathStatus, OutputVolumeState,
+    };
+    let (zone, mut ps, backend) = wav32_local_alsa();
+    ps.output_signal_path = Some(OutputSignalPathStatus {
+        bit_perfect: true,
+        sample_transport: OutputSampleTransport::NativeInteger,
+        dsp: OutputDspState::Inactive,
+        volume: OutputVolumeState::Unity,
+        reasons: Vec::new(),
+    });
+
+    let sp = build_signal_path(&ps, &zone, &backend, Some("ADI-2 DAC"), "ASIO", None).unwrap();
+
+    assert_eq!(step_bit_perfect(&sp, "Transport"), Some(true));
+    assert_eq!(step_detail(&sp, "Transport"), None);
+}
+
+/// La règle elle-même : au-delà de 24 bits de PCM seulement, jamais le DSD.
+#[test]
+fn l_anneau_flottant_ne_tronque_que_le_pcm_de_plus_de_24_bits_6734() {
+    use super::signal_path::anneau_flottant_tronque_la_source as tronque;
+    assert!(tronque(32, false));
+    assert!(!tronque(24, false));
+    assert!(!tronque(16, false));
+    assert!(
+        !tronque(0, false),
+        "profondeur inconnue : rien n'est conclu"
+    );
+    assert!(!tronque(1, true), "DSD");
 }
