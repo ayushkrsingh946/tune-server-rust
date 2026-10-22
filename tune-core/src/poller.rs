@@ -1359,6 +1359,11 @@ mod hqplayer_enchainement_4851;
 #[cfg(test)]
 mod suivante_bannie_5143;
 
+/// #6735 — Répéter la piste relance un morceau plus court que les gardes
+/// anti-double-appui de `play` ; un double appui de contrôleur reste coalescé.
+#[cfg(test)]
+mod repeter_piste_courte_6735;
+
 /// #5395 — la radio artiste se recharge par la vraie fin de file, et une file
 /// qui s'achève hors radio rend la main au réglage d'auto-lecture de la zone.
 #[cfg(test)]

@@ -234,6 +234,19 @@ pub(crate) fn phrase_sans_sentinelle(msg: &str) -> &str {
     msg.strip_prefix("zone_output_unavailable:").unwrap_or(msg)
 }
 
+/// #6735 — qui demande la lecture, pour les gardes anti-doublon d'entrée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Entree {
+    /// Un geste (contrôleur, route, transfert, reprise) : un second `play` de
+    /// la même piste quelques secondes après le premier est un double appui,
+    /// coalescé (#1271).
+    Geste,
+    /// L'enchaînement du sondeur à la fin constatée d'une piste : la relance
+    /// de la même piste (Répéter la piste, Répéter tout sur une file d'une
+    /// piste) est voulue, quelle que soit la durée du morceau.
+    FinDePiste,
+}
+
 /// Ce que la demande impose par-dessus le flux résolu : pochette et album
 /// demandés, sinon ceux du flux. Relevés une fois, lus par trois temps.
 pub(super) struct Habillage {
@@ -245,7 +258,7 @@ impl PlaybackOrchestrator {
     pub async fn play(&self, req: PlayRequest) -> Result<PlayResult, String> {
         // Public entry point: this is a *new* logical play, so it is recorded
         // in the listen history.
-        self.play_par_l_entree(req, true).await
+        self.play_par_l_entree(req, true, Entree::Geste).await
     }
 
     /// #6466 (fil 2302 point 15) — le transfert de zone : une lecture
@@ -261,15 +274,17 @@ impl PlaybackOrchestrator {
         &self,
         req: PlayRequest,
     ) -> Result<PlayResult, String> {
-        self.play_par_l_entree(req, false).await
+        self.play_par_l_entree(req, false, Entree::Geste).await
     }
 
     /// Les étapes d'entrée de `play()`, puis `play_inner`. `historique` ne
-    /// commande QUE l'écriture de l'écoute.
-    async fn play_par_l_entree(
+    /// commande QUE l'écriture de l'écoute ; `entree` dit qui relance (voir
+    /// [`Entree`]).
+    pub(super) async fn play_par_l_entree(
         &self,
         req: PlayRequest,
         historique: bool,
+        entree: Entree,
     ) -> Result<PlayResult, String> {
         // Free-tier zone cap, enforced at *activation* (a zone's first play).
         // This is the single choke point for every play entry point (direct
@@ -298,8 +313,20 @@ impl PlaybackOrchestrator {
         //     start timestamp, so it is NOT coalesced (plays from 0);
         //   - an explicit seek is exempt (seek_ms > 0);
         //   - stall recovery stops the zone first, so state != Playing here, and
-        //     auto-resume runs from a Stopped state — neither trips this guard.
-        if req.seek_ms.unwrap_or(0) == 0 {
+        //     auto-resume runs from a Stopped state — neither trips this guard;
+        //   - #6735 — la fin de piste constatée par le sondeur (`Entree::
+        //     FinDePiste`) n'est pas un double appui : Répéter la piste sur un
+        //     morceau de moins de 8 s relance la MÊME piste, sur une zone
+        //     encore `Playing`, moins de 8 s après son départ. Les trois
+        //     conditions de la garde étaient réunies et la relance était avalée
+        //     une fois sur deux (fil 2358, test RME de 3,8 s).
+        if entree == Entree::FinDePiste {
+            // La garde réseau de `play_inner` (`DUPLICATE_NET_PLAY_WINDOW`,
+            // 12 s) avalerait la même relance sur un renderer réseau : la
+            // piste qui vient de finir y est inscrite comme « déjà envoyée ».
+            // Même retrait que `stop()` et que le repli DSD (#4354).
+            self.last_net_play.lock().await.remove(&req.zone_id);
+        } else if req.seek_ms.unwrap_or(0) == 0 {
             let state = self.playback.get_state(req.zone_id).await;
             if state.state == PlayState::Playing
                 && let Some(np) = state.now_playing.as_ref()
