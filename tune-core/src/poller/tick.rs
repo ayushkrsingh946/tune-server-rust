@@ -172,22 +172,26 @@ impl PositionPoller {
                 // actually moved since the last poll (see decisions::
                 // should_adopt_device_volume), so a stale default (Fabien's
                 // Devialet stuck at 50%) can't overwrite the saved volume.
+                // #6739 — jamais à la hausse, et trim retiré.
                 if !plafond_tenu
-                    && decisions::should_adopt_device_volume(prev_device_vol, status.volume, db_vol)
+                    && let Some(adopte) = self.releve_adoptable(
+                        zone_id,
+                        &device_id,
+                        prev_device_vol,
+                        status.volume,
+                        db_vol,
+                    )
                 {
-                    self.playback.set_volume(zone_id, status.volume).await;
+                    self.playback.set_volume(zone_id, adopte).await;
                     // #2886 — `as i32` TRONQUAIT : le volume adopte du renderer
                     // tombait a 0 sous 0,01 lineaire (-40 dB).
-                    let vol_pct = status.volume * 100.0;
+                    let vol_pct = adopte * 100.0;
                     crate::db::zone_repo::ZoneRepo::with_backend(self.db.clone())
                         .update_volume(zone_id, vol_pct)
                         .ok();
                     // #6008 — l'adoption se dit au journal.
                     volume_adopte_6008::journaliser_volume_adopte(
-                        zone_id,
-                        &device_id,
-                        db_vol,
-                        status.volume,
+                        zone_id, &device_id, db_vol, adopte,
                     );
                 }
                 // Remember what the renderer reported so the next tick can
@@ -1229,20 +1233,23 @@ impl PositionPoller {
                     let plafond_tenu = !zone_fixed_volume
                         && !in_vol_grace
                         && self.volume_plafond_reimpose(zone_id, status.volume).await;
+                    // #6739 — jamais à la hausse, et trim retiré.
                     if !zone_fixed_volume
                         && !in_vol_grace
                         && !plafond_tenu
                         && status.volume < 0.999
-                        && decisions::should_adopt_device_volume(
+                        && let Some(adopte) = self.releve_adoptable(
+                            zone_id,
+                            &device_id,
                             ps.last_device_volume,
                             status.volume,
                             zone_state.volume,
                         )
                     {
-                        self.playback.set_volume(zone_id, status.volume).await;
+                        self.playback.set_volume(zone_id, adopte).await;
                         // #2886 — `as i32` TRONQUAIT : le volume adopte du renderer
                         // tombait a 0 sous 0,01 lineaire (-40 dB).
-                        let vol_pct = status.volume * 100.0;
+                        let vol_pct = adopte * 100.0;
                         let db = self.db.clone();
                         crate::db::zone_repo::ZoneRepo::with_backend(db)
                             .update_volume(zone_id, vol_pct)
@@ -1252,7 +1259,7 @@ impl PositionPoller {
                             zone_id,
                             &device_id,
                             zone_state.volume,
-                            status.volume,
+                            adopte,
                         );
                     }
                     ps.last_device_volume = Some(status.volume);
@@ -1603,16 +1610,19 @@ impl PositionPoller {
                 && !plafond_tenu
                 && status.volume > 0.001
                 && status.volume < 0.999
-                && decisions::should_adopt_device_volume(
+                // #6739 — jamais à la hausse, et trim retiré.
+                && let Some(adopte) = self.releve_adoptable(
+                    zone_id,
+                    &device_id,
                     ps.last_device_volume,
                     status.volume,
                     zone_state.volume,
                 )
             {
-                self.playback.set_volume(zone_id, status.volume).await;
+                self.playback.set_volume(zone_id, adopte).await;
                 // #2886 — `as i32` TRONQUAIT : le volume adopte du renderer
                 // tombait a 0 sous 0,01 lineaire (-40 dB).
-                let vol_pct = status.volume * 100.0;
+                let vol_pct = adopte * 100.0;
                 let db = self.db.clone();
                 crate::db::zone_repo::ZoneRepo::with_backend(db)
                     .update_volume(zone_id, vol_pct)
@@ -1622,7 +1632,7 @@ impl PositionPoller {
                     zone_id,
                     &device_id,
                     zone_state.volume,
-                    status.volume,
+                    adopte,
                 );
             }
             // Edge-triggered like the stopped/radio paths: record the reported

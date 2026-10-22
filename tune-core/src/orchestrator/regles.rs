@@ -250,7 +250,13 @@ pub fn needs_transcode_for_output_applies(
 /// DLNA renderer. Enable with `TUNE_DASH_WARM_CACHE=1`.
 /// Facteur linéaire d'un trim de gain par renderer (`zone_{id}_gain_trim_db`).
 /// Clampe à ±12 dB — au-delà, on harmonise plus rien, on casse.
-pub(super) fn gain_trim_factor(trim_db: f64) -> f64 {
+///
+/// #6739 — un trim illisible (NaN, infini) vaut 0 dB : `NaN.clamp(..)` reste
+/// NaN, et une consigne NaN n'a rien à faire sur le fil d'un amplificateur.
+pub fn gain_trim_factor(trim_db: f64) -> f64 {
+    if !trim_db.is_finite() {
+        return 1.0;
+    }
     10f64.powf(trim_db.clamp(-12.0, 12.0) / 20.0)
 }
 
@@ -273,6 +279,40 @@ pub fn gain_trim_db_enregistre(db: &Arc<dyn crate::db::backend::DbBackend>, zone
 /// ne fait jamais dépasser l'unité, quel que soit le volume.
 pub fn volume_avec_trim(volume: f64, trim_db: f64) -> f64 {
     (volume * gain_trim_factor(trim_db)).clamp(0.0, 1.0)
+}
+
+/// #6739 — la sortie règle-t-elle son volume par un gain NUMÉRIQUE de Tune ?
+///
+/// Seule la sortie locale (`local`, y compris ses bras exclusifs ASIO,
+/// WASAPI, CoreAudio) applique la consigne comme une amplitude dans le PCM,
+/// bornée à l'unité : un trim y est un vrai gain en dB. Toutes les autres —
+/// DLNA, OpenHome, AirPlay, Chromecast, BluOS, Sonos, Squeezebox, HQPlayer,
+/// greffons — transmettent la consigne à un appareil qui la lit sur SA
+/// propre échelle (le plus souvent 0..100, pas une amplitude linéaire). Une
+/// sortie inconnue est tenue pour matérielle : c'est le côté sûr.
+pub fn sortie_a_volume_logiciel(output_type: &str) -> bool {
+    output_type == "local"
+}
+
+/// #6739 — la valeur que reçoit l'appareil, selon la nature de son volume.
+///
+/// Fil 2366/2375 (Marantz NR1200 en DLNA, tweeter détruit) : un trim de
+/// +8,5 dB multipliait linéairement le POURCENTAGE envoyé au renderer —
+/// consigne 0,36, ordre `SetVolume 96`. Toute consigne au-dessus de 38 %
+/// partait à 100 %.
+///
+/// Règle : sur une sortie à volume matériel, un trim POSITIF n'augmente
+/// jamais la consigne envoyée — il est ignoré côté appareil (journal
+/// `trim_positif_ignore_volume_materiel`). Un trim négatif reste appliqué :
+/// il ne fait que baisser. Sur la sortie locale, rien ne change : le trim est
+/// un gain numérique, et [`volume_avec_trim`] borne le résultat à l'unité.
+pub fn volume_appareil_avec_trim(volume: f64, trim_db: f64, volume_materiel: bool) -> f64 {
+    let volume = if volume.is_finite() { volume } else { 0.0 };
+    if volume_materiel && trim_db.is_finite() && trim_db > 0.0 {
+        volume.clamp(0.0, 1.0)
+    } else {
+        volume_avec_trim(volume, trim_db)
+    }
 }
 
 /// #6721 — sous PURE verrouillé (« Forcer à 100 % »), une consigne de volume

@@ -130,6 +130,20 @@ impl Banc {
         .await
     }
 
+    /// #6739 — une consigne de volume par le VRAI orchestrateur, puis la
+    /// grâce de volume écoulée (le sondeur juge le relevé au tour suivant).
+    pub(super) async fn consigne(&self, volume: f64) {
+        self.poller
+            .orchestrator
+            .set_volume(self.zone_id, volume, Some(APPAREIL))
+            .await
+            .unwrap();
+        self.poller
+            .playback
+            .ecouler_la_grace_de_volume(self.zone_id)
+            .await;
+    }
+
     pub(super) async fn commandes_depuis(&self, deja: usize) -> Vec<f64> {
         self.avec_mock(async |m| m.volume_calls().await[deja..].to_vec())
             .await

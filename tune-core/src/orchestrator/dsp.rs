@@ -2844,15 +2844,6 @@ impl PlaybackOrchestrator {
             }
             retenu
         };
-        let device_volume = if pure_force {
-            1.0
-        } else {
-            // Un trim positif ne fait pas passer la limite de sécurité.
-            limites.borner_appareil(volume_avec_trim(
-                volume,
-                gain_trim_db_enregistre(&self.db, zone_id),
-            ))
-        };
         let Some(did) = device_id else {
             info!(zone_id, volume, "set_volume_no_device_id");
             self.playback.set_volume(zone_id, volume).await;
@@ -2906,6 +2897,29 @@ impl PlaybackOrchestrator {
             );
             return Ok(());
         }
+        let sortie = output.lock().await;
+        let device_volume = if pure_force {
+            1.0
+        } else {
+            // #6739 — la nature du volume de la sortie décide du trim : sur
+            // une sortie à volume matériel (DLNA, OpenHome, AirPlay…), un trim
+            // POSITIF n'augmente jamais la consigne envoyée. Lue ici, à notre
+            // tour, sous le verrou que prend de toute façon l'envoi.
+            let trim_db = gain_trim_db_enregistre(&self.db, zone_id);
+            let volume_materiel = !sortie_a_volume_logiciel(sortie.output_type());
+            if volume_materiel && trim_db > 0.0 {
+                warn!(
+                    zone_id,
+                    trim_db,
+                    volume,
+                    output_type = sortie.output_type(),
+                    device_id = did,
+                    "trim_positif_ignore_volume_materiel"
+                );
+            }
+            // Un trim positif ne fait pas passer la limite de sécurité.
+            limites.borner_appareil(volume_appareil_avec_trim(volume, trim_db, volume_materiel))
+        };
         info!(
             zone_id,
             volume,
@@ -2914,7 +2928,8 @@ impl PlaybackOrchestrator {
             device_id = did,
             "device_set_volume_sending"
         );
-        let resultat = output.lock().await.checked_set_volume(device_volume).await;
+        let resultat = sortie.checked_set_volume(device_volume).await;
+        drop(sortie);
         let issue = {
             let mut etat = file.etat.lock().await;
             etat.en_vol = false;

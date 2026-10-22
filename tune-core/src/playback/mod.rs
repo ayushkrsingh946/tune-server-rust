@@ -1893,6 +1893,17 @@ impl PlaybackManager {
         }
     }
 
+    /// Bancs seulement (#6739) : la grâce de volume d'après une commande est
+    /// écoulée, comme cinq secondes plus tard, pour que le sondeur juge le
+    /// relevé de l'appareil sans attendre l'horloge murale.
+    #[cfg(test)]
+    pub async fn ecouler_la_grace_de_volume(&self, zone_id: i64) {
+        let mut zones = self.zones.lock().await;
+        if let Some(state) = zones.get_mut(&zone_id) {
+            state.last_volume_set_at = None;
+        }
+    }
+
     pub async fn set_mute(&self, zone_id: i64, muted: bool) {
         let mut zones = self.zones.lock().await;
         if let Some(state) = zones.get_mut(&zone_id) {
