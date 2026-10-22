@@ -7725,6 +7725,66 @@ async fn le_dop_d_une_piste_iso_ne_sert_que_la_piste_depuis_le_deplacement() {
     );
 }
 
+/// 🔴 #6630 — le DoP d'une piste d'ISO entamée par un déplacement ANNONCE la
+/// longueur qu'il sert : la session (donc le `Content-Length`) porte la durée
+/// restante de la tranche, pas celle de la piste entière. Sans cela, le
+/// client recevait un `Content-Length` trop long et un corps fermé plus tôt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn le_dop_d_une_piste_iso_entamee_annonce_la_longueur_servie_6630() {
+    use crate::audio::sacd::fabrique::{ImageFabriquee, ecrire, octets_attendus};
+    let orch = test_orchestrator();
+    let dossier = tempfile::tempdir().unwrap();
+    let iso = dossier.path().join("Kind of Blue.iso");
+    let bornes = ecrire(&iso, &ImageFabriquee::deux_pistes());
+    let isos = vec![crate::audio::sacd::IsoSacdLu {
+        chemin: iso.clone(),
+        disque: crate::audio::sacd::lire_disque(&iso).unwrap(),
+    }];
+    let mut bilan = crate::scanner::cue_bibliotheque::BilanCue::default();
+    crate::scanner::cue_bibliotheque::ecrire_les_iso_sacd(&orch.db, &isos, &mut bilan);
+    let (debut, fin) = bornes[0];
+    let piste = crate::db::track_repo::TrackRepo::with_backend(orch.db.clone())
+        .get_by_cue_identity(
+            &iso.to_string_lossy(),
+            crate::audio::sacd::trames_en_ms(debut) as i64,
+        )
+        .unwrap()
+        .unwrap();
+    let zones = ZoneRepo::with_backend(orch.db.clone());
+    let zone_id = zones
+        .create("DAC DoP", Some("local"), Some("local:dac-6630"))
+        .unwrap();
+    zones.update_dsd_mode(zone_id, "dop").unwrap();
+    let mut req = requete_locale_3234(zone_id, piste.id.unwrap());
+    req.output_device_id = Some("local:dac-6630".into());
+    req.seek_ms = Some(crate::audio::sacd::trames_en_ms(debut + 1) as u64);
+
+    let resolu = match orch.resolve_local_track(&req).await {
+        Ok(r) => r,
+        Err(e) => panic!("le DoP d'une piste d'ISO doit se résoudre : {e}"),
+    };
+    let info = orch
+        .streamer
+        .stream_output_wire(resolu.stream_id.as_deref().unwrap())
+        .await
+        .expect("session DoP");
+    let servis = 44
+        + crate::audio::dsd_to_dop::DsdToDoP::new(2, false)
+            .feed(&octets_attendus(debut + 1, fin))
+            .len() as u64;
+    let annonce = info.wav_content_length().expect("Content-Length annoncé");
+    // Tolérance : 2 ms de DoP (176,4 kHz, 2 × 24 bits), l'arrondi des trames
+    // SACD en millisecondes. La piste entière en annonce une trame de plus
+    // (1/75 s, plus de 14 000 octets).
+    let tolerance = 2 * 176_400 * 6 / 1000;
+    assert!(
+        annonce.abs_diff(servis) <= tolerance,
+        "#6630 — le DoP entamé annonce {annonce} octets pour {servis} servis \
+         (durée de session {:?} ms) : la longueur de la piste entière, pas celle servie",
+        info.duration_ms
+    );
+}
+
 /// Témoin de #3234 : un FLAC de la bibliothèque se résout comme avant.
 ///
 /// Sans ce témoin, un refus trop large rendrait toute la bibliothèque

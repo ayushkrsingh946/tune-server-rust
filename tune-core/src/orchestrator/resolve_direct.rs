@@ -1560,6 +1560,7 @@ impl PlaybackOrchestrator {
                 false,
                 strict,
                 None,
+                None,
             )
             .await;
         match resultat {
