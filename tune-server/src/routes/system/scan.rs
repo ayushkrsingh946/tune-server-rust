@@ -155,7 +155,113 @@ pub(crate) struct ScanLease<'a> {
 
 impl Drop for ScanLease<'_> {
     fn drop(&mut self) {
+        // L'annonce tombe AVANT le droit : après la libération, un nouveau
+        // scan peut poser la sienne, que ce `Drop` ne doit pas effacer.
+        if std::ptr::eq(self.gate, &SCAN_GATE) {
+            *SCAN_EN_COURS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
         self.gate.release(self.generation);
+    }
+}
+
+impl ScanLease<'_> {
+    /// #6729 — dit QUEL scan tient le droit : son origine, le dossier d'un
+    /// scan ciblé, son heure de départ. Lu par `scan/status` et le diagnostic.
+    pub(crate) fn annoncer(&self, origine: &'static str, cible: Option<&str>) {
+        if !std::ptr::eq(self.gate, &SCAN_GATE) {
+            return;
+        }
+        tracing::info!(
+            origine,
+            cible = cible.unwrap_or("-"),
+            "scan_detenteur_du_droit"
+        );
+        *SCAN_EN_COURS.lock().unwrap_or_else(|e| e.into_inner()) = Some(ScanEnCours {
+            origine,
+            cible: cible.map(str::to_string),
+            depuis: chrono_now(),
+        });
+    }
+}
+
+/// #6729 (Tades, fil 2368) — « analyse en cours » sans dire laquelle.
+///
+/// Plusieurs gestes prennent le MÊME droit de scanner : le scan de démarrage,
+/// le bouton « Scanner » (complet ou d'un dossier), l'horaire programmé, le
+/// remontage tardif d'un partage réseau, l'ajout d'un dossier, un import, une
+/// extraction de CD. Un seul tient le droit à la fois, et l'indicateur ne
+/// disait pas lequel : un scan ciblé fini à 100 % laissait « analyse en
+/// cours » allumé par un AUTRE scan, reparti derrière lui, sans que rien ne
+/// permette de le voir.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScanEnCours {
+    /// Code stable : voir les constantes `ORIGINE_*`.
+    pub origine: &'static str,
+    /// Le dossier d'un scan ciblé ; `None` pour toute la bibliothèque.
+    pub cible: Option<String>,
+    /// Secondes Unix du départ.
+    pub depuis: String,
+}
+
+static SCAN_EN_COURS: std::sync::Mutex<Option<ScanEnCours>> = std::sync::Mutex::new(None);
+
+pub(crate) const ORIGINE_DEMARRAGE: &str = "startup";
+pub(crate) const ORIGINE_MANUELLE: &str = "manual";
+pub(crate) const ORIGINE_PROGRAMMEE: &str = "scheduled";
+pub(crate) const ORIGINE_MONTAGE_TARDIF: &str = "late_network_mount";
+pub(crate) const ORIGINE_AJOUT_DE_DOSSIER: &str = "music_dir_added";
+pub(crate) const ORIGINE_IMPORT: &str = "import";
+pub(crate) const ORIGINE_EXTRACTION_CD: &str = "cd_rip";
+
+/// Le scan qui tient le droit en ce moment, s'il est annoncé.
+pub(crate) fn scan_en_cours() -> Option<ScanEnCours> {
+    if !SCAN_GATE.is_active() {
+        return None;
+    }
+    SCAN_EN_COURS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Ce que `scan/status` et le diagnostic publient du scan en cours.
+///
+/// `stale: true` : le réglage dit « scanning » alors qu'AUCUN scan ne tient
+/// le droit — un reste (processus tué en plein scan) ; « Arrêter » le remet
+/// au repos.
+pub(crate) fn decrire_le_scan_en_cours(stocke: &str) -> Value {
+    match scan_en_cours() {
+        Some(e) => json!({
+            "origin": e.origine,
+            "path": e.cible,
+            "started_at": e.depuis,
+            "stale": false,
+        }),
+        None if SCAN_GATE.is_active() => json!({ "origin": null, "path": null, "stale": false }),
+        None if stocke == "scanning" => json!({ "origin": null, "path": null, "stale": true }),
+        None => Value::Null,
+    }
+}
+
+/// La même description, en une ligne lisible pour le rapport de diagnostic.
+pub(crate) fn ligne_du_scan_en_cours(stocke: &str) -> String {
+    let d = decrire_le_scan_en_cours(stocke);
+    if d.is_null() {
+        return stocke.to_string();
+    }
+    if d["stale"] == true {
+        return format!("{stocke} (aucun scan ne tient le droit : statut résiduel)");
+    }
+    let origine = d["origin"].as_str().unwrap_or("inconnue");
+    match d["path"].as_str() {
+        Some(p) => format!(
+            "{stocke} (origine {origine}, dossier {p}, depuis {})",
+            d["started_at"].as_str().unwrap_or("?")
+        ),
+        None => format!(
+            "{stocke} (origine {origine}, toute la bibliothèque, depuis {})",
+            d["started_at"].as_str().unwrap_or("?")
+        ),
     }
 }
 
@@ -349,6 +455,54 @@ mod scan_gate_tests {
         );
         assert_eq!(r.0["scanning"], true);
         drop(jeton);
+    }
+
+    /// #6729 — `scan/status` dit QUEL scan tient le droit, et reconnaît un
+    /// « scanning » résiduel qu'aucun scan ne tient.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn scan_status_nomme_le_scan_qui_tient_le_droit_6729() {
+        let _serialise = serialiser();
+        super::attendre_que_le_droit_de_scanner_soit_libre().await;
+        let state = crate::state::AppState::new(":memory:", 0, Default::default()).unwrap();
+        let reglages =
+            tune_core::db::settings_repo::SettingsRepo::with_backend(state.backend.clone());
+        reglages.set("scan_status", "scanning").unwrap();
+
+        let jeton = super::try_begin_scan().expect("droit libre");
+        jeton.annoncer(super::ORIGINE_MONTAGE_TARDIF, None);
+        let r = super::scan_status(axum::extract::State(state.clone())).await;
+        assert_eq!(
+            r.0["current"]["origin"], "late_network_mount",
+            "#6729 : « analyse en cours » sans dire quel scan tient le droit : {}",
+            r.0
+        );
+        assert_eq!(r.0["current"]["stale"], false);
+        assert!(
+            super::ligne_du_scan_en_cours("scanning").contains("late_network_mount"),
+            "le diagnostic nomme l'origine"
+        );
+        drop(jeton);
+
+        let jeton = super::try_begin_scan().expect("droit libre");
+        jeton.annoncer(super::ORIGINE_MANUELLE, Some("/musique/Billy Joel"));
+        let r = super::scan_status(axum::extract::State(state.clone())).await;
+        assert_eq!(r.0["current"]["origin"], "manual");
+        assert_eq!(r.0["current"]["path"], "/musique/Billy Joel");
+        drop(jeton);
+
+        // Plus aucun détenteur : l'annonce est tombée avec le droit, et le
+        // « scanning » qui reste au réglage est dit résiduel.
+        let r = super::scan_status(axum::extract::State(state.clone())).await;
+        assert_eq!(
+            r.0["current"]["stale"], true,
+            "#6729 : l'annonce du scan a survécu à son droit : {}",
+            r.0
+        );
+        assert!(super::ligne_du_scan_en_cours("scanning").contains("résiduel"));
+        reglages.set("scan_status", "idle").unwrap();
+        let r = super::scan_status(axum::extract::State(state)).await;
+        assert!(r.0["current"].is_null(), "{}", r.0);
     }
 
     /// Le verrou COMMUN aux épreuves de scan réel
@@ -1023,7 +1177,15 @@ pub(super) async fn trigger_scan(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(tune_core::scanner::walker::normalize_path);
-    if spawn_library_scan_confirmee(state, force, q.confirm_purge, targeted_req).await {
+    if spawn_library_scan_confirmee(
+        state,
+        force,
+        q.confirm_purge,
+        targeted_req,
+        ORIGINE_MANUELLE,
+    )
+    .await
+    {
         (StatusCode::ACCEPTED, Json(json!({ "status": "scanning" })))
     } else {
         (
@@ -1031,6 +1193,8 @@ pub(super) async fn trigger_scan(
             Json(json!({
                 "status": "already_scanning",
                 "scanning": true,
+                // #6729 : le scan qui tient le droit, pour que l'écran le nomme.
+                "current": decrire_le_scan_en_cours("scanning"),
             })),
         )
     }
@@ -1593,7 +1757,18 @@ pub(crate) async fn spawn_library_scan(
     force: bool,
     targeted_req: Option<String>,
 ) -> bool {
-    spawn_library_scan_confirmee(state, force, None, targeted_req).await
+    spawn_library_scan_par(state, force, targeted_req, ORIGINE_MANUELLE).await
+}
+
+/// [`spawn_library_scan`], en disant QUI le demande (#6729) : l'origine est
+/// publiée par `scan/status` et le diagnostic tant que ce scan tient le droit.
+pub(crate) async fn spawn_library_scan_par(
+    state: AppState,
+    force: bool,
+    targeted_req: Option<String>,
+    origine: &'static str,
+) -> bool {
+    spawn_library_scan_confirmee(state, force, None, targeted_req, origine).await
 }
 
 /// Comme `spawn_library_scan`, mais peut lever le plafond volumétrique à
@@ -1604,14 +1779,16 @@ pub(crate) async fn spawn_library_scan_confirmee(
     force: bool,
     purge_confirmee: Option<u64>,
     targeted_req: Option<String>,
+    origine: &'static str,
 ) -> bool {
-    spawn_library_scan_avec_lecteur(
+    spawn_library_scan_avec_lecteur_par(
         state,
         force,
         purge_confirmee,
         targeted_req,
         std::sync::Arc::new(tune_core::metadata::read_extended_metadata),
         DELAI_LECTURE_CREDITS,
+        origine,
     )
     .await
 }
@@ -1624,10 +1801,42 @@ async fn spawn_library_scan_avec_lecteur(
     lecteur_metadonnees: LecteurMetadonnees,
     delai_credits: std::time::Duration,
 ) -> bool {
+    spawn_library_scan_avec_lecteur_par(
+        state,
+        force,
+        purge_confirmee,
+        targeted_req,
+        lecteur_metadonnees,
+        delai_credits,
+        ORIGINE_MANUELLE,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_library_scan_avec_lecteur_par(
+    state: AppState,
+    force: bool,
+    purge_confirmee: Option<u64>,
+    targeted_req: Option<String>,
+    lecteur_metadonnees: LecteurMetadonnees,
+    delai_credits: std::time::Duration,
+    origine: &'static str,
+) -> bool {
     let Some(scan_lease) = try_begin_scan() else {
-        tracing::warn!("scan_start_rejected_already_running");
+        // #6729 : le refus nomme le scan qui tient le droit.
+        let detenteur = scan_en_cours();
+        tracing::warn!(
+            detenteur = detenteur.as_ref().map(|e| e.origine).unwrap_or("-"),
+            cible = detenteur
+                .as_ref()
+                .and_then(|e| e.cible.as_deref())
+                .unwrap_or("-"),
+            "scan_start_rejected_already_running"
+        );
         return false;
     };
+    scan_lease.annoncer(origine, targeted_req.as_deref());
     if force {
         tracing::info!("scan_force_full_reresolve — bypassing unchanged-file skip");
     }
@@ -3505,10 +3714,15 @@ pub(super) async fn scan_status(State(state): State<AppState>) -> Json<Value> {
         .flatten()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
 
+    // #6729 : QUEL scan — origine, dossier d'un scan ciblé, départ — ou
+    // `stale` quand le réglage dit « scanning » sans qu'aucun scan tienne le
+    // droit. `null` au repos.
+    let current = decrire_le_scan_en_cours(&status);
     Json(json!({
         "status": status,
         "scanning": scanning,
         "result": result,
+        "current": current,
     }))
 }
 
@@ -3771,7 +3985,7 @@ pub(crate) fn spawn_scan_scheduler(state: AppState, scan_de_demarrage: bool) {
             // Sinon un scan qui se termine mal relancerait un scan complet
             // toutes les 30 secondes.
             noter_occurrence(&settings, due);
-            if spawn_library_scan(state.clone(), false, None).await {
+            if spawn_library_scan_par(state.clone(), false, None, ORIGINE_PROGRAMMEE).await {
                 tracing::info!(
                     time = %horaire,
                     occurrence = %date_iso(due),

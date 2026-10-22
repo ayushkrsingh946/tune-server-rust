@@ -987,6 +987,7 @@ pub(super) async fn diagnostics(State(state): State<AppState>) -> Json<Value> {
         // donnaient jusqu'ici le même écran vide.
         "output_providers": crate::discovery_setup::provider_status_snapshot(),
         "scan_status": {
+            "current": super::scan::decrire_le_scan_en_cours(&scan_status),
             "status": scan_status,
             "tracks": tracks,
             "albums": albums,
@@ -2356,7 +2357,11 @@ pub(super) async fn generate_bug_report(State(state): State<AppState>) -> Json<V
         md.push_str(&ligne_portraits_d_artistes(p));
     }
     md.push_str(&format!("- Music dirs: {}\n", music_dirs.join(", ")));
-    md.push_str(&format!("- Scan status: {scan_status}\n"));
+    // #6729 : QUEL scan tient le statut, ou « résiduel » si aucun.
+    md.push_str(&format!(
+        "- Scan status: {}\n",
+        super::scan::ligne_du_scan_en_cours(&scan_status)
+    ));
     // #4319 — « je le vois dans Répertoires, la recherche ne le trouve pas ».
     // Le nombre d'entrées INDEXÉES tranche entre « le mot ne correspond pas »
     // et « la ligne manque à l'index ». Muet sur PostgreSQL, qui indexe par

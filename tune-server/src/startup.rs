@@ -3179,7 +3179,14 @@ async fn retenter_en_fond(state: AppState, partage: PartageEnregistre) {
     // Le scan de démarrage peut encore tenir le droit de scanner : on attend
     // qu'il le rende, sans fin de délai déraisonnable.
     for _ in 0..40 {
-        if crate::routes::system::scan::spawn_library_scan(state.clone(), false, None).await {
+        if crate::routes::system::scan::spawn_library_scan_par(
+            state.clone(),
+            false,
+            None,
+            crate::routes::system::scan::ORIGINE_MONTAGE_TARDIF,
+        )
+        .await
+        {
             info!(path = %partage.path, "scan_after_late_mount_started (#5682)");
             return;
         }
