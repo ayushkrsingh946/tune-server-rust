@@ -2610,6 +2610,28 @@ CREATE INDEX IF NOT EXISTS idx_hires_verifications_verdict ON hires_verification
         name: "tracks_bitrate_kbps",
         up: "",
     },
+    // #6474, point 2 — d'où vient le nom de tri d'un artiste :
+    // `artists.sort_name_source`, `'musicbrainz'` quand il a été tiré du
+    // `sort-name` MusicBrainz, NULL sinon (balise ARTISTSORT /
+    // ALBUMARTISTSORT, saisie dans « Modifier l'artiste », ou existant).
+    //
+    // Sans elle, la balise ne pouvait pas garder la priorité : un nom de tri
+    // posé par MusicBrainz AVANT qu'on écrive ARTISTSORT dans les fichiers
+    // aurait été pris pour une saisie, et jamais remplacé.
+    //
+    // Numérotée 131 / PG 095 le 21/10 : la 127 / PG 091 (#6257) est la
+    // dernière sur `batch/bugs-rc7-20261015`, et trois PR ouvertes du lot
+    // réservent les suivantes : #6637 (128 / 092), #6641 (129 / 093) et
+    // #6633 (130 / 094). Cette PR se fusionne donc APRÈS elles : la garde de
+    // contiguïté PG le signale tant qu'elles ne sont pas dans le lot.
+    //
+    // Colonne posée dans le bloc de version et dans la passe finale, PAS
+    // dans `up` : même règle qu'à la 119. Jumelle PG : 095.
+    Migration {
+        version: 131,
+        name: "artists_sort_name_source",
+        up: "",
+    },
 ];
 
 /// Migration 127 (#6257) : `tags.position`, 0 pour toutes les etiquettes
@@ -3982,6 +4004,11 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
             // #6257 — l'ordre des etiquettes. Erreur RENDUE, comme a la 125.
             tags_position(db)?;
         }
+        if migration.version == 131 {
+            // #6474 — la provenance du nom de tri. NULL pour l'existant : un
+            // nom de tri déjà posé vient d'une balise ou d'une saisie.
+            add_column_if_missing(db, "artists", "sort_name_source", "TEXT");
+        }
         if migration.version == 12 {
             upgrade_fts5_tables(db);
         }
@@ -4581,6 +4608,9 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     // l'INSERT des etiquettes le NOMME. Sans rangement : toutes a 0, la liste
     // reste rangee par nom (le nom departage). PG : migration 091.
     add_column_if_missing(db, "tags", "position", "INTEGER NOT NULL DEFAULT 0");
+    // La provenance du nom de tri (migration 131, #6474) — posée ICI aussi :
+    // le scan et l'enrichissement la NOMMENT. PG : migration 095.
+    add_column_if_missing(db, "artists", "sort_name_source", "TEXT");
     // Index de `listen_history.album_id` (migration 115, fil 2130) — posé ICI
     // aussi : une base arrivée sans lui reste juste, mais « Reprendre
     // l'écoute » y redevient lent. PG : migration 079.
@@ -5478,6 +5508,13 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         94,
         "tracks_bitrate_kbps",
         include_str!("../../migrations/postgres/094_tracks_bitrate_kbps.sql"),
+    ),
+    // Jumelle de la SQLite 131 (#6474) : `artists.sort_name_source`, la
+    // provenance du nom de tri (`'musicbrainz'` ou NULL).
+    (
+        95,
+        "artists_sort_name_source",
+        include_str!("../../migrations/postgres/095_artists_sort_name_source.sql"),
     ),
 ];
 
@@ -8895,7 +8932,11 @@ mod tests {
         // table des verdicts des faux hi-res, que la passe de fond NOMME.
         // 94 : `tracks_bitrate_kbps` (#6332), jumelle de la SQLite 130. Pose
         // `tracks.bitrate_kbps`, que l'INSERT et l'UPDATE des pistes NOMMENT.
-        assert_eq!(pg_latest_version(), 94, "latest PG migration must be 94");
+        // 95 : `artists_sort_name_source` (#6474), jumelle de la SQLite 131.
+        // Pose la provenance du nom de tri, que le scan et l'enrichissement
+        // NOMMENT. Les 92 à 94 sont celles de #6637, #6641 et #6633, à
+        // fusionner AVANT.
+        assert_eq!(pg_latest_version(), 95, "latest PG migration must be 95");
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),
