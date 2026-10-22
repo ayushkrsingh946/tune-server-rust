@@ -29,9 +29,15 @@ impl PositionPoller {
             // précédent au lieu de revenir au logo.
             let radio_repo = crate::db::radio_repo::RadioRepo::with_backend(self.db.clone());
             let mut logo_station: Option<String> = None;
+            // #6516 — le lien de la station avec sa fiche d'annuaire : le
+            // relais la retrouve d'abord par lui.
+            let mut lien_annuaire: Option<String> = None;
             let (station_name, stream_url) =
                 if let Some(station) = station_du_now_playing(&radio_repo, source_id) {
                     logo_station = station.logo_url.clone();
+                    lien_annuaire = station
+                        .id
+                        .and_then(|id| radio_repo.lien_annuaire(id).ok().flatten());
                     (station.name.clone(), station.url.clone())
                 } else {
                     // Station introuvable en base : on retombe sur
@@ -43,9 +49,17 @@ impl PositionPoller {
                     (name, source_id.clone())
                 };
 
-            if let Some(meta) =
-                crate::radio_metadata::fetch_radio_metadata(&station_name, &stream_url).await
-            {
+            // #6516 — une station suivie par radio-metadata.fr se lit d'abord
+            // sur le relais ; la zone passe alors à la cadence du relais
+            // (`zone_a_relire`), les autres gardent celle du sondeur.
+            let (meta, par_le_relais) = crate::radio_metadata::fetch_radio_metadata_liee(
+                lien_annuaire.as_deref(),
+                &station_name,
+                &stream_url,
+            )
+            .await;
+            crate::radio_metadata_relais::noter_zone(zone_id, par_le_relais);
+            if let Some(meta) = meta {
                 // La pochette du titre quand la station la donne, le
                 // logo sinon. Bertrand : « mettre la pochette de
                 // l'album et non le logo de la radio ».

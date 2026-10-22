@@ -380,6 +380,15 @@ pub async fn executer(
             if !tenue && !libre {
                 return Err(pas_tenue());
             }
+            // #6541 — la limite de sécurité de la zone locale qui porte cette
+            // sortie tient aussi contre un maître distant.
+            let volume = match tune_core::audio::volume_limites::securite_de_l_appareil(
+                &state.backend,
+                device_id,
+            ) {
+                Some(s) => volume.min(s),
+                None => volume,
+            };
             sortie.set_volume(volume).await.map_err(erreur)
         }
         Commande::Muet { muet } => {

@@ -10,6 +10,8 @@ pub mod favorites_import;
 pub mod favorites_mirror;
 pub mod matching;
 pub mod podcasts;
+/// #6480 — le texte de présentation d'un album de service, HTML ramené à du texte.
+pub mod presentation_album;
 pub mod qobuz;
 pub mod qobuz_cles_brutes;
 pub mod qobuz_credits;

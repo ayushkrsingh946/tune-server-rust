@@ -215,7 +215,12 @@ fn reconnaitre_les_sorties(
     // prepends a simple 44-byte PCM header that the local parser handles
     // correctly.  The overhead is negligible (memcpy, no re-encoding).
     let is_local_output = est_sortie_locale(req.output_device_id.as_deref());
-    let local_needs_wav = is_local_output && source_format.is_some();
+    // #6370 — la sortie d'un agent Tune est une sortie locale, de l'autre côté
+    // du réseau : relancée à une position, elle reçoit le même WAV décodé à
+    // partir de `seek_ms` (voir [`agent_relance_a_la_position`]).
+    let local_needs_wav = (is_local_output
+        || agent_relance_a_la_position(req.output_device_id.as_deref(), req.seek_ms))
+        && source_format.is_some();
 
     // Calculé ici, et non plus après la branche DoP : celle-ci en a besoin
     // pour servir du DoP à un renderer réseau (#1772). Ne dépend que de
@@ -830,6 +835,7 @@ impl PlaybackOrchestrator {
             channels: resolved_ch,
             origin_url: None,
             bitrate_kbps: None,
+            format_source: None,
         })
     }
 
@@ -1126,13 +1132,14 @@ impl PlaybackOrchestrator {
             // #5297 — la tranche d'une piste d'image SACD, déplacement de
             // l'utilisateur compris : le DoP part de ce début et s'arrête à
             // la fin de la piste, au lieu de jouer le disque entier.
-            let tranche = tranche_cue.map(|t| {
-                let seek = req.seek_ms.unwrap_or(0);
-                (
-                    t.debut_ms + seek,
-                    t.duree_ms.map(|d| t.debut_ms + d.max(seek)),
-                )
-            });
+            //
+            // #6456 — et le déplacement d'un `.dsf`/`.dff` ordinaire, sans
+            // tranche : le DoP part de `seek_ms`, comme la branche native
+            // juste au-dessus. Sans cela, un saut sur une sortie locale DoP
+            // relançait la piste depuis le début pendant que l'horloge de la
+            // zone repartait de la position visée — d'où une fin de piste
+            // déclarée bien avant la fin de l'audio entendu (Levente, fil 2305).
+            let tranche = tranche_dop(tranche_cue, req.seek_ms);
             return self
                 .anticiper_le_dop(
                     track,
@@ -1849,6 +1856,7 @@ impl PlaybackOrchestrator {
             channels: Some(canaux),
             origin_url: None,
             bitrate_kbps: None,
+            format_source: None,
             cover_url: self.resolve_cover_url(track.cover_path.as_deref()),
             file_size: None,
         }))
@@ -2054,6 +2062,7 @@ impl PlaybackOrchestrator {
                 channels: Some(dop_channels as u32),
                 origin_url: None,
                 bitrate_kbps: None,
+                format_source: None,
                 cover_url: self.resolve_cover_url(track.cover_path.as_deref()),
                 file_size: None,
             }));
@@ -3234,6 +3243,12 @@ impl PlaybackOrchestrator {
             info,
             ..
         } = format;
+        // #6630 — le décodeur part de `seek_ms` : la durée de la session est
+        // celle qui RESTE à servir, comme celle du départ natif (#6059). Sans
+        // quoi `Content-Length` annonçait la piste entière et le corps se
+        // fermait plus tôt (`IncompleteBody` chez le client).
+        let mut info = info;
+        info.duration_ms = duree_servie_apres_le_seek(info.duration_ms, req.seek_ms);
         let flux = {
             // ── Streaming transcode (WAV for local/OAAT) ──────────
             // Use the computed WAV content length for the DIDL size
@@ -3800,6 +3815,35 @@ impl PlaybackOrchestrator {
     }
 }
 
+/// #6630 — la durée qu'une session décodée à partir de `seek_ms` sert
+/// vraiment : la durée de la piste moins la position de départ. Depuis le
+/// début (`seek_ms` nul ou absent), rien ne change. Un départ au-delà de la
+/// fin rend `Some(0)`, que `StreamInfo::wav_content_length` lit comme une
+/// longueur inconnue : pas de `Content-Length` plutôt qu'un faux.
+fn duree_servie_apres_le_seek(duree_ms: Option<u64>, seek_ms: Option<u64>) -> Option<u64> {
+    match seek_ms.filter(|s| *s > 0) {
+        Some(seek) => duree_ms.map(|d| d.saturating_sub(seek)),
+        None => duree_ms,
+    }
+}
+
+/// #6456 — la fenêtre du DoP, sur l'horloge du fichier : la tranche CUE/ISO
+/// entamée par le déplacement, comme avant (#5297), ou — sans tranche — le
+/// seul déplacement, jusqu'au bout du fichier. `None` : depuis le début.
+fn tranche_dop(
+    tranche_cue: Option<TrancheCue>,
+    seek_ms: Option<u64>,
+) -> Option<(u64, Option<u64>)> {
+    let seek = seek_ms.unwrap_or(0);
+    match tranche_cue {
+        Some(t) => Some((
+            t.debut_ms + seek,
+            t.duree_ms.map(|d| t.debut_ms + d.max(seek)),
+        )),
+        None => (seek > 0).then_some((seek, None)),
+    }
+}
+
 /// La cadence et le nombre de canaux d'une source DSD, lus DANS LE FICHIER
 /// (DSF, DFF, ISO SACD) — `None` si l'en-tête est illisible. Partagé par le
 /// DoP (`anticiper_le_dop`, #1894) et le DSD natif (#5643) : une seule
@@ -3822,5 +3866,45 @@ fn sonder_l_entete_dsd(file_path: &str) -> Option<(u32, u32)> {
         crate::audio::dsf::parse_dsf(file_path)
             .ok()
             .map(|i| (i.sample_rate, i.channels))
+    }
+}
+
+#[cfg(test)]
+mod tranche_dop_tests_6456 {
+    use super::{TrancheCue, tranche_dop};
+
+    /// #6456 — un `.dsf` ordinaire (pas de tranche) déplacé à 2:12 : le DoP
+    /// doit partir de 2:12, pas du début.
+    #[test]
+    fn un_deplacement_sans_tranche_cue_est_transmis_au_dop() {
+        assert_eq!(tranche_dop(None, Some(132_581)), Some((132_581, None)));
+    }
+
+    #[test]
+    fn sans_deplacement_ni_tranche_le_dop_part_du_debut() {
+        assert_eq!(tranche_dop(None, None), None);
+        assert_eq!(tranche_dop(None, Some(0)), None);
+    }
+
+    /// La tranche CUE/ISO garde sa règle d'avant (#5297).
+    #[test]
+    fn la_tranche_cue_garde_sa_regle() {
+        let t = TrancheCue {
+            debut_ms: 60_000,
+            duree_ms: Some(30_000),
+        };
+        assert_eq!(
+            tranche_dop(Some(t), Some(5_000)),
+            Some((65_000, Some(90_000)))
+        );
+        assert_eq!(tranche_dop(Some(t), None), Some((60_000, Some(90_000))));
+        let derniere = TrancheCue {
+            debut_ms: 60_000,
+            duree_ms: None,
+        };
+        assert_eq!(
+            tranche_dop(Some(derniere), Some(5_000)),
+            Some((65_000, None))
+        );
     }
 }

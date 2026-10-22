@@ -26,6 +26,7 @@ mod premium_audio_host;
 pub mod reaffectation_canaux;
 pub use tune_streaming_http::deezer_proxy_handler;
 pub mod developer_api;
+pub mod devialet_air;
 pub mod devices;
 pub mod diag_qobuz;
 pub mod digest;
@@ -75,6 +76,7 @@ pub mod podcasts;
 pub mod profil_par_appareil;
 pub mod profiles;
 pub mod radios;
+pub mod radios_annuaire;
 pub mod radios_libelles;
 pub mod room_calibration;
 pub mod room_correction;
@@ -484,6 +486,8 @@ pub fn router_with_plugins(
         .nest("/sonos", sonos::router())
         .nest("/squeezebox", squeezebox::router())
         .nest("/spotify-connect", spotify_connect::router())
+        // #6542 — sortie Devialet AIR expérimentale : ses réglages.
+        .nest("/devialet-air", devialet_air::router())
         .nest("/listenbrainz", listenbrainz::router())
         .nest("/scrobbler", scrobbler::router())
         .nest("/soundcloud", soundcloud::router())
@@ -718,6 +722,7 @@ pub fn router_with_plugins(
         }),
     )
     .fallback_service(service_statique_spa(std::path::Path::new(&web_dir)))
+    .layer(axum::middleware::from_fn(zones::textes_signal::avec_langue))
     .layer(axum::middleware::from_fn(cache_control_middleware))
     .layer(axum::Extension(contexte_sendspin))
     .layer(CompressionLayer::new())
@@ -957,12 +962,21 @@ mod eq_refresh_guard {
     /// Indexé par clé et pas seulement par fichier : dispenser `zones.rs` en
     /// bloc le retirerait aussi des deux autres clés, dont il n'a aucune raison
     /// d'être exempté. Une dispense doit être aussi étroite que son motif.
-    const LECTURE_SEULE: &[(&str, &str, &str)] = &[(
-        "_audiophile",
-        "zones.rs",
-        "n'écrit la clé que dans ses propres tests (chemin du signal en PURE) ; \
-         le code de production la LIT via `audiophile::zone_enabled`",
-    )];
+    const LECTURE_SEULE: &[(&str, &str, &str)] = &[
+        (
+            "_audiophile",
+            "zones.rs",
+            "n'écrit la clé que dans ses propres tests (chemin du signal en PURE) ; \
+             le code de production la LIT via `audiophile::zone_enabled`",
+        ),
+        (
+            "_audiophile",
+            "limites_de_volume_6541_tests.rs",
+            "module de tests (`#[cfg(test)] #[path]` de `zones/limites_de_volume_6541.rs`) : \
+             il pose une zone en PURE pour vérifier le refus des limites (#6541) ; la \
+             route de production ne fait que LIRE la clé via `mode_sans_limite`",
+        ),
+    ];
 
     /// Les réglages DSP par zone qui n'atteignent le son que si quelqu'un
     /// rafraîchit la sortie vivante, et la méthode qui le fait.
