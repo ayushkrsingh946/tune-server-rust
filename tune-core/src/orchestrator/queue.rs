@@ -1,3 +1,4 @@
+use super::transport::Entree;
 use super::*;
 
 /// Verdict de [`PlaybackOrchestrator::enjamber_les_pistes_bannies`] (#4806).
@@ -635,7 +636,21 @@ impl PlaybackOrchestrator {
     }
 
     pub async fn play_from_queue(&self, zone_id: i64, position: i64) -> Result<PlayResult, String> {
-        self.play_from_queue_inner(zone_id, position, true).await
+        self.play_from_queue_inner(zone_id, position, true, Entree::Geste)
+            .await
+    }
+
+    /// #6735 — `play_from_queue` pour l'enchaînement du sondeur à la fin
+    /// constatée d'une piste. Seule différence : les gardes anti-double-appui
+    /// (`RETAP_DEDUP_WINDOW`, `DUPLICATE_NET_PLAY_WINDOW`) ne s'appliquent
+    /// pas, pour que Répéter la piste relance un morceau plus court qu'elles.
+    pub async fn play_from_queue_en_fin_de_piste(
+        &self,
+        zone_id: i64,
+        position: i64,
+    ) -> Result<PlayResult, String> {
+        self.play_from_queue_inner(zone_id, position, true, Entree::FinDePiste)
+            .await
     }
 
     /// #6466 (fil 2302 point 15) — `play_from_queue` SANS écrire
@@ -653,7 +668,8 @@ impl PlaybackOrchestrator {
         zone_id: i64,
         position: i64,
     ) -> Result<PlayResult, String> {
-        self.play_from_queue_inner(zone_id, position, false).await
+        self.play_from_queue_inner(zone_id, position, false, Entree::Geste)
+            .await
     }
 
     async fn play_from_queue_inner(
@@ -661,6 +677,7 @@ impl PlaybackOrchestrator {
         zone_id: i64,
         position: i64,
         historique: bool,
+        entree: Entree,
     ) -> Result<PlayResult, String> {
         let queue_repo = PlayQueueRepo::with_backend(self.db.clone());
 
@@ -788,12 +805,7 @@ impl PlaybackOrchestrator {
         self.playback
             .update_queue_info(zone_id, position, total)
             .await;
-        let result = if historique {
-            self.play(req).await?
-        } else {
-            self.play_transfere_sans_historique(req).await?
-        };
-        Ok(result)
+        self.play_par_l_entree(req, historique, entree).await
     }
 
     pub async fn advance_queue_metadata(&self, zone_id: i64, position: i64) -> Result<(), String> {
