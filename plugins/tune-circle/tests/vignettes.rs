@@ -526,3 +526,87 @@ async fn la_vignette_d_un_contact_est_relayee_avec_son_etag_et_304() {
     let r = appel(&app, "GET", "/contacts/7/library/albums/10/thumbnail", None).await;
     assert_eq!(r.statut, StatusCode::PRECONDITION_FAILED);
 }
+
+// 5. #6733 — le débit et l'ordre ---------------------------------------------
+
+/// Une grande bibliothèque ne doit plus attendre 15 min entre deux passages
+/// de 200 : le passage qui s'arrête au plafond, sans refus du site, dit qu'il
+/// en reste, et le délai suivant est court. Les plus récents partent d'abord.
+#[tokio::test]
+async fn une_grande_bibliotheque_s_envoie_sans_attendre_les_plus_recents_d_abord_6733() {
+    let banc = demarrer().await;
+    let dossier = dossier_de_pochettes();
+    let n = vignettes::PLAFOND_PAR_PASSAGE as u32 * 2 + 30;
+    let backend = bibliotheque(&banc, &dossier, n);
+    let v = vignettes_de(&banc, &backend, &dossier);
+
+    let b1 = v.passage().await;
+    assert_eq!(b1.envoyees, vignettes::PLAFOND_PAR_PASSAGE);
+    assert!(
+        b1.reste,
+        "#6733 : le passage arrêté au plafond ne dit pas qu'il reste des vignettes"
+    );
+    assert_eq!(
+        vignettes::delai_avant_le_prochain_passage(&b1),
+        vignettes::SUITE,
+        "#6733 : il reste des vignettes, le passage suivant doit partir sans attendre"
+    );
+    {
+        let f = banc.etat.lock().unwrap();
+        let premier = f.envois[0][0]["album_id"].as_i64().unwrap();
+        assert_eq!(
+            premier,
+            10 + n as i64 - 1,
+            "#6733 : l'album le plus récemment ajouté doit partir le premier"
+        );
+    }
+
+    let b2 = v.passage().await;
+    assert_eq!(
+        (b2.envoyees, b2.reste),
+        (vignettes::PLAFOND_PAR_PASSAGE, true)
+    );
+    let b3 = v.passage().await;
+    assert_eq!((b3.envoyees, b3.reste), (30, false));
+    assert_eq!(
+        vignettes::delai_avant_le_prochain_passage(&b3),
+        vignettes::INTERVALLE
+    );
+    assert_eq!(banc.etat.lock().unwrap().tenues.len(), n as usize);
+}
+
+/// Le quota du site arrête la suite : pas de passage immédiat derrière.
+#[tokio::test]
+async fn le_quota_du_site_arrete_la_suite_6733() {
+    let banc = demarrer().await;
+    banc.etat.lock().unwrap().quota = Some(5);
+    let dossier = dossier_de_pochettes();
+    let backend = bibliotheque(&banc, &dossier, vignettes::PLAFOND_PAR_PASSAGE as u32 + 10);
+    let b = vignettes_de(&banc, &backend, &dossier).passage().await;
+    assert_eq!(b.envoyees, 5);
+    assert!(!b.reste, "le site a refusé : on attend l'intervalle");
+}
+
+/// Des pochettes illisibles en tête de liste n'occupent pas le plafond : sans
+/// cela, le passage n'enverrait plus rien, indéfiniment.
+#[tokio::test]
+async fn des_pochettes_illisibles_ne_bloquent_pas_le_passage_6733() {
+    let banc = demarrer().await;
+    let dossier = dossier_de_pochettes();
+    let n = vignettes::PLAFOND_PAR_PASSAGE as u32 + 20;
+    let backend = bibliotheque(&banc, &dossier, n);
+    // Les PLAFOND albums les plus récents perdent leur pochette en cache.
+    for i in 20..n {
+        let id = 10 + i;
+        std::fs::remove_file(dossier.join(format!("{}.jpg", condensat(id)))).unwrap();
+    }
+    let v = vignettes_de(&banc, &backend, &dossier);
+    let b = v.passage().await;
+    assert_eq!(
+        b.envoyees, 20,
+        "#6733 : les pochettes illisibles ont occupé le plafond du passage"
+    );
+    // Et le passage suivant ne les relit pas.
+    let b = v.passage().await;
+    assert!(b.rien, "{b:?}");
+}
