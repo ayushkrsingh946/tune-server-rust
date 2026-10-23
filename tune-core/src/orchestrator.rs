@@ -1830,6 +1830,10 @@ mod compensation_reseau_5071_tests;
 #[cfg(test)]
 mod repli_dsd_4354_tests;
 
+// #6772 — l'avance sans blanc relance le préchargement de la piste suivante.
+#[cfg(test)]
+mod prechargement_apres_avance_6772_tests;
+
 // #5871 — la préparation DSP ne fait plus la queue derrière l'écrivain.
 #[cfg(test)]
 mod prepa_lecture_5871_tests;
