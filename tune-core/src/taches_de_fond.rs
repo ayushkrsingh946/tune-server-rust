@@ -125,7 +125,7 @@ impl Tache {
     /// Toutes les tâches, dans l'ordre d'affichage de l'écran « État du
     /// serveur ». C'est la liste que balaient l'interrupteur général et le
     /// relevé : ajouter une tâche ici suffit à l'y faire entrer.
-    pub const TOUTES: [Tache; 8] = [
+    pub const TOUTES: [Tache; 9] = [
         Tache::ReplayGain,
         Tache::Empreintes,
         Tache::PlageDynamique,

@@ -516,3 +516,37 @@ mod tests_5169 {
         tune_core::taches_de_fond::ordre::oublier_pour_les_essais();
     }
 }
+
+#[cfg(test)]
+mod tests_6286 {
+    use super::*;
+
+    /// #6286 — l'audit d'intégrité s'inscrit au registre sous `integrity` : sa
+    /// carte le dit en cours, et sa tâche se dit GARÉE quand l'audit est en
+    /// pause, comme celles des autres traitements suspendables (#6282).
+    #[tokio::test]
+    async fn l_audit_inscrit_au_registre_se_dit_en_cours_puis_en_pause() {
+        let _pauses = crate::pauses_de_fond_tests::isoler().await;
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        assert!(!matches!(etat_de(&state, Tache::Integrite), Etat::EnCours));
+
+        let _suivi = state
+            .background_tasks
+            .begin("integrity", "Audit d’intégrité", "integrity");
+        assert!(matches!(etat_de(&state, Tache::Integrite), Etat::EnCours));
+        let tache = |s: &AppState| {
+            s.background_tasks
+                .snapshot()
+                .into_iter()
+                .find(|t| t.id == "integrity")
+                .expect("tâche inscrite")
+        };
+        assert!(!tache(&state).paused);
+
+        tune_core::taches_de_fond::mettre_en_pause(&state.backend, Tache::Integrite).unwrap();
+        assert!(
+            tache(&state).paused,
+            "l'audit en pause : sa tâche du registre doit le dire"
+        );
+    }
+}
