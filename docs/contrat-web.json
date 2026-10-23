@@ -1,6 +1,6 @@
 {
   "genere_depuis": {
-    "web_sha": "c054c741876f6e9cb849925a8c68ef1017f04270",
+    "web_sha": "15b8c43aadaacb745a166c78d89243504d997ae7",
     "regenerer": "scripts/web-contract-map.py --web <tune-web-client> --web-sha <sha> -o docs/contrat-web.json",
     "gardee_par": [
       "tune-server/tests/web_response_contracts.rs (la_carte_web_ne_cite_que_des_routes_encore_servies)",
@@ -1665,6 +1665,53 @@
         "raison",
         "en_pause"
       ]
+    },
+    {
+      "route": "/library/integrity",
+      "methode": "GET",
+      "type": "EtatIntegrite",
+      "liste": false,
+      "champs_obligatoires": [
+        "status",
+        "total",
+        "traites",
+        "sains",
+        "corrompus",
+        "non_verifiables",
+        "alertes_taille",
+        "erreur",
+        "lecture_prioritaire"
+      ],
+      "champs_optionnels": []
+    },
+    {
+      "route": "/library/integrity",
+      "methode": "POST",
+      "type": "EtatIntegrite",
+      "liste": false,
+      "champs_obligatoires": [
+        "status",
+        "total",
+        "traites",
+        "sains",
+        "corrompus",
+        "non_verifiables",
+        "alertes_taille",
+        "erreur",
+        "lecture_prioritaire"
+      ],
+      "champs_optionnels": []
+    },
+    {
+      "route": "/library/integrity/report",
+      "methode": "GET",
+      "type": "(en ligne)",
+      "liste": false,
+      "champs_obligatoires": [
+        "etat",
+        "lignes"
+      ],
+      "champs_optionnels": []
     },
     {
       "route": "/library/repertoires/ordre",
@@ -6657,6 +6704,11 @@
       "raison": "type non structurel"
     },
     {
+      "route": "/library/integrity/pause",
+      "type": "void",
+      "raison": "type non structurel"
+    },
+    {
       "route": "/system/config/import/preview",
       "type": "unknown",
       "raison": "type non structurel"
@@ -6743,7 +6795,7 @@
     }
   ],
   "resume": {
-    "routes_cartographiees": 335,
-    "appels_non_resolus": 154
+    "routes_cartographiees": 338,
+    "appels_non_resolus": 155
   }
 }
