@@ -1345,7 +1345,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_feed_url_transmet_le_pays_6770() {
         let (base, recues) = faux_apple(classe_seulement_en_france).await;
-        let svc = PodcastService::with_lookup_base(reqwest::Client::new(), &base);
+        let svc = PodcastService::with_lookup_base(crate::http::client::shared().clone(), &base);
 
         let flux = svc.resolve_feed_url("1509742508", Some("fr")).await;
 
@@ -1368,7 +1368,7 @@ mod tests {
             r#"{"resultCount":1,"results":[{"collectionName":"Affaires sensibles"}]}"#.into()
         }
         let (base, recues) = faux_apple(connu_sans_flux).await;
-        let svc = PodcastService::with_lookup_base(reqwest::Client::new(), &base);
+        let svc = PodcastService::with_lookup_base(crate::http::client::shared().clone(), &base);
 
         let flux = svc.resolve_feed_url("912451024", Some("fr")).await;
 
@@ -1387,7 +1387,7 @@ mod tests {
             }
         }
         let (base, _) = faux_apple(seulement_par_defaut).await;
-        let svc = PodcastService::with_lookup_base(reqwest::Client::new(), &base);
+        let svc = PodcastService::with_lookup_base(crate::http::client::shared().clone(), &base);
         assert_eq!(
             svc.resolve_feed_url("1", Some("fr")).await,
             Ok("https://flux.exemple.test/us.xml".to_string())
@@ -1397,7 +1397,7 @@ mod tests {
             r#"{"resultCount":0,"results":[]}"#.into()
         }
         let (base, _) = faux_apple(rien).await;
-        let svc = PodcastService::with_lookup_base(reqwest::Client::new(), &base);
+        let svc = PodcastService::with_lookup_base(crate::http::client::shared().clone(), &base);
         assert_eq!(
             svc.resolve_feed_url("2", Some("fr")).await,
             Err(EchecResolution::Introuvable)
@@ -1441,7 +1441,8 @@ mod tests {
         }
         let (lookup, recues) = faux_apple(apple).await;
         let top = lookup.trim_end_matches("/lookup").to_string();
-        let svc = PodcastService::with_apple_bases(reqwest::Client::new(), &top, &lookup);
+        let svc =
+            PodcastService::with_apple_bases(crate::http::client::shared().clone(), &top, &lookup);
 
         // « zz » : un pays qu'aucun autre banc ne met dans le cache du palmarès.
         let palmares = svc.top_podcasts(None, "zz").await.expect("palmarès");
