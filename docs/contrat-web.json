@@ -1,6 +1,6 @@
 {
   "genere_depuis": {
-    "web_sha": "eac8603c02ba67fabf57ec05199f96c5d440d449",
+    "web_sha": "db9d3851e659ed832f077abe20881e71a5bea3ae",
     "regenerer": "scripts/web-contract-map.py --web <tune-web-client> --web-sha <sha> -o docs/contrat-web.json",
     "gardee_par": [
       "tune-server/tests/web_response_contracts.rs (la_carte_web_ne_cite_que_des_routes_encore_servies)",
@@ -799,6 +799,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -839,6 +840,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -879,6 +881,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -1101,6 +1104,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -1162,6 +1166,7 @@
         "name"
       ],
       "champs_optionnels": [
+        "community_listens",
         "sort_name",
         "musicbrainz_id",
         "discogs_id",
@@ -1194,6 +1199,7 @@
         "name"
       ],
       "champs_optionnels": [
+        "community_listens",
         "sort_name",
         "musicbrainz_id",
         "discogs_id",
@@ -1215,6 +1221,7 @@
         "name"
       ],
       "champs_optionnels": [
+        "community_listens",
         "sort_name",
         "musicbrainz_id",
         "discogs_id",
@@ -1236,6 +1243,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -1323,6 +1331,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -1965,6 +1974,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -2543,6 +2553,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3308,6 +3319,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3348,6 +3360,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3399,6 +3412,7 @@
         "name"
       ],
       "champs_optionnels": [
+        "community_listens",
         "sort_name",
         "musicbrainz_id",
         "discogs_id",
@@ -3420,6 +3434,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3460,6 +3475,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3635,6 +3651,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3675,6 +3692,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3729,6 +3747,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3809,6 +3828,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3904,6 +3924,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3955,6 +3976,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
