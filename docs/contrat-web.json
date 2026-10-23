@@ -1676,6 +1676,20 @@
       ]
     },
     {
+      "route": "/library/labels",
+      "methode": "GET",
+      "type": "LibraryLabel",
+      "liste": true,
+      "champs_obligatoires": [
+        "name",
+        "album_count"
+      ],
+      "champs_optionnels": [
+        "image_url",
+        "qobuz_label_id"
+      ]
+    },
+    {
       "route": "/library/repertoires/ordre",
       "methode": "GET",
       "type": "MusicDirectoryOrder",
@@ -6765,7 +6779,7 @@
     }
   ],
   "resume": {
-    "routes_cartographiees": 335,
+    "routes_cartographiees": 336,
     "appels_non_resolus": 154
   }
 }
