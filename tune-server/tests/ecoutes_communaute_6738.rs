@@ -186,12 +186,10 @@ async fn les_routes_posent_les_ecoutes_de_la_communaute() {
 
     // Le cache : la piste et l'album vus plusieurs fois ne sont demandés
     // qu'une fois (une demande par genre).
-    assert_eq!(
-        recus.lock().unwrap().len(),
-        3,
-        "{:?}",
-        recus.lock().unwrap()
-    );
+    // Une seule prise du verrou : relu dans le message d'échec pendant que la
+    // première prise est tenue, il bloquait le banc au lieu de le faire rougir.
+    let demandes = recus.lock().unwrap().clone();
+    assert_eq!(demandes.len(), 3, "{demandes:?}");
 }
 
 /// Envoi des écoutes coupé : aucun appel, aucun champ.
