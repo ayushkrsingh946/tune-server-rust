@@ -433,6 +433,9 @@ pub(super) async fn list_zones(State(state): State<AppState>) -> Json<Value> {
                 } else {
                     z.volume / 100.0
                 },
+                tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(
+                    z.output_type.as_deref(),
+                ),
             );
             let renderer_label = z
                 .output_device_id
@@ -616,7 +619,13 @@ pub(super) async fn get_zone(
                 obj.insert("repeat".into(), json!(ps.repeat));
                 // #1274 — même paire qu'au-dessus, depuis la même source :
                 // ici la colonne `zones.volume`, arrondie au pour-cent.
-                tune_core::audio::volume_scale::inserer_volume(obj, zone.volume / 100.0);
+                tune_core::audio::volume_scale::inserer_volume(
+                    obj,
+                    zone.volume / 100.0,
+                    tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(
+                        zone.output_type.as_deref(),
+                    ),
+                );
                 let devices = state.scanner.devices().await;
                 let registered_output_ids: std::collections::HashSet<String> =
                     state.outputs.lock().await.list().into_iter().collect();

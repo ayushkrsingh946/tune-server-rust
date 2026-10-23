@@ -3697,7 +3697,9 @@ mod restore_zone_volumes_tests {
     /// à 1.0 quel que soit le trim.
     #[test]
     fn la_graine_compose_le_trim_sans_franchir_les_plafonds() {
-        let moins_6 = 0.8 * 10f64.powf(-6.0 / 20.0);
+        // #6787 — sortie locale : le trim est un écart de GAIN sur la loi
+        // perceptive (−6 dB = 0,1 de position, 0,6 dB par point).
+        let moins_6 = 0.8 - 6.0 / 60.0;
         assert!((seed_volume_for(80.0, false, -6.0) - moins_6).abs() < 1e-9);
         assert!((seed_volume_for(90.0, false, 6.0) - 1.0).abs() < 1e-9);
         assert!((seed_volume_for(150.0, false, 12.0) - 1.0).abs() < 1e-9);
@@ -3726,13 +3728,14 @@ mod restore_zone_volumes_tests {
         ensemencer_le_volume_local(&state.backend, &zone, "local:Test", &sortie).await;
 
         let gain = sortie.gain_de_rendu().load(Ordering::SeqCst) as f64 / 1000.0;
-        let attendu = tune_core::orchestrator::volume_avec_trim(0.8, -6.0);
+        // #6787 — 80 % = −12 dB sur la loi perceptive, −18 dB trim compris.
+        let attendu = 10f64.powf(-18.0 / 20.0);
         assert!(
             (gain - attendu).abs() < 2e-3,
-            "gain de rendu {gain} au démarrage, attendu {attendu} (80 % × −6 dB) : \
+            "gain de rendu {gain} au démarrage, attendu {attendu} (80 % = −12 dB, −6 dB de trim) : \
              le trim enregistré n'est pas appliqué à la graine"
         );
-        assert!(gain < 0.79, "gain {gain} : le trim −6 dB est absent");
+        assert!(gain < 0.2, "gain {gain} : le trim −6 dB est absent");
     }
 
     /// #5561 — même démarrage simulé, trim positif sur une zone déjà haute :

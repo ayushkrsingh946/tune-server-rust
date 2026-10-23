@@ -65,7 +65,14 @@ fn refus(code: &str, message: impl Into<String>) -> Response {
 
 /// Un seuil demandé en fraction OU en dB, ramené à une fraction. `Ok(None)` =
 /// pas de limite.
-fn un_seuil(nom: &str, lineaire: Option<f64>, db: Option<f64>) -> Result<Option<f64>, String> {
+///
+/// #6787 — un seuil en dB est un dB de GAIN, lu sur l'échelle de la zone.
+fn un_seuil(
+    echelle: tune_core::audio::volume_scale::EchelleDeVolume,
+    nom: &str,
+    lineaire: Option<f64>,
+    db: Option<f64>,
+) -> Result<Option<f64>, String> {
     let valeur = match (lineaire, db) {
         (None, None) => return Ok(None),
         (Some(_), Some(_)) => {
@@ -77,7 +84,8 @@ fn un_seuil(nom: &str, lineaire: Option<f64>, db: Option<f64>) -> Result<Option<
         (None, Some(d)) if d > 0.0 => {
             return Err(format!("{nom}_db doit être négatif ou nul (0 dB = 100 %)"));
         }
-        (None, Some(d)) => tune_core::audio::volume_scale::db_to_linear(d)
+        (None, Some(d)) => echelle
+            .depuis_db(d)
             .ok_or_else(|| format!("{nom}_db n'est pas un nombre"))?,
     };
     if !valeur.is_finite() || !(LIMITE_MINIMALE..=1.0).contains(&valeur) {
@@ -119,11 +127,13 @@ pub(super) async fn regler_les_limites(
     let Some(zone) = repo.get(id).ok().flatten() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let securite = match un_seuil("safety", body.safety, body.safety_db) {
+    let echelle =
+        tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(zone.output_type.as_deref());
+    let securite = match un_seuil(echelle, "safety", body.safety, body.safety_db) {
         Ok(v) => v,
         Err(m) => return refus("invalid_volume_limit", m),
     };
-    let confort = match un_seuil("comfort", body.comfort, body.comfort_db) {
+    let confort = match un_seuil(echelle, "comfort", body.comfort, body.comfort_db) {
         Ok(v) => v,
         Err(m) => return refus("invalid_volume_limit", m),
     };
@@ -185,9 +195,12 @@ pub(super) async fn regler_les_limites(
             securite: securite_avant,
             confort: None,
         };
-        let recu = avant.borner_appareil(tune_core::orchestrator::volume_avec_trim(
+        // #6787 — le trim se compose comme dans `set_volume` : écart de gain
+        // sur une sortie logicielle, facteur sur la consigne ailleurs.
+        let recu = avant.borner_appareil(tune_core::orchestrator::volume_appareil_avec_trim(
             actuel,
             tune_core::orchestrator::gain_trim_db_enregistre(&state.backend, id),
+            echelle == tune_core::audio::volume_scale::EchelleDeVolume::Lineaire,
         ));
         if recu > s + 1e-9 {
             if let Err(error) = state
@@ -242,7 +255,13 @@ pub(super) async fn pas_de_volume(
                 format!("step_db doit être compris entre 0 (exclu) et {PAS_MAXIMAL_DB}"),
             );
         }
-        (None, Some(d)) => volume_limites::cible_du_pas_db(actuel, signe * d),
+        (None, Some(d)) => volume_limites::cible_du_pas_db(
+            tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(
+                zone.output_type.as_deref(),
+            ),
+            actuel,
+            signe * d,
+        ),
         (pas, None) => {
             let pas = pas.unwrap_or(PAS_PAR_DEFAUT);
             if !(pas.is_finite() && pas > 0.0 && pas <= PAS_MAXIMAL) {
@@ -264,7 +283,11 @@ pub(super) async fn pas_de_volume(
     let retenu = state.playback.get_state(id).await.volume;
     let mut obj = serde_json::Map::new();
     obj.insert("zone_id".into(), json!(id));
-    tune_core::audio::volume_scale::inserer_volume(&mut obj, retenu);
+    tune_core::audio::volume_scale::inserer_volume(
+        &mut obj,
+        retenu,
+        tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(zone.output_type.as_deref()),
+    );
     // `limited` : la sécurité a retenu le pas — le client peut le dire au
     // lieu de laisser croire à un bouton cassé.
     obj.insert("limited".into(), json!(retenu + 1e-9 < cible));

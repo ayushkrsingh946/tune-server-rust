@@ -726,6 +726,9 @@ pub(crate) async fn build_zone_json(state: &AppState, zone_id: i64) -> Value {
     let peut_avancer = can_skip_next_publie(state, zone_id, &zone_state).await;
     let zone_repo = tune_core::db::zone_repo::ZoneRepo::with_backend(state.backend.clone());
     let zone_db = zone_repo.get(zone_id).ok().flatten();
+    let echelle = tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(
+        zone_db.as_ref().and_then(|z| z.output_type.as_deref()),
+    );
     let mut v = json!({
         "id": zone_id,
         "name": zone_db.as_ref().map(|z| &z.name),
@@ -734,7 +737,9 @@ pub(crate) async fn build_zone_json(state: &AppState, zone_id: i64) -> Value {
         "volume": zone_state.volume,
         // #1274 — lecture en dB du volume rendu juste au-dessus, jamais d'une
         // autre source : les deux champs doivent toujours dire la meme chose.
-        "volume_db": tune_core::audio::volume_scale::linear_to_db(zone_state.volume),
+        // #6787 — sur l'échelle de la zone (`volume_curve`).
+        "volume_db": echelle.vers_db(zone_state.volume),
+        "volume_curve": echelle.code(),
         "state": zone_state.state,
         "current_track": zone_state.now_playing.as_ref().map(|np| json!({
             "id": np.track_id,
@@ -1712,12 +1717,12 @@ async fn zone_status(State(state): State<AppState>, Path(zone_id): Path<i64>) ->
     // ici, à partir de ce même nombre. `/zones/{id}/status` est la surface que
     // les clients interrogent en boucle : l'oublier obligerait chacun à
     // recalculer, c'est-à-dire à diverger.
+    // #6787 — sur l'échelle de la zone, `volume_curve` compris.
     if let Some(obj) = v.as_object_mut() {
-        obj.insert(
-            "volume_db".into(),
-            json!(tune_core::audio::volume_scale::linear_to_db(
-                zone_state.volume
-            )),
+        tune_core::audio::volume_scale::inserer_volume(
+            obj,
+            zone_state.volume,
+            tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(output_type.as_deref()),
         );
     }
     Json(v)
@@ -4258,17 +4263,23 @@ async fn set_volume(
     // `volume_scale`, une seule fois pour tout le serveur ; ici on ne fait
     // que traduire un refus en 400 plutôt que de choisir un volume à la place
     // de l'utilisateur.
-    let demande =
-        match tune_core::audio::volume_scale::demande_lineaire(body.volume, body.volume_db) {
-            Ok(v) => v,
-            Err(motif) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "invalid_volume", "message": motif })),
-                )
-                    .into_response();
-            }
-        };
+    // #6787 — un `volume_db` est un dB de gain : sur une sortie logicielle,
+    // il revient à la position de la loi perceptive.
+    let echelle = tune_core::audio::volume_scale::echelle_de_la_zone(&state.backend, zone_id);
+    let demande = match tune_core::audio::volume_scale::demande_lineaire(
+        echelle,
+        body.volume,
+        body.volume_db,
+    ) {
+        Ok(v) => v,
+        Err(motif) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_volume", "message": motif })),
+            )
+                .into_response();
+        }
+    };
     // #1274 — voir `zones::refus_de_resolution_volume`. Le refus vient AVANT
     // le verrou audiophile et avant l'orchestrateur : rien n'est envoyé au
     // périphérique, et rien n'est persisté, pour une consigne qui n'a nulle
@@ -4311,7 +4322,8 @@ async fn set_volume(
         // l'a remonté à 100 % : `volume_db` vaudra alors 0.
         Ok(()) => Json(json!({
             "volume": volume,
-            "volume_db": tune_core::audio::volume_scale::linear_to_db(volume),
+            "volume_db": echelle.vers_db(volume),
+            "volume_curve": echelle.code(),
         }))
         .into_response(),
         Err(error) => output_command_error_response(error),

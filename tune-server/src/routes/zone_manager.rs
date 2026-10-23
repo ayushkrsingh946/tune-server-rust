@@ -183,7 +183,15 @@ async fn overview(State(state): State<AppState>) -> Json<Value> {
             "output_device_id": z.output_device_id,
             "volume": z.volume / 100.0,
             // #1274 — lecture en dB du volume ci-dessus, `null` = silence.
-            "volume_db": tune_core::audio::volume_scale::linear_to_db(z.volume / 100.0),
+            // #6787 — sur l'échelle de la zone (`volume_curve`).
+            "volume_db": tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(
+                z.output_type.as_deref(),
+            )
+            .vers_db(z.volume / 100.0),
+            "volume_curve": tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(
+                z.output_type.as_deref(),
+            )
+            .code(),
             "muted": z.muted,
             "state": match ps.state {
                 tune_core::playback::PlayState::Playing => "playing",
@@ -237,7 +245,15 @@ async fn list_managed_zones(State(state): State<AppState>) -> Json<Value> {
             "output_device_id": z.output_device_id,
             "volume": z.volume / 100.0,
             // #1274 — lecture en dB du volume ci-dessus, `null` = silence.
-            "volume_db": tune_core::audio::volume_scale::linear_to_db(z.volume / 100.0),
+            // #6787 — sur l'échelle de la zone (`volume_curve`).
+            "volume_db": tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(
+                z.output_type.as_deref(),
+            )
+            .vers_db(z.volume / 100.0),
+            "volume_curve": tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(
+                z.output_type.as_deref(),
+            )
+            .code(),
             "muted": z.muted,
             "state": match ps.state {
                 tune_core::playback::PlayState::Playing => "playing",

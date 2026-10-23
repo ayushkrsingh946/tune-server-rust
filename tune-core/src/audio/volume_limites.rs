@@ -36,9 +36,12 @@
 //!
 //! ## Stockage
 //!
-//! Deux réglages clé/valeur, en FRACTION linéaire 0..1 (l'échelle de
+//! Deux réglages clé/valeur, en FRACTION 0..1 (l'échelle de
 //! `zones.volume / 100`) : `zone_{id}_volume_limit_safety` et
-//! `zone_{id}_volume_limit_comfort`. Absents par défaut : rien ne change
+//! `zone_{id}_volume_limit_comfort`. #6787 — sur une sortie logicielle, la
+//! fraction est une position sur la loi perceptive : une limite posée avant
+//! la bascule est gardée telle quelle et y borne donc PLUS BAS qu'avant
+//! (`gain_perceptif(s) <= s`), jamais plus haut. Absents par défaut : rien ne change
 //! tant que personne ne règle. Le client peut parler en % ou en dB ; la
 //! conversion passe par [`super::volume_scale`], le seul endroit qui la fait.
 //!
@@ -234,11 +237,19 @@ pub fn cible_du_pas(actuel: f64, delta: f64) -> f64 {
 /// La cible d'un pas de `delta_db` décibels depuis `actuel`. Depuis le
 /// silence, un pas en dB ne monte jamais : il part alors du premier pas
 /// linéaire ([`PAS_PAR_DEFAUT`]).
-pub fn cible_du_pas_db(actuel: f64, delta_db: f64) -> f64 {
-    match super::volume_scale::linear_to_db(actuel) {
+///
+/// #6787 — le dB est lu et écrit sur l'échelle de la zone : sur une sortie
+/// logicielle, +1 dB est un dB de GAIN, rendu en position.
+pub fn cible_du_pas_db(
+    echelle: super::volume_scale::EchelleDeVolume,
+    actuel: f64,
+    delta_db: f64,
+) -> f64 {
+    match echelle.vers_db(actuel) {
         None if delta_db > 0.0 => PAS_PAR_DEFAUT,
         None => 0.0,
-        Some(db) => super::volume_scale::db_to_linear((db + delta_db).min(0.0))
+        Some(db) => echelle
+            .depuis_db((db + delta_db).min(0.0))
             .unwrap_or(actuel)
             .clamp(0.0, 1.0),
     }
@@ -255,22 +266,30 @@ pub fn publier(
     db: &Arc<dyn DbBackend>,
     zone_id: i64,
 ) {
-    inserer(obj, &lire(db, zone_id));
+    inserer(
+        obj,
+        &lire(db, zone_id),
+        super::volume_scale::echelle_de_la_zone(db, zone_id),
+    );
     obj.insert(
         "volume_limits_refusal".into(),
         serde_json::json!(mode_sans_limite(db, zone_id).map(ModeSansLimite::code)),
     );
 }
 
-fn inserer(obj: &mut serde_json::Map<String, serde_json::Value>, limites: &LimitesDeVolume) {
-    use super::volume_scale::linear_to_db;
+/// #6787 — les `_db` se lisent sur l'échelle de la zone, comme `volume_db`.
+fn inserer(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    limites: &LimitesDeVolume,
+    echelle: super::volume_scale::EchelleDeVolume,
+) {
     obj.insert(
         "volume_limit_safety".into(),
         serde_json::json!(limites.securite),
     );
     obj.insert(
         "volume_limit_safety_db".into(),
-        serde_json::json!(limites.securite.and_then(linear_to_db)),
+        serde_json::json!(limites.securite.and_then(|v| echelle.vers_db(v))),
     );
     obj.insert(
         "volume_limit_comfort".into(),
@@ -278,7 +297,7 @@ fn inserer(obj: &mut serde_json::Map<String, serde_json::Value>, limites: &Limit
     );
     obj.insert(
         "volume_limit_comfort_db".into(),
-        serde_json::json!(limites.confort.and_then(linear_to_db)),
+        serde_json::json!(limites.confort.and_then(|v| echelle.vers_db(v))),
     );
 }
 
@@ -337,10 +356,15 @@ mod tests {
 
     #[test]
     fn le_pas_en_db() {
+        use crate::audio::volume_scale::EchelleDeVolume::{Lineaire, Perceptive};
         // −6 dB + 6 dB = 0 dB.
-        assert!((cible_du_pas_db(0.5011872336, 6.0) - 1.0).abs() < 1e-6);
-        assert_eq!(cible_du_pas_db(0.0, 1.0), PAS_PAR_DEFAUT);
-        assert_eq!(cible_du_pas_db(0.0, -1.0), 0.0);
+        assert!((cible_du_pas_db(Lineaire, 0.5011872336, 6.0) - 1.0).abs() < 1e-6);
+        assert_eq!(cible_du_pas_db(Lineaire, 0.0, 1.0), PAS_PAR_DEFAUT);
+        assert_eq!(cible_du_pas_db(Lineaire, 0.0, -1.0), 0.0);
+        // #6787 — sur une sortie logicielle, 50 % = −30 dB ; +6 dB → −24 dB,
+        // soit la position 0,6.
+        assert!((cible_du_pas_db(Perceptive, 0.5, 6.0) - 0.6).abs() < 1e-9);
+        assert_eq!(cible_du_pas_db(Perceptive, 0.0, 1.0), PAS_PAR_DEFAUT);
         assert_eq!(cible_du_pas(0.99, 0.02), 1.0);
         assert_eq!(cible_du_pas(0.01, -0.02), 0.0);
     }

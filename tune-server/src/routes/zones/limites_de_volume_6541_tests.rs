@@ -405,3 +405,76 @@ async fn sous_pure_verrouille_baisser_ne_fait_jamais_partir_100_6721() {
     assert_eq!(statut, StatusCode::NO_CONTENT, "{corps}");
     assert_eq!(recus(&state).await, vec![1.0]);
 }
+
+/// #6787 — sur une sortie LOCALE (factice), le volume est une position sur la
+/// loi perceptive : un dB demandé (consigne, limite, pas) est un dB de GAIN,
+/// et les réponses le relisent sur la même échelle (`volume_curve: db60`).
+/// Sur l'appareil réseau du banc ci-dessus, rien ne change (`linear`).
+#[tokio::test]
+async fn sur_une_sortie_locale_les_db_suivent_la_loi_perceptive_6787() {
+    const LOCALE: &str = "local:dac-6787";
+    let state = crate::state::AppState::new(":memory:", 0, Default::default()).unwrap();
+    let app = crate::routes::router(state.clone());
+    let id = ZoneRepo::with_backend(state.backend.clone())
+        .create("Bureau", Some("local"), Some(LOCALE))
+        .unwrap();
+    state.outputs.lock().await.register(Box::new(
+        MockOutput::new(LOCALE, "Bureau").with_type("local"),
+    ));
+    state.playback.set_volume(id, 0.2).await;
+
+    // −30 dB demandés : la position 0,5, relue −30 dB.
+    let (statut, rendu) = appeler(
+        &app,
+        "POST",
+        &format!("/api/v1/zones/{id}/volume"),
+        json!({ "volume_db": -30.0 }),
+    )
+    .await;
+    assert_eq!(statut, StatusCode::OK, "{rendu}");
+    assert!(proche(rendu["volume"].as_f64().unwrap(), 0.5), "{rendu}");
+    assert!(
+        proche(rendu["volume_db"].as_f64().unwrap(), -30.0),
+        "{rendu}"
+    );
+    assert_eq!(rendu["volume_curve"], "db60");
+
+    // Limite de sécurité à −12 dB : la fraction 0,8, publiée à −12 dB.
+    let limites = regler(&app, id, json!({ "safety_db": -12.0 })).await;
+    assert!(
+        proche(limites["volume_limit_safety"].as_f64().unwrap(), 0.8),
+        "{limites}"
+    );
+    assert!(
+        proche(limites["volume_limit_safety_db"].as_f64().unwrap(), -12.0),
+        "{limites}"
+    );
+
+    // Un pas de +6 dB depuis −30 dB : −24 dB, la position 0,6.
+    let (statut, pas) = appeler(
+        &app,
+        "POST",
+        &format!("/api/v1/zones/{id}/volume/step"),
+        json!({ "direction": "up", "step_db": 6.0 }),
+    )
+    .await;
+    assert_eq!(statut, StatusCode::OK, "{pas}");
+    assert!(proche(pas["volume"].as_f64().unwrap(), 0.6), "{pas}");
+    assert!(proche(pas["volume_db"].as_f64().unwrap(), -24.0), "{pas}");
+    assert_eq!(pas["volume_curve"], "db60");
+
+    // L'appareil réseau, lui, reste sur son échelle : 50 % = −6 dB.
+    let (app_reseau, _state, zone_reseau) = serveur().await;
+    let (_, lin) = appeler(
+        &app_reseau,
+        "POST",
+        &format!("/api/v1/zones/{zone_reseau}/volume"),
+        json!({ "volume": 0.5 }),
+    )
+    .await;
+    assert_eq!(lin["volume_curve"], "linear", "{lin}");
+    assert!(
+        (lin["volume_db"].as_f64().unwrap() + 6.0206).abs() < 1e-3,
+        "{lin}"
+    );
+}
