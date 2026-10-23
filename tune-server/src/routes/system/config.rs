@@ -465,6 +465,12 @@ pub(super) async fn get_config(
             tune_core::taches_de_fond::perimetre::CLE_RACINES_EXCLUES,
             json!([]),
         ),
+        // Fil 2173 — les dossiers auxquels les passes qui décodent se
+        // limitent. Vide par défaut : toute la bibliothèque.
+        (
+            tune_core::taches_de_fond::perimetre::CLE_DOSSIERS_INCLUS,
+            json!([]),
+        ),
         // #6198 — les genres de la passe CLAP : retenus (vide : tous) et
         // écartés (vide : aucun). Ils ne touchent que le CLAP.
         (
@@ -1255,14 +1261,21 @@ fn normaliser_politique_de_lecture(
 fn normaliser_perimetre_des_analyses(
     values: &mut serde_json::Map<String, Value>,
 ) -> Result<bool, AppError> {
-    use tune_core::taches_de_fond::perimetre::{CLE_RACINES_EXCLUES, normaliser};
-    let Some(brut) = values.get(CLE_RACINES_EXCLUES) else {
-        return Ok(false);
+    use tune_core::taches_de_fond::perimetre::{
+        CLE_DOSSIERS_INCLUS, CLE_RACINES_EXCLUES, normaliser,
     };
-    let liste = normaliser(brut)
-        .map_err(|e| AppError::bad_request(format!("{CLE_RACINES_EXCLUES} : {e}")))?;
-    values.insert(CLE_RACINES_EXCLUES.to_string(), json!(liste));
-    Ok(true)
+    // Fil 2173 — les dossiers inclus, même forme, même refus, et la même
+    // campagne ReplayGain à refermer : ils changent le périmètre compté.
+    let mut touche = false;
+    for cle in [CLE_RACINES_EXCLUES, CLE_DOSSIERS_INCLUS] {
+        let Some(brut) = values.get(cle) else {
+            continue;
+        };
+        let liste = normaliser(brut).map_err(|e| AppError::bad_request(format!("{cle} : {e}")))?;
+        values.insert(cle.to_string(), json!(liste));
+        touche = true;
+    }
+    Ok(touche)
 }
 
 /// #6198 — les genres de la passe CLAP, retenus et écartés : la même forme
@@ -5880,7 +5893,7 @@ mod perimetre_des_analyses_5593_tests {
     use axum::http::HeaderMap;
     use serde_json::{Value, json};
     use tune_core::db::settings_repo::SettingsRepo;
-    use tune_core::taches_de_fond::perimetre::CLE_RACINES_EXCLUES;
+    use tune_core::taches_de_fond::perimetre::{CLE_DOSSIERS_INCLUS, CLE_RACINES_EXCLUES};
 
     async fn config(state: &AppState) -> Value {
         get_config(
@@ -5926,6 +5939,32 @@ mod perimetre_des_analyses_5593_tests {
             tune_core::taches_de_fond::perimetre::racines_exclues(&state.backend),
             vec!["\\\\192.168.0.126\\musique".to_string()]
         );
+    }
+
+    /// Fil 2173 — les dossiers inclus : publiés vides, normalisés comme les
+    /// racines exclues, refusés sous une autre forme, et leur écriture
+    /// referme la campagne ReplayGain (`Ok(true)`).
+    #[tokio::test]
+    async fn les_dossiers_inclus_sont_publies_vides_et_normalises_2173() {
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let c = config(&state).await;
+        assert_eq!(c[CLE_DOSSIERS_INCLUS], json!([]), "{c}");
+        let mut v: serde_json::Map<String, Value> =
+            json!({ CLE_DOSSIERS_INCLUS: [" /music/Jazz ", "", "/music/Jazz"] })
+                .as_object()
+                .unwrap()
+                .clone();
+        assert!(matches!(
+            normaliser_perimetre_des_analyses(&mut v),
+            Ok(true)
+        ));
+        assert_eq!(v[CLE_DOSSIERS_INCLUS], json!(["/music/Jazz"]));
+        let mut mauvais: serde_json::Map<String, Value> =
+            json!({ CLE_DOSSIERS_INCLUS: "/music/Jazz" })
+                .as_object()
+                .unwrap()
+                .clone();
+        assert!(normaliser_perimetre_des_analyses(&mut mauvais).is_err());
     }
 
     /// Une forme qui se relirait « rien d'exclu » en silence est REFUSÉE.
