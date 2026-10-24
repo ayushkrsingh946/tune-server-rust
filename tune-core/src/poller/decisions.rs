@@ -526,6 +526,13 @@ pub fn lecture_sans_progres_etablie(
         })
 }
 
+/// #6932 — la panique n° `paniques` d'un tour du sondeur s'écrit-elle au
+/// journal ? La première toujours, puis une sur soixante : une panique qui se
+/// répète à chaque tour (une seconde) reste visible sans noyer le journal.
+pub fn panique_du_tour_a_journaliser(paniques: u64) -> bool {
+    paniques == 1 || paniques.is_multiple_of(60)
+}
+
 /// Une relance automatique après démarrage mort est-elle permise ?
 /// Au plus une par fenêtre : si la précédente date de moins de
 /// DEAD_START_RETRY_COOLDOWN_SECS, l'échec suivant coupe la zone comme
