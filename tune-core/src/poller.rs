@@ -1540,3 +1540,9 @@ mod zone_masquee_en_lecture_4970;
 /// l'arrivée du contrat s'annonce — une fois, et une seule.
 #[cfg(test)]
 mod annonce_du_contrat_de_signal_4559;
+
+/// #6717 — un renderer qui se dit arrêté mais dont la position avance joue :
+/// sa zone n'est plus coupée sur « flux à sec ». Le banc monte le vrai `tick`
+/// et rejoue les deux coupures du journal, plus la contre-garde.
+#[cfg(test)]
+mod arret_dementi_par_la_position_6717;
