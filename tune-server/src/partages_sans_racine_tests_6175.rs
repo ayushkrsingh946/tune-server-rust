@@ -206,6 +206,9 @@ async fn le_rapport_se_tait_quand_le_partage_est_declare() {
 /// Un scan lancé sans dossier finissait sur `{"no_dirs": true}` : l'écran
 /// apprenait qu'il n'y avait rien à lire, pas que le partage monté suffisait.
 #[tokio::test]
+// Le verrou des scans d'épreuve est tenu à travers les `.await` à dessein :
+// c'est lui qui tient les autres scans d'épreuve à l'écart.
+#[allow(clippy::await_holding_lock)]
 async fn le_scan_sans_dossier_nomme_le_partage_non_declare() {
     let _seul = crate::routes::system::scan::serialiser_les_scans_de_test_sans_bloquer().await;
     crate::routes::system::scan::attendre_que_le_droit_de_scanner_soit_libre().await;
