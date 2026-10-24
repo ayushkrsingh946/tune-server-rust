@@ -681,6 +681,8 @@ impl PositionPoller {
             // Derniere valeur annoncee de `levels_available`, par zone.
             let mut niveaux_annonces: HashMap<i64, bool> = HashMap::new();
 
+            let mut paniques: u64 = 0;
+
             loop {
                 // Wake on either the regular 1-second tick OR an immediate
                 // notification from a local output that finished a track.
@@ -688,11 +690,62 @@ impl PositionPoller {
                     _ = ticker.tick() => {},
                     _ = notify.notified() => {},
                 }
-                self.tick(&mut poll_states, &mut idle_backoff, &startup_at)
-                    .await;
-                self.annoncer_bascule_des_niveaux(&mut niveaux_annonces)
-                    .await;
+                if let Err(message) = self
+                    .tour_protege(
+                        &mut poll_states,
+                        &mut idle_backoff,
+                        &startup_at,
+                        &mut niveaux_annonces,
+                    )
+                    .await
+                {
+                    paniques += 1;
+                    if decisions::panique_du_tour_a_journaliser(paniques) {
+                        tracing::error!(
+                            panique = %message,
+                            paniques_total = paniques,
+                            "position_poller_tick_panicked"
+                        );
+                    }
+                }
             }
+        })
+    }
+
+    /// #6932 — un tour du sondeur, protégé contre sa propre panique.
+    ///
+    /// Le sondeur est UNE tâche pour toutes les zones, lancée une seule fois
+    /// au démarrage et que personne ne surveille. Une panique dans un tour —
+    /// une seule zone, un seul relevé — tuait la tâche : plus aucune position
+    /// relevée (la barre d'avancement figée sur toutes les zones), plus aucune
+    /// fin de piste constatée (la lecture s'arrête au bout du titre en cours),
+    /// jusqu'au redémarrage du serveur. Sous Windows la panique n'allait qu'au
+    /// `tune-crash.log`, pas au journal joint aux rapports.
+    ///
+    /// La panique est rattrapée ici et rendue en `Err(message)` ; le tour
+    /// suivant repart. Les verrous tokio se libèrent au déroulement, les
+    /// verrous std empoisonnés sont déjà relus par `into_inner` dans le
+    /// sondeur.
+    pub(crate) async fn tour_protege(
+        &self,
+        poll_states: &mut HashMap<i64, ZonePollState>,
+        idle_backoff: &mut HashMap<i64, IdlePollBackoff>,
+        startup_at: &Instant,
+        niveaux_annonces: &mut HashMap<i64, bool>,
+    ) -> Result<(), String> {
+        use futures_util::FutureExt;
+        std::panic::AssertUnwindSafe(async {
+            self.tick(poll_states, idle_backoff, startup_at).await;
+            self.annoncer_bascule_des_niveaux(niveaux_annonces).await;
+        })
+        .catch_unwind()
+        .await
+        .map_err(|charge| {
+            charge
+                .downcast_ref::<&str>()
+                .map(|m| m.to_string())
+                .or_else(|| charge.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panique sans message".to_string())
         })
     }
 
@@ -1087,6 +1140,10 @@ mod tests;
 
 #[cfg(test)]
 mod status_timeout_tests;
+
+/// #6932 — une panique dans un tour ne tue plus le sondeur.
+#[cfg(test)]
+mod sondeur_survit_a_une_panique_6932;
 
 /// Sourdine par zéro (Eversolo DMP-A8) : le silence commandé n'est pas
 /// rouvert par le volume que l'appareil remonte.
