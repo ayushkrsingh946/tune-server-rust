@@ -844,6 +844,20 @@ fn ecrire_album_avec(
     };
     let artist_id = artiste.id;
 
+    // #6459 — l'album est rangé sous le dossier de la PARUTION, comme à
+    // l'import ordinaire (`album_folder`) : la feuille d'un dossier `CD1/`
+    // vise l'album de `Parution/`, pas un album à elle. Sans cela, chaque
+    // disque d'une parution à une feuille par disque naissait en album à
+    // part, sous « Unknown Artist » quand la feuille ne nomme personne. Une
+    // image SACD garde l'identité que lui donne son Master TOC.
+    let dossier_album = match imposition {
+        Some(_) => dossier.to_path_buf(),
+        None => super::album_folder::album_folder(&dossier.join("album.cue").to_string_lossy())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dossier.to_path_buf()),
+    };
+    let dossier = dossier_album.as_path();
+
     // Le titre d'album manquant retombe sur le nom du dossier : une feuille
     // sans `TITLE` reste un album, et un album sans nom est introuvable.
     //
@@ -3025,6 +3039,75 @@ mod tests {
                 ),
                 ("Feuille Deux".to_string(), quartet.clone(), live, quartet),
             ]
+        );
+    }
+
+    /// 🔴 #6459 (Lulu, fil 2310) — une parution rangée en `CD1/`, `CD2/`, une
+    /// feuille par disque, reste UN album : celui que l'import ordinaire a
+    /// rangé sous le dossier de la parution (`album_folder`), avec son artiste.
+    ///
+    /// La passe CUE identifiait l'album par le dossier de la FEUILLE
+    /// (`…/CD1`). Aucune ligne n'y était rangée, la feuille sans `PERFORMER`
+    /// cherchait l'album sous « Unknown Artist », et chaque disque naissait en
+    /// album à part : « Wagner - Ouvertures » d'« Unknown Artist », en double,
+    /// pendant que l'album de la parution, celui de Wagner, se vidait.
+    #[test]
+    fn la_feuille_d_un_dossier_de_disque_vise_l_album_de_la_parution_6459() {
+        const DISQUE: &str = "TITLE \"Ouvertures\"\nFILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"Rienzi\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Tannhäuser\"\n    INDEX 01 00:01:00\n";
+        let d = tempfile::TempDir::new().unwrap();
+        let parution = d.path().join("Wagner - Ouvertures");
+        let disques: Vec<PathBuf> = ["CD1", "CD2"].iter().map(|n| parution.join(n)).collect();
+        for disque in &disques {
+            fs::create_dir_all(disque).unwrap();
+            ecrire_wav(&disque.join("image.wav"), 4_000);
+            fs::write(disque.join("album.cue"), DISQUE).unwrap();
+        }
+
+        let db = base();
+        let album_repo = AlbumRepo::with_backend(db.clone());
+        let wagner = ArtistRepo::with_backend(db.clone())
+            .get_or_create("Richard Wagner", None, None)
+            .unwrap()
+            .id
+            .unwrap();
+        // L'état que laisse l'import ordinaire : la parution est un album,
+        // rangé sous SON dossier, pas sous celui d'un disque.
+        let album = album_repo
+            .get_or_create_for_folder(
+                &parution.to_string_lossy(),
+                "Ouvertures",
+                wagner,
+                None,
+                None,
+            )
+            .unwrap()
+            .id
+            .unwrap();
+
+        let (_, bilan, _) = inventorier_et_ecrire(db.clone(), &disques, &racines(d.path()));
+        assert_eq!(bilan.echecs, 0, "bilan : {bilan:?}");
+
+        let pistes = TrackRepo::with_backend(db.clone());
+        for disque in &disques {
+            let image = disque.join("image.wav").to_string_lossy().into_owned();
+            for debut in [0, 1_000] {
+                let piste = pistes
+                    .get_by_cue_identity(&image, debut)
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("piste {image}@{debut} absente"));
+                assert_eq!(
+                    piste.album_id,
+                    Some(album),
+                    "la feuille de {} a rangé sa piste dans un autre album que celui de la parution",
+                    disque.display()
+                );
+            }
+        }
+        let apres = album_repo.get(album).unwrap().unwrap();
+        assert_eq!(
+            apres.artist_id,
+            Some(wagner),
+            "l'album de la parution a perdu son artiste"
         );
     }
 }
