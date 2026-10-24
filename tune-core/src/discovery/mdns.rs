@@ -816,6 +816,12 @@ enum DoublonAirplay {
 /// son `deviceid`. Comparés à la seule adresse, le second était pris pour un
 /// doublon du premier et n'apparaissait jamais (#6947, Verox sur Raspberry Pi
 /// à deux sorties AirPlay).
+///
+/// Limite connue : deux récepteurs qui annoncent la MÊME identité restent
+/// fusionnés. C'est le cas par défaut de shairport-sync, qui prend la MAC de
+/// l'interface pour `deviceid` ; il faut alors un `airplay_device_id` propre
+/// à chaque instance. Les distinguer aussi par port et nom d'instance est
+/// suivi dans #6960.
 fn meme_appareil_airplay(a: &DiscoveredDevice, b: &DiscoveredDevice) -> bool {
     if let (Some(x), Some(y)) = (identite_annoncee_de(a), identite_annoncee_de(b)) {
         return x == y;
