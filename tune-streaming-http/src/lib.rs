@@ -17,6 +17,7 @@ use tune_core::favorites_sort::TriFavoris;
 use tune_core::streaming::ServiceRegistry;
 use tune_core::streaming::traits::StreamingService;
 
+mod connexion_spotify_distante;
 pub mod deezer_proxy_handler;
 pub mod etiquettes_langue;
 
@@ -610,6 +611,12 @@ where
         .route("/youtube/moods/{params}", get(youtube_mood))
         .route("/youtube/library", get(youtube_library))
         .route("/spotify/callback", get(spotify_callback))
+        // #6784 — finir la connexion Spotify depuis un téléphone.
+        .route(
+            "/spotify/connect",
+            get(connexion_spotify_distante::page_connexion)
+                .post(connexion_spotify_distante::terminer_connexion),
+        )
         .route("/tidal/callback", get(tidal_callback))
         .route_layer(axum::middleware::from_fn(contexte_diagnostic_streaming))
 }
