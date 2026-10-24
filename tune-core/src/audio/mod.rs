@@ -99,6 +99,8 @@ pub mod m4a;
 /// un décodeur livré la lit, compté-nommé sinon (#3633).
 pub mod matroska;
 pub mod mixer;
+/// Modes propres de la pièce, filtres d'atténuation seulement (#6709).
+pub mod modes_de_piece;
 /// Le repli mono dit quand il n'agit pas (#3254) — la disponibilité par zone du
 /// réglage `zone_{id}_mono_downmix` (#2362).
 pub mod mono_downmix;

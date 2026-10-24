@@ -1,6 +1,6 @@
 {
   "genere_depuis": {
-    "web_sha": "cabd861bcb2e643caa95cab8686d2c43e7a4fb95",
+    "web_sha": "c474c0c49c23654268cff76525eb52349219d150",
     "regenerer": "scripts/web-contract-map.py --web <tune-web-client> --web-sha <sha> -o docs/contrat-web.json",
     "gardee_par": [
       "tune-server/tests/web_response_contracts.rs (la_carte_web_ne_cite_que_des_routes_encore_servies)",
@@ -439,6 +439,21 @@
       "champs_optionnels": [
         "zone_id",
         "created_at"
+      ]
+    },
+    {
+      "route": "/eq/room-modes",
+      "methode": "POST",
+      "type": "RoomModes",
+      "liste": false,
+      "champs_obligatoires": [
+        "filters",
+        "modes",
+        "modes_total",
+        "assumptions"
+      ],
+      "champs_optionnels": [
+        "bounds"
       ]
     },
     {
@@ -6886,7 +6901,7 @@
     }
   ],
   "resume": {
-    "routes_cartographiees": 343,
+    "routes_cartographiees": 344,
     "appels_non_resolus": 155
   }
 }
