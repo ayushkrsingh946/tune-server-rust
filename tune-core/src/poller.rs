@@ -690,15 +690,15 @@ impl PositionPoller {
                     _ = ticker.tick() => {},
                     _ = notify.notified() => {},
                 }
-                if let Err(message) = self
-                    .tour_protege(
-                        &mut poll_states,
-                        &mut idle_backoff,
-                        &startup_at,
-                        &mut niveaux_annonces,
-                    )
-                    .await
-                {
+                // #6932 — le tour passe par `tour_protege` : sa panique ne
+                // tue plus le sondeur de toutes les zones.
+                let tour = async {
+                    self.tick(&mut poll_states, &mut idle_backoff, &startup_at)
+                        .await;
+                    self.annoncer_bascule_des_niveaux(&mut niveaux_annonces)
+                        .await;
+                };
+                if let Err(message) = Self::tour_protege(tour).await {
                     paniques += 1;
                     if decisions::panique_du_tour_a_journaliser(paniques) {
                         tracing::error!(
@@ -726,27 +726,24 @@ impl PositionPoller {
     /// suivant repart. Les verrous tokio se libèrent au déroulement, les
     /// verrous std empoisonnés sont déjà relus par `into_inner` dans le
     /// sondeur.
+    ///
+    /// Le tour lui-même (relevé puis annonce de la bascule des niveaux) reste
+    /// écrit dans `spawn` : la garde `tests/poller_bascule.rs` (#2285) y
+    /// cherche l'appel à l'annonce.
     pub(crate) async fn tour_protege(
-        &self,
-        poll_states: &mut HashMap<i64, ZonePollState>,
-        idle_backoff: &mut HashMap<i64, IdlePollBackoff>,
-        startup_at: &Instant,
-        niveaux_annonces: &mut HashMap<i64, bool>,
+        tour: impl std::future::Future<Output = ()>,
     ) -> Result<(), String> {
         use futures_util::FutureExt;
-        std::panic::AssertUnwindSafe(async {
-            self.tick(poll_states, idle_backoff, startup_at).await;
-            self.annoncer_bascule_des_niveaux(niveaux_annonces).await;
-        })
-        .catch_unwind()
-        .await
-        .map_err(|charge| {
-            charge
-                .downcast_ref::<&str>()
-                .map(|m| m.to_string())
-                .or_else(|| charge.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "panique sans message".to_string())
-        })
+        std::panic::AssertUnwindSafe(tour)
+            .catch_unwind()
+            .await
+            .map_err(|charge| {
+                charge
+                    .downcast_ref::<&str>()
+                    .map(|m| m.to_string())
+                    .or_else(|| charge.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "panique sans message".to_string())
+            })
     }
 
     /// Annoncer quand une zone se met — ou cesse — de mesurer ses niveaux.

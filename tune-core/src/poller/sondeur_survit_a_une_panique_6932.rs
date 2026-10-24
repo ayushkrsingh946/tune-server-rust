@@ -11,9 +11,8 @@
 //! dont le premier relevé panique, puis qui joue à 5 s : la position doit être
 //! publiée par un tour suivant.
 //!
-//! Contre-épreuve : dans `spawn`, remplacer l'appel à `tour_protege` par
-//! `self.tick(...)` puis `self.annoncer_bascule_des_niveaux(...)` sans
-//! `catch_unwind` fait tomber
+//! Contre-épreuve : dans `spawn`, remplacer `Self::tour_protege(tour).await`
+//! par `tour.await` (le tour sans `catch_unwind`) fait tomber
 //! `une_panique_dans_un_tour_ne_fige_pas_la_position`.
 
 use super::*;
