@@ -1625,6 +1625,9 @@ pub(crate) use preconfiguration::preconfigurer_zone as preconfigurer_zone_decouv
 mod groupes;
 pub use groupes::*;
 
+// #6155 — les suiveuses d'un groupe jouent ce que joue la meneuse.
+pub mod relais_de_groupe_6155;
+
 #[cfg(test)]
 mod signal_path_tests;
 
