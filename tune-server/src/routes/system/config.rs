@@ -469,6 +469,13 @@ pub(super) async fn get_config(
             tune_core::taches_de_fond::vitesse::CLE_REGLAGE,
             json!(tune_core::taches_de_fond::vitesse::Vitesse::default().id()),
         ),
+        // #6713 — lever le bridage des analyses quand la température est
+        // illisible. Désactivé par défaut, publié avec son défaut pour que le
+        // client distingue « éteint » de « pas lu ».
+        (
+            tune_core::taches_de_fond::vitesse::CLE_LEVER_LE_BRIDAGE,
+            json!(tune_core::taches_de_fond::vitesse::LEVER_LE_BRIDAGE_DEFAUT),
+        ),
         // #5593 — le périmètre des passes de fond qui décodent : les racines
         // de bibliothèque exclues (ReplayGain, plage dynamique, empreintes,
         // CLAP). Vide par défaut : rien d'exclu, le comportement d'avant.
@@ -1267,6 +1274,36 @@ fn normaliser_vitesse_des_analyses(
     Ok(())
 }
 
+/// #6713 — « lever le bridage sans température lisible » : un booléen (ou
+/// `"true"`/`"false"`), sinon 400. Une autre valeur, gardée telle quelle,
+/// se relirait « non » sans un mot.
+fn normaliser_levee_du_bridage(
+    values: &mut serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    use tune_core::taches_de_fond::vitesse::CLE_LEVER_LE_BRIDAGE;
+    let Some(brut) = values.get(CLE_LEVER_LE_BRIDAGE) else {
+        return Ok(());
+    };
+    let valeur = match brut {
+        Value::Bool(b) => *b,
+        Value::String(s) if s.trim() == "true" => true,
+        Value::String(s) if s.trim() == "false" => false,
+        autre => {
+            return Err(AppError::bad_request(format!(
+                "{CLE_LEVER_LE_BRIDAGE} : un booléen est attendu, reçu {autre}"
+            )));
+        }
+    };
+    if valeur {
+        tracing::warn!(
+            "analyses_bridage_leve_par_reglage — sans température lisible, les analyses de fond \
+             tourneront à la vitesse réglée (choix de l'utilisateur, #6713)"
+        );
+    }
+    values.insert(CLE_LEVER_LE_BRIDAGE.to_string(), json!(valeur));
+    Ok(())
+}
+
 /// #5594 — les deux options des mesures communautaires : un booléen (ou
 /// `"true"`/`"false"`), sinon 400. Une autre valeur, gardée telle quelle, se
 /// relirait « non » sans un mot — et un opt-in ne se devine pas.
@@ -1606,6 +1643,7 @@ pub(super) async fn update_config(
     normaliser_plafond_aleatoire(&mut values)?;
     normaliser_pays_tendances_youtube(&mut values)?;
     normaliser_vitesse_des_analyses(&mut values)?;
+    normaliser_levee_du_bridage(&mut values)?;
     normaliser_mesures_communautaires(&mut values)?;
     let politique_de_lecture = normaliser_politique_de_lecture(&mut values)?;
     let perimetre_touche = normaliser_perimetre_des_analyses(&mut values)?;
@@ -5934,6 +5972,85 @@ mod vitesse_des_analyses_5519_tests {
         let mut vide = serde_json::Map::new();
         assert!(normaliser_vitesse_des_analyses(&mut vide).is_ok());
         assert!(vide.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod levee_du_bridage_6713_tests {
+    use super::{get_config, normaliser_levee_du_bridage, update_config};
+    use crate::auth::RequireAdmin;
+    use crate::routes::active_profile::{ActiveProfile, DEFAULT_PROFILE_ID};
+    use crate::state::AppState;
+    use axum::Json;
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
+    use serde_json::{Value, json};
+    use tune_core::taches_de_fond::vitesse::{CLE_LEVER_LE_BRIDAGE, bridage_leve};
+
+    /// #6713 — publié DÉSACTIVÉ par défaut ; le PATCH l'écrit, la passe le
+    /// relit (`bridage_leve`), et `GET /config` le republie.
+    #[tokio::test]
+    async fn desactive_par_defaut_puis_leve_par_le_patch() {
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let lire = || {
+            let state = state.clone();
+            async move {
+                get_config(
+                    HeaderMap::new(),
+                    ActiveProfile(DEFAULT_PROFILE_ID),
+                    State(state),
+                )
+                .await
+                .0
+            }
+        };
+        let c = lire().await;
+        assert_eq!(c[CLE_LEVER_LE_BRIDAGE], false, "{c}");
+        assert!(!bridage_leve(&state.backend));
+
+        let mut corps = serde_json::Map::new();
+        corps.insert(CLE_LEVER_LE_BRIDAGE.to_string(), json!(true));
+        update_config(
+            RequireAdmin,
+            ActiveProfile(DEFAULT_PROFILE_ID),
+            State(state.clone()),
+            Json(super::ConfigPatch(corps)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("update_config a échoué"))
+        .into_response();
+        assert!(
+            bridage_leve(&state.backend),
+            "le réglage écrit doit lever le bridage"
+        );
+        let c = lire().await;
+        assert_eq!(c[CLE_LEVER_LE_BRIDAGE], true, "{c}");
+    }
+
+    /// Un booléen passe, toute autre forme est REFUSÉE.
+    #[test]
+    fn seul_un_booleen_est_admis() {
+        for (brut, attendu) in [
+            (json!(true), true),
+            (json!(false), false),
+            (json!("true"), true),
+            (json!(" false "), false),
+        ] {
+            let mut v: serde_json::Map<String, Value> = json!({ CLE_LEVER_LE_BRIDAGE: brut })
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(normaliser_levee_du_bridage(&mut v).is_ok(), "{brut}");
+            assert_eq!(v[CLE_LEVER_LE_BRIDAGE], json!(attendu), "{brut}");
+        }
+        for mauvais in [json!("oui"), json!(1), json!(null), json!({})] {
+            let mut v: serde_json::Map<String, Value> = json!({ CLE_LEVER_LE_BRIDAGE: mauvais })
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(normaliser_levee_du_bridage(&mut v).is_err(), "{mauvais}");
+        }
     }
 }
 
