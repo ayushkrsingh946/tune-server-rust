@@ -844,19 +844,31 @@ fn ecrire_album_avec(
     };
     let artist_id = artiste.id;
 
-    // #6459 — l'album est rangé sous le dossier de la PARUTION, comme à
-    // l'import ordinaire (`album_folder`) : la feuille d'un dossier `CD1/`
-    // vise l'album de `Parution/`, pas un album à elle. Sans cela, chaque
-    // disque d'une parution à une feuille par disque naissait en album à
-    // part, sous « Unknown Artist » quand la feuille ne nomme personne. Une
-    // image SACD garde l'identité que lui donne son Master TOC.
+    // #6459 — quand l'import ordinaire a DÉJÀ rangé la parution sous son
+    // dossier (`album_folder` : `Parution/` pour un dossier `CD1/`), la
+    // feuille du disque rejoint cet album, avec son artiste. Sans cela, elle
+    // créait un album à elle, sous « Unknown Artist » quand la feuille ne
+    // nomme personne, et l'album de la parution se vidait.
+    //
+    // Sans album de la parution en base, rien ne change : chaque disque naît
+    // en album à part, et c'est la passe des coffrets automatiques
+    // (#5317/#6554) qui décide, par interprète, de les réunir. Une image SACD
+    // garde l'identité que lui donne son Master TOC.
     let dossier_album = match imposition {
-        Some(_) => dossier.to_path_buf(),
+        Some(_) => None,
+        // `album_folder` ne lit que le PARENT du chemin qu'on lui donne : le
+        // nom de fichier inventé n'y sert qu'à désigner ce dossier.
         None => super::album_folder::album_folder(&dossier.join("album.cue").to_string_lossy())
             .map(PathBuf::from)
-            .unwrap_or_else(|| dossier.to_path_buf()),
+            .filter(|parution| parution.as_path() != dossier)
+            .filter(|parution| {
+                matches!(
+                    album_repo.find_id_by_folder(&parution.to_string_lossy()),
+                    Ok(Some(_))
+                )
+            }),
     };
-    let dossier = dossier_album.as_path();
+    let dossier = dossier_album.as_deref().unwrap_or(dossier);
 
     // Le titre d'album manquant retombe sur le nom du dossier : une feuille
     // sans `TITLE` reste un album, et un album sans nom est introuvable.
@@ -3109,5 +3121,44 @@ mod tests {
             Some(wagner),
             "l'album de la parution a perdu son artiste"
         );
+    }
+
+    /// #6459, la limite — sans album de la parution en base, la feuille d'un
+    /// dossier `CD1/` ne remonte pas : chaque disque reste un album à part,
+    /// que la passe des coffrets automatiques (#5317/#6554) réunit ou non.
+    #[test]
+    fn sans_album_de_la_parution_chaque_disque_reste_un_album_6459() {
+        const DISQUE: &str = "TITLE \"Ouvertures\"\nFILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"Rienzi\"\n    INDEX 01 00:00:00\n";
+        let d = tempfile::TempDir::new().unwrap();
+        let parution = d.path().join("Wagner - Ouvertures");
+        let disques: Vec<PathBuf> = ["CD1", "CD2"].iter().map(|n| parution.join(n)).collect();
+        for disque in &disques {
+            fs::create_dir_all(disque).unwrap();
+            ecrire_wav(&disque.join("image.wav"), 4_000);
+            fs::write(disque.join("album.cue"), DISQUE).unwrap();
+        }
+
+        let db = base();
+        let (_, bilan, _) = inventorier_et_ecrire(db.clone(), &disques, &racines(d.path()));
+        assert_eq!(bilan.echecs, 0, "bilan : {bilan:?}");
+
+        let album_repo = AlbumRepo::with_backend(db.clone());
+        assert_eq!(
+            album_repo
+                .find_id_by_folder(&parution.to_string_lossy())
+                .unwrap(),
+            None,
+            "la passe CUE a créé un album sous le dossier de la parution"
+        );
+        for disque in &disques {
+            assert!(
+                album_repo
+                    .find_id_by_folder(&disque.to_string_lossy())
+                    .unwrap()
+                    .is_some(),
+                "le disque {} n'a pas son album",
+                disque.display()
+            );
+        }
     }
 }
