@@ -20,6 +20,10 @@ use crate::state::AppState;
 #[path = "discovery_media_server_tests_3786.rs"]
 mod media_server_tests_3786;
 
+#[cfg(test)]
+#[path = "renderer_allume_avant_le_serveur_tests_6961.rs"]
+mod renderer_allume_avant_le_serveur_tests_6961;
+
 /// Resolve a UPnP service `controlURL` (from the device description) into an
 /// absolute URL usable by the SOAP client.
 ///
@@ -1231,6 +1235,70 @@ async fn handle_ssdp_discovered(
 /// les suivants, le démarrage sondait un par un.
 const SONDE_RENDERER_BORNE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// #6961 — où envoyer le `M-SEARCH` unicast de recours, et combien de temps
+/// attendre sa réponse. Injectable pour qu'un banc tienne un faux répondeur
+/// sans privilège sur le port 1900.
+#[derive(Debug, Clone, Copy)]
+struct RecoursUnicast {
+    port_ssdp: u16,
+    budget: std::time::Duration,
+}
+
+impl RecoursUnicast {
+    const PRODUCTION: Self = Self {
+        port_ssdp: tune_core::discovery::redecouverte::PORT_SSDP,
+        budget: tune_core::discovery::redecouverte::BUDGET_REPONSE,
+    };
+}
+
+async fn sonder_a(
+    device_id: &str,
+    location: &str,
+    borne: std::time::Duration,
+) -> Option<tune_core::discovery::device::DiscoveredDevice> {
+    tokio::time::timeout(
+        borne,
+        tune_core::discovery::ssdp::probe_renderer(device_id, location),
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+/// #6961 — la `LOCATION` mémorisée ne répond plus : on demande à l'appareil,
+/// par un `M-SEARCH` unicast filtré sur son UDN, où il est désormais, et on
+/// sonde cette nouvelle adresse.
+///
+/// C'est le cas du NanoPlayer de Silviu : allumé avant le serveur, il ne
+/// s'annonce plus, et le port tiré à son redémarrage n'est plus celui du
+/// magasin. Sans ce recours, sa zone restait hors ligne jusqu'à ce qu'on
+/// redémarre l'appareil — seul geste qui lui faisait émettre un `NOTIFY`.
+async fn retrouver_par_unicast(
+    kr: &KnownRenderer,
+    borne: std::time::Duration,
+    recours: RecoursUnicast,
+) -> Option<tune_core::discovery::device::DiscoveredDevice> {
+    let nouvelle = tune_core::discovery::redecouverte::location_actuelle_par_unicast(
+        &kr.location,
+        recours.port_ssdp,
+        &kr.device_id,
+        recours.budget,
+    )
+    .await?;
+    if nouvelle == kr.location {
+        return None;
+    }
+    let dev = sonder_a(&kr.device_id, &nouvelle, borne).await?;
+    info!(
+        id = %kr.device_id,
+        name = %kr.name,
+        ancienne = %kr.location,
+        nouvelle = %nouvelle,
+        "known_renderer_retrouve_par_msearch_unicast"
+    );
+    Some(dev)
+}
+
 /// Sonde tous les renderers connus EN MÊME TEMPS, chacun borné, et rend les
 /// résultats dans l'ordre reçu — l'appelant applique ensuite séquentiellement.
 /// La durée totale est celle de la sonde la plus lente, plus la borne au pire,
@@ -1238,18 +1306,16 @@ const SONDE_RENDERER_BORNE: std::time::Duration = std::time::Duration::from_secs
 async fn sonder_les_renderers_en_parallele(
     renderers: Vec<KnownRenderer>,
     borne: std::time::Duration,
+    recours: RecoursUnicast,
 ) -> Vec<(
     KnownRenderer,
     Option<tune_core::discovery::device::DiscoveredDevice>,
 )> {
     futures_util::future::join_all(renderers.into_iter().map(|kr| async move {
-        let sonde = tokio::time::timeout(
-            borne,
-            tune_core::discovery::ssdp::probe_renderer(&kr.device_id, &kr.location),
-        )
-        .await
-        .ok()
-        .flatten();
+        let sonde = match sonder_a(&kr.device_id, &kr.location, borne).await {
+            Some(dev) => Some(dev),
+            None => retrouver_par_unicast(&kr, borne, recours).await,
+        };
         (kr, sonde)
     }))
     .await
@@ -1269,7 +1335,14 @@ async fn sonder_les_renderers_en_parallele(
 /// so we skip it and let live discovery handle the newcomer. Best-effort per
 /// device; failures are logged and never block boot. Mirrors
 /// `routes::devices::reregister_manual_devices`.
+///
+/// #6961 — quand la `LOCATION` mémorisée ne répond plus, un `M-SEARCH`
+/// unicast vers son hôte demande la nouvelle (voir [`retrouver_par_unicast`]).
 pub async fn reregister_known_renderers(state: &AppState) {
+    reregister_known_renderers_avec(state, RecoursUnicast::PRODUCTION).await;
+}
+
+async fn reregister_known_renderers_avec(state: &AppState, recours: RecoursUnicast) {
     let stored = load_known_renderers(&state.backend);
     if stored.is_empty() {
         return;
@@ -1331,7 +1404,7 @@ pub async fn reregister_known_renderers(state: &AppState) {
     // enregistrement, déduplicat par hôte) reste séquentielle et
     // déterministe : deux registres de renderers persistés coexistent, avec
     // des verdicts d'identité qui ne doivent pas courir l'un contre l'autre.
-    let sondes = sonder_les_renderers_en_parallele(renderers, SONDE_RENDERER_BORNE).await;
+    let sondes = sonder_les_renderers_en_parallele(renderers, SONDE_RENDERER_BORNE, recours).await;
     for (kr, sonde) in sondes {
         match sonde {
             Some(dev) => {
@@ -1354,7 +1427,9 @@ pub async fn reregister_known_renderers(state: &AppState) {
                     manufacturer: dev.manufacturer.as_deref().unwrap_or_default(),
                     model_name: dev.model.as_deref().unwrap_or_default(),
                 };
-                // Précondition : `probe_renderer` a lu `kr.location` mot pour mot.
+                // Précondition : `probe_renderer` a lu `kr.location` mot pour mot,
+                // ou la `LOCATION` que l'appareil a lui-même rendue à un
+                // M-SEARCH filtré sur cet UDN (#6961) — la même identité.
                 let verdict = compare_at_same_location(kr.identity(), observed);
                 match verdict {
                     IdentityVerdict::NoDisagreement | IdentityVerdict::SameHardware(_) => {
@@ -3145,7 +3220,12 @@ mod tests {
             })
             .collect();
         let depart = std::time::Instant::now();
-        let sondes = super::sonder_les_renderers_en_parallele(renderers, borne).await;
+        // Recours unicast vers un port fermé : seule la sonde HTTP est mesurée.
+        let recours = super::RecoursUnicast {
+            port_ssdp: 9,
+            budget: std::time::Duration::from_millis(50),
+        };
+        let sondes = super::sonder_les_renderers_en_parallele(renderers, borne, recours).await;
         let duree = depart.elapsed();
         assert!(
             duree < borne * 2,
