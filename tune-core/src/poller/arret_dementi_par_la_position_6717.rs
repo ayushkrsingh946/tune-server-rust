@@ -266,8 +266,20 @@ impl Banc {
 
     /// Un tour de sondeur ; le renderer, toujours `Stopped`, rapporte la
     /// position avancée de `pas_ms` depuis le tour d'avant.
+    ///
+    /// L'horloge de la piste avance d'autant : un renderer qui joue gagne
+    /// une seconde de position par seconde écoulée. Sans cela, la position
+    /// distance l'horloge du banc de plus de 15 s au seizième tour, et la
+    /// garde `stale_start_position` écarte tous les tours suivants : le
+    /// seuil de coupure n'est jamais atteint, correctif ou non.
     async fn tour(&mut self, pas_ms: u64) {
         self.status.lock().unwrap().position_ms += pas_ms;
+        // Une zone coupée n'est plus suivie : rien à faire avancer.
+        if let Some(ps) = self.polls.get_mut(&self.zone) {
+            let pas = Duration::from_millis(pas_ms);
+            ps.track_started_at = ps.track_started_at.and_then(|t| t.checked_sub(pas));
+            ps.track_loaded_at -= pas;
+        }
         self.poller
             .tick(&mut self.polls, &mut self.idle, &Instant::now())
             .await;
