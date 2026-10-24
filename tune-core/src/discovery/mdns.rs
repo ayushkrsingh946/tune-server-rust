@@ -563,6 +563,15 @@ fn service_to_device(
 
     // Extract capabilities from TXT records
     let mut caps = HashMap::new();
+    if output_type == OutputType::Airplay
+        && let Some(identite) =
+            identite_airplay_annoncee(info.get_property_val_str("deviceid"), raop_mac.as_deref())
+    {
+        caps.insert(
+            CLE_IDENTITE_AIRPLAY_ANNONCEE.to_string(),
+            serde_json::Value::String(identite),
+        );
+    }
     if let Some(model) = info.get_property_val_str("md") {
         device.model = Some(model.to_string());
         caps.insert(
@@ -747,6 +756,27 @@ fn mac_depuis_nom_raop(raw_name: &str) -> Option<String> {
     super::mac::normalize_mac(&raw_name[..pos])
 }
 
+/// Capacité qui porte l'identité qu'un récepteur AirPlay ANNONCE lui-même
+/// (#6947) — à distinguer de `mac_address`, que `enrich_identity` complète par
+/// la MAC de l'interface lue dans la table ARP, la même pour tous les
+/// récepteurs d'une même machine.
+pub const CLE_IDENTITE_AIRPLAY_ANNONCEE: &str = "airplay_identite_annoncee";
+
+/// L'identité annoncée par un récepteur AirPlay, normalisée : le TXT
+/// `deviceid` de `_airplay._tcp`, sinon la MAC du nom d'instance de
+/// `_raop._tcp`. `None` si l'annonce n'en porte aucune qui soit une MAC.
+fn identite_airplay_annoncee(deviceid: Option<&str>, raop_mac: Option<&str>) -> Option<String> {
+    deviceid
+        .and_then(super::mac::normalize_mac)
+        .or_else(|| raop_mac.and_then(super::mac::normalize_mac))
+}
+
+fn identite_annoncee_de(d: &DiscoveredDevice) -> Option<&str> {
+    d.capabilities
+        .get(CLE_IDENTITE_AIRPLAY_ANNONCEE)
+        .and_then(|v| v.as_str())
+}
+
 /// Verdict du dédoublonnage AirPlay — voir l'appelant dans `handle_event`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DoublonAirplay {
@@ -779,7 +809,23 @@ enum DoublonAirplay {
 /// l'adresse… ou la MAC : `_raop` la porte dans son nom d'instance,
 /// `_airplay` dans son TXT `deviceid`, et chaque service peut avoir résolu
 /// une adresse différente (IPv4 contre IPv6).
+///
+/// Quand les deux annonces portent chacune leur identité, c'est elle qui
+/// tranche, adresse ou pas : une même machine peut héberger PLUSIEURS
+/// récepteurs AirPlay, un par sortie audio, chacun avec son nom, son port et
+/// son `deviceid`. Comparés à la seule adresse, le second était pris pour un
+/// doublon du premier et n'apparaissait jamais (#6947, Verox sur Raspberry Pi
+/// à deux sorties AirPlay).
+///
+/// Limite connue : deux récepteurs qui annoncent la MÊME identité restent
+/// fusionnés. C'est le cas par défaut de shairport-sync, qui prend la MAC de
+/// l'interface pour `deviceid` ; il faut alors un `airplay_device_id` propre
+/// à chaque instance. Les distinguer aussi par port et nom d'instance est
+/// suivi dans #6960.
 fn meme_appareil_airplay(a: &DiscoveredDevice, b: &DiscoveredDevice) -> bool {
+    if let (Some(x), Some(y)) = (identite_annoncee_de(a), identite_annoncee_de(b)) {
+        return x == y;
+    }
     if a.host == b.host && !a.host.is_empty() {
         return true;
     }
@@ -1264,6 +1310,97 @@ mod tests {
             verdict_doublon_airplay([&stocke].into_iter(), &nouveau, ANNONCE_RAOP),
             DoublonAirplay::Ignorer
         );
+    }
+
+    fn recepteur_annonce(
+        id: &str,
+        nom: &str,
+        host: &str,
+        port: u16,
+        identite: &str,
+    ) -> DiscoveredDevice {
+        let mut d = appareil_sur_port(id, host, Some(identite), OutputType::Airplay, port);
+        d.name = nom.into();
+        d.capabilities.insert(
+            CLE_IDENTITE_AIRPLAY_ANNONCEE.to_string(),
+            serde_json::Value::String(identite.into()),
+        );
+        d
+    }
+
+    /// #6947 — une même machine (un Raspberry Pi) héberge deux récepteurs
+    /// AirPlay, un par sortie audio : même adresse, mais chacun son nom, son
+    /// port et son `deviceid`. Le second était pris pour un doublon du premier
+    /// et n'apparaissait jamais dans Tune.
+    #[test]
+    fn deux_recepteurs_airplay_d_une_meme_machine_restent_deux_sorties() {
+        let premier = recepteur_annonce(
+            "airplay-DC:A6:32:00:00:01",
+            "Sortie 1",
+            "192.168.1.60",
+            7000,
+            "DC:A6:32:00:00:01",
+        );
+        let second = recepteur_annonce(
+            "airplay-DC:A6:32:00:00:02",
+            "Sortie 2",
+            "192.168.1.60",
+            7001,
+            "DC:A6:32:00:00:02",
+        );
+        assert_eq!(
+            verdict_doublon_airplay([&premier].into_iter(), &second, ANNONCE_AIRPLAY),
+            DoublonAirplay::Nouveau,
+            "deux identités annoncées différentes à la même adresse sont deux \
+             récepteurs : le second ne doit pas être jeté comme doublon (#6947)"
+        );
+        assert_eq!(
+            verdict_doublon_airplay([&premier].into_iter(), &second, ANNONCE_RAOP),
+            DoublonAirplay::Nouveau,
+            "l'annonce `_raop` du second récepteur ne doit pas non plus déplacer \
+             le port du premier (#6947)"
+        );
+    }
+
+    /// La contre-épreuve : le `_raop` et le `_airplay` d'UN récepteur annoncent
+    /// la même identité (préfixe du nom RAOP = `deviceid`) et restent un seul
+    /// appareil.
+    #[test]
+    fn le_raop_et_l_airplay_d_un_meme_recepteur_restent_un_appareil() {
+        let airplay = recepteur_annonce(
+            "airplay-DC:A6:32:00:00:01",
+            "Sortie 1",
+            "192.168.1.60",
+            7000,
+            "DC:A6:32:00:00:01",
+        );
+        let raop = recepteur_annonce(
+            "airplay-192.168.1.60-7000",
+            "Sortie 1",
+            "192.168.1.60",
+            7000,
+            "DC:A6:32:00:00:01",
+        );
+        assert_eq!(
+            verdict_doublon_airplay([&airplay].into_iter(), &raop, ANNONCE_RAOP),
+            DoublonAirplay::Ignorer
+        );
+    }
+
+    #[test]
+    fn l_identite_annoncee_vient_du_deviceid_sinon_du_nom_raop() {
+        assert_eq!(
+            identite_airplay_annoncee(Some("dc:a6:32:00:00:02"), None).as_deref(),
+            Some("DC:A6:32:00:00:02")
+        );
+        assert_eq!(
+            identite_airplay_annoncee(None, Some("DCA632000001")).as_deref(),
+            Some("DC:A6:32:00:00:01")
+        );
+        // Un identifiant qui n'est pas une MAC n'est pas une identité : la
+        // comparaison retombe alors sur l'adresse, comme avant.
+        assert_eq!(identite_airplay_annoncee(Some("opaque"), None), None);
+        assert_eq!(identite_airplay_annoncee(None, None), None);
     }
 
     #[test]

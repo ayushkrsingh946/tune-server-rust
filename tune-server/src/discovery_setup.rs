@@ -1843,12 +1843,35 @@ pub fn spawn_mdns_handler(
                                     }
                                     _ => false,
                                 };
+                                // #6947 — une zone montée vers un protocole
+                                // préféré ne redescend pas parce qu'une
+                                // annonce moins bonne porte son nom.
+                                let retrogradation = same_name_zone.is_some_and(|z| {
+                                    let ancienne_enregistree = z
+                                        .output_device_id
+                                        .as_deref()
+                                        .is_some_and(|a| a != dev.id && reg.type_of(a).is_some());
+                                    retrogradation_par_meme_nom(
+                                        z.output_type.as_deref(),
+                                        ancienne_enregistree,
+                                        dev.device_type,
+                                    )
+                                });
                                 if ancienne_en_service {
                                     info!(
                                         name = %dev.name,
                                         id = %dev.id,
                                         old_id = ?same_name_zone.and_then(|z| z.output_device_id.clone()),
                                         "mdns_zone_device_update_deferred_while_in_use"
+                                    );
+                                } else if retrogradation {
+                                    info!(
+                                        name = %dev.name,
+                                        id = %dev.id,
+                                        old_id = ?same_name_zone.and_then(|z| z.output_device_id.clone()),
+                                        old_type = ?same_name_zone.and_then(|z| z.output_type.clone()),
+                                        new_type = output_type_str,
+                                        "mdns_zone_meme_nom_retrogradation_refusee"
                                     );
                                 } else if let Some(z) = same_name_zone
                                     && let Some(zid) = z.id
@@ -2230,18 +2253,44 @@ fn zone_a_monter_en_priorite<'a>(
             return false;
         }
         // Only upgrade if new protocol has higher priority
-        let old_prio = match z.output_type.as_deref() {
-            Some("oaat") => OutputType::Oaat.priority(),
-            Some("openhome") => OutputType::Openhome.priority(),
-            Some("bluos") => OutputType::Bluos.priority(),
-            Some("squeezebox") => OutputType::Squeezebox.priority(),
-            Some("dlna") => OutputType::Dlna.priority(),
-            Some("chromecast") => OutputType::Chromecast.priority(),
-            Some("airplay") => OutputType::Airplay.priority(),
-            _ => 0,
-        };
-        nouveau.priority() > old_prio
+        nouveau.priority() > priorite_du_type_de_zone(z.output_type.as_deref())
     })
+}
+
+/// La priorité du protocole enregistré sur une zone (`zones.output_type`) ;
+/// 0 pour un type inconnu ou absent.
+fn priorite_du_type_de_zone(type_zone: Option<&str>) -> u8 {
+    use tune_core::discovery::device::OutputType;
+    match type_zone {
+        Some("oaat") => OutputType::Oaat.priority(),
+        Some("openhome") => OutputType::Openhome.priority(),
+        Some("bluos") => OutputType::Bluos.priority(),
+        Some("squeezebox") => OutputType::Squeezebox.priority(),
+        Some("dlna") => OutputType::Dlna.priority(),
+        Some("chromecast") => OutputType::Chromecast.priority(),
+        Some("airplay") => OutputType::Airplay.priority(),
+        _ => 0,
+    }
+}
+
+/// #6947 — refuser le ré-ancrage « même nom » qui ferait redescendre une zone
+/// vers un protocole de priorité inférieure tant que sa sortie actuelle est
+/// encore enregistrée.
+///
+/// Le cas du Verox : son endpoint OAAT reprend, par montée de priorité, la
+/// zone AirPlay « Zone 6 » du même hôte, et en garde le nom. Le récepteur
+/// AirPlay de la machine s'annonce ensuite toujours sous « Zone 6 » : le filet
+/// « même nom » lui rendait la zone, de type `airplay`, et l'annonce OAAT
+/// suivante la remontait. La zone oscillait entre les deux protocoles.
+///
+/// Une sortie actuelle disparue du registre laisse le ré-ancrage se faire,
+/// comme avant : la zone ne reste pas accrochée à un appareil parti.
+fn retrogradation_par_meme_nom(
+    type_zone: Option<&str>,
+    ancienne_enregistree: bool,
+    nouvelle: tune_core::discovery::device::OutputType,
+) -> bool {
+    ancienne_enregistree && priorite_du_type_de_zone(type_zone) > nouvelle.priority()
 }
 
 fn find_cross_protocol_zone_conflict<'a>(
@@ -3090,6 +3139,77 @@ mod reancrage_4520 {
             .map(|i| i + differe)
             .expect("l'écriture suit le report");
         assert!(regle < differe && differe < ecrit);
+    }
+}
+
+#[cfg(test)]
+mod retrogradation_meme_nom_6947 {
+    use super::retrogradation_par_meme_nom;
+    use tune_core::discovery::device::OutputType;
+
+    /// Le cas du Verox : la zone, montée en OAAT, porte le nom de l'ancien
+    /// récepteur AirPlay ; l'annonce `_raop` « Zone 6 » ne la reprend pas.
+    #[test]
+    fn une_zone_oaat_n_est_pas_reprise_par_l_airplay_du_meme_nom() {
+        assert!(
+            retrogradation_par_meme_nom(Some("oaat"), true, OutputType::Airplay),
+            "la zone OAAT redescend en AirPlay sur une annonce du même nom (#6947)"
+        );
+        assert!(retrogradation_par_meme_nom(
+            Some("dlna"),
+            true,
+            OutputType::Chromecast
+        ));
+    }
+
+    /// Contre-épreuves : même protocole, protocole meilleur, sortie actuelle
+    /// partie, zone sans type — le filet « même nom » agit comme avant.
+    #[test]
+    fn hors_du_cas_le_filet_meme_nom_agit_comme_avant() {
+        assert!(!retrogradation_par_meme_nom(
+            Some("airplay"),
+            true,
+            OutputType::Airplay
+        ));
+        assert!(!retrogradation_par_meme_nom(
+            Some("airplay"),
+            true,
+            OutputType::Oaat
+        ));
+        assert!(!retrogradation_par_meme_nom(
+            Some("oaat"),
+            false,
+            OutputType::Airplay
+        ));
+        assert!(!retrogradation_par_meme_nom(
+            None,
+            true,
+            OutputType::Airplay
+        ));
+    }
+
+    /// Le branchement : le filet « même nom » consulte la règle AVANT de
+    /// réécrire l'identifiant de la zone.
+    #[test]
+    fn le_filet_meme_nom_consulte_la_regle_avant_d_ecrire() {
+        // Coupé AVANT la définition de la règle : ce module porte les mêmes
+        // littéraux et satisferait la garde à lui seul.
+        let complet: String = include_str!("discovery_setup.rs")
+            .split_whitespace()
+            .collect();
+        let source = &complet[..complet
+            .find("fnpriorite_du_type_de_zone(")
+            .expect("la règle est définie dans ce fichier")];
+        let regle = source
+            .find("retrogradation_par_meme_nom(z.output_type.as_deref(),")
+            .expect("le filet même nom appelle la règle");
+        let refus = source
+            .find("}elseifretrogradation{")
+            .expect("le refus est une branche du filet");
+        let ecrit = source
+            .find("origine:\"mdns_meme_nom\"")
+            .expect("le ré-ancrage même nom existe");
+        assert!(regle < refus && refus < ecrit);
     }
 }
 
