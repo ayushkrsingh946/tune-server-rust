@@ -2816,6 +2816,22 @@ pub(crate) fn favoris_miroir_colonnes(db: &SqliteDb) {
     }
 }
 
+/// L'année de sortie et la qualité d'un album favori de service (#6482) :
+/// `year`, `sample_rate`, `bit_depth`, que lisent les règles de même nom d'une
+/// collection intelligente. TEXT des trois côtés, comme les colonnes du miroir
+/// (voir `pg_sqlite_type_parity`) ; la règle les compare par `CAST`. Sans
+/// numéro de migration, NULL pour l'existant : la prochaine reprise des
+/// favoris les remplit. Jumelles PG : `ENSURE_TABLES` / `ENSURE_COLUMNS`
+/// (postgres.rs) et `PG_FULL_SCHEMA`.
+pub(crate) const COLONNES_ANNEE_ET_QUALITE_DES_FAVORIS: [&str; 3] =
+    ["year", "sample_rate", "bit_depth"];
+
+pub(crate) fn favoris_annee_et_qualite_colonnes(db: &SqliteDb) {
+    for col in COLONNES_ANNEE_ET_QUALITE_DES_FAVORIS {
+        add_column_if_missing(db, "streaming_favorites", col, "TEXT");
+    }
+}
+
 /// Les index de la migration 122 (#2264). L'expression est EXACTEMENT celle
 /// des requêtes par identifiant ([`SQL_ISRC_PLIE`], [`SQL_MBID_PLIE`]) :
 /// SQLite et PostgreSQL ne servent un index d'expression qu'à l'identique.
@@ -4680,6 +4696,9 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     // NULL pour l'existant ; le premier rafraîchissement du miroir adopte les
     // lignes d'avant (`tune_core::streaming::favorites_mirror`).
     favoris_miroir_colonnes(db);
+    // Année et qualité des albums favoris de service (#6482) — sans numéro
+    // de migration, même modèle que le miroir juste au-dessus.
+    favoris_annee_et_qualite_colonnes(db);
     // Clé du signal PCM et son témoin (migration 119, #5594) — posés ICI
     // aussi : la passe `taches_de_fond::cle_pcm` les NOMME, et une base
     // arrivée sans eux ne pourrait plus la faire tourner. PG : migration 083.

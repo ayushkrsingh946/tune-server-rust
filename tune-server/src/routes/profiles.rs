@@ -679,6 +679,7 @@ async fn add_streaming_favorite(
             ai_generated: body.ai_generated,
             isrc: body.isrc.clone(),
             created_at: None,
+            annee_qualite: Default::default(),
         };
         return match tune_core::streaming::favorites_mirror::ajouter(&arc, &state.backend, id, &fav)
             .await
