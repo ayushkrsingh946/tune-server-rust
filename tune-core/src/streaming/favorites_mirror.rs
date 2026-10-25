@@ -448,14 +448,17 @@ fn ecrire_partout(
             let _ = repo.poser_ia(pid, &fav.item_type, service, &fav.service_id, ia);
         }
         // #6482 — l'année et la qualité d'un album, que les collections
-        // intelligentes lisent. Une absence ne touche à rien.
-        let _ = repo.poser_annee_et_qualite(
+        // intelligentes lisent. Une absence ne touche à rien ; un échec est
+        // journalisé comme à la reprise, sans faire tomber le favori.
+        if let Err(e) = repo.poser_annee_et_qualite(
             pid,
             &fav.item_type,
             service,
             &fav.service_id,
             &fav.annee_qualite,
-        );
+        ) {
+            warn!(service = %service, erreur = %e, "favori_miroir_annee_qualite_impossible");
+        }
     }
     poser_etat(
         backend,

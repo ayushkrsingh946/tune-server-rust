@@ -288,18 +288,17 @@ pub(crate) fn requete(
     let tri = if sort_by == "random" {
         "RANDOM()".to_string()
     } else {
-        let expr = match (sort_by, objet) {
-            // #6482 — un nombre se trie comme un nombre : `LOWER()` d'un
-            // entier est refusé par PostgreSQL, et « 1999 » < « 2001 » < « 98 »
-            // en texte.
-            (champ, _) if colonne_nombre(champ, objet).is_some() => format!(
-                "CAST({} AS INTEGER)",
-                colonne_nombre(champ, objet).unwrap_or("sf.year")
-            ),
-            ("artist" | "artist_name", _) => "LOWER(sf.artist)".to_string(),
-            ("album" | "album_title", Objet::Piste) => "LOWER(sf.album)".to_string(),
-            ("added_at", _) => "LOWER(sf.created_at)".to_string(),
-            _ => "LOWER(sf.title)".to_string(),
+        // #6482 — un nombre se trie comme un nombre : `LOWER()` d'un entier
+        // est refusé par PostgreSQL, et « 1999 » < « 2001 » < « 98 » en texte.
+        let expr = if let Some(col) = colonne_nombre(sort_by, objet) {
+            format!("CAST({col} AS INTEGER)")
+        } else {
+            match (sort_by, objet) {
+                ("artist" | "artist_name", _) => "LOWER(sf.artist)".to_string(),
+                ("album" | "album_title", Objet::Piste) => "LOWER(sf.album)".to_string(),
+                ("added_at", _) => "LOWER(sf.created_at)".to_string(),
+                _ => "LOWER(sf.title)".to_string(),
+            }
         };
         format!(
             "{expr} {}",
