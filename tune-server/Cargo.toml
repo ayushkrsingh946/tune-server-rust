@@ -1806,3 +1806,10 @@ path = "tests/gravure_dr_cede_a_la_lecture_6212.rs"
 [[test]]
 name = "ecoutes_communaute_6738"
 path = "tests/ecoutes_communaute_6738.rs"
+
+# #6155 — un groupe DLNA (Phantom + KEF) fait jouer les deux renderers : le
+# relais de groupe contre deux renderers factices. `autotests = false` plus
+# haut : sans cette cible, le fichier ne serait JAMAIS compilé.
+[[test]]
+name = "groupe_dlna_joue_sur_les_deux_6155"
+path = "tests/groupe_dlna_joue_sur_les_deux_6155.rs"
