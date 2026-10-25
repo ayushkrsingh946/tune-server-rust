@@ -591,7 +591,11 @@ fn service_to_device(
             serde_json::Value::String(identite),
         );
     }
-    if let Some(model) = info.get_property_val_str("md") {
+    if let Some(model) = info
+        .get_property_val_str("model")
+        .or_else(|| info.get_property_val_str("am"))
+        .or_else(|| info.get_property_val_str("md"))
+    {
         device.model = Some(model.to_string());
         caps.insert(
             "model".to_string(),
