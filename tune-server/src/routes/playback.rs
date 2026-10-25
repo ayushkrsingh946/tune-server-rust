@@ -6352,7 +6352,8 @@ async fn transfer_queue(
 }
 
 /// Shared implementation: copy queue + now playing from source to target zone.
-async fn do_transfer(
+/// Also the way a grouped zone joins its leader (#6155, `stop_source = false`).
+pub(crate) async fn do_transfer(
     state: &AppState,
     from_zone: i64,
     target_zone: i64,
