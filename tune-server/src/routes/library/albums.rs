@@ -4863,7 +4863,7 @@ mod communaute_tests_6545 {
                 .unwrap();
         assert_eq!(
             corps,
-            json!({"available": false, "reason": "account_not_linked"})
+            json!({"available": false, "reason": "account_not_linked", "rating": null, "listens": null})
         );
     }
 }

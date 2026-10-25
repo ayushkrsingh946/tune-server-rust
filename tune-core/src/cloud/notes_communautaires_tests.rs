@@ -340,7 +340,7 @@ async fn les_agregats_d_un_album_sont_lus_puis_gardes_en_cache() {
 
     assert_eq!(
         agregats_d_album(&b, &http(), 10).await,
-        json!({"available": false, "reason": "account_not_linked"})
+        json!({"available": false, "reason": "account_not_linked", "rating": null, "listens": null})
     );
     relier_au_site(&b, &url);
     assert_eq!(
@@ -351,7 +351,7 @@ async fn les_agregats_d_un_album_sont_lus_puis_gardes_en_cache() {
     // Site en panne : indisponible, et rien n'est mis en cache.
     assert_eq!(
         agregats_d_album(&b, &http(), 10).await,
-        json!({"available": false, "reason": "site_unavailable"})
+        json!({"available": false, "reason": "site_unavailable", "rating": null, "listens": null})
     );
 
     site.lock().unwrap().agregats = Some(json!({
@@ -511,7 +511,7 @@ async fn parcours_communautaire(b: Arc<dyn DbBackend>) {
     // La route : l'artiste et l'album lus en base partent au site.
     assert_eq!(
         agregats_d_album(&b, &http(), 999).await,
-        json!({"available": false, "reason": "album_not_found"})
+        json!({"available": false, "reason": "album_not_found", "rating": null, "listens": null})
     );
     site.lock().unwrap().agregats = Some(json!({
         "album_key": "abc",
