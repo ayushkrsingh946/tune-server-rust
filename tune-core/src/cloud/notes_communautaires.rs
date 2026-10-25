@@ -372,7 +372,11 @@ pub async fn agregats_d_album(
     http: &reqwest::Client,
     album_id: i64,
 ) -> Value {
-    let indisponible = |raison: &str| json!({ "available": false, "reason": raison });
+    // La forme est la même quand rien n'a pu être lu : `rating` et `listens`
+    // valent `null`, mais les clés sont là — le client web les déclare
+    // obligatoires (`AgregatsCommunautaires`), et le banc des contrats web
+    // (`balayage_1897`) refuse une réponse qui les omet.
+    let indisponible = |raison: &str| json!({ "available": false, "reason": raison, "rating": null, "listens": null });
     let Ok(Some(ligne)) = backend.query_one(
         "SELECT a.title, ar.name FROM albums a LEFT JOIN artists ar ON ar.id = a.artist_id \
          WHERE a.id = ?",
