@@ -620,13 +620,26 @@ fn service_to_device(
         // En AirPlay 2, `_airplay._tcp` porte `features` et `flags`.
         // En RAOP (`_raop._tcp`), les enregistrements TXT utilisent des clés
         // abrégées sur deux lettres : `ft` pour features et `sf` pour status
-        // flags (bit 9 / 0x200 = PIN requis). Ignorer `ft`/`sf` ramenait un Mac
-        // récepteur ou une Apple TV à AirPlay 1, provoquant un rejet 403 sur
-        // ANNOUNCE (#6788).
+        // flags (bit 9 / 0x200 = PIN requis).
+        //
+        // La simple présence de `ft` ne suffit pas à passer un appareil en
+        // AirPlay 2, car de nombreux récepteurs AirPlay 1 historiques
+        // (shairport-sync en mode classique, AirPort Express) annoncent aussi
+        // `ft`. Sur `_raop._tcp`, on ne passe en AirPlay 2 que si `ft` porte
+        // effectivement le bit AirPlay 2 (bit 40 `SupportsBufferedAudio`, #6788).
         let features_raw = info
             .get_property_val_str("features")
             .or_else(|| info.get_property_val_str("ft"));
-        let version = if features_raw.is_some() { "2" } else { "1" };
+        let parsed_features = features_raw.and_then(parse_airplay_features);
+
+        let is_v2 = if info.get_property_val_str("features").is_some() {
+            true
+        } else if let Some(bits) = parsed_features {
+            airplay_is_v2(bits)
+        } else {
+            false
+        };
+        let version = if is_v2 { "2" } else { "1" };
         device.airplay_version = Some(version.to_string());
         caps.insert("airplay".to_string(), serde_json::Value::Bool(true));
         caps.insert(
@@ -637,9 +650,7 @@ fn service_to_device(
         // Parse the AirPlay `features` bitmask (and `flags`) so callers can tell
         // whether the receiver demands a HomeKit-style pair-setup before it will
         // accept an RTSP session (Apple TV, Samsung/LG TVs, HomePod, ...).
-        if let Some(raw) = features_raw
-            && let Some(bits) = parse_airplay_features(raw)
-        {
+        if let Some(bits) = parsed_features {
             caps.insert(
                 "airplay_features".to_string(),
                 serde_json::Value::String(format!("0x{bits:016X}")),
@@ -1062,10 +1073,12 @@ const AIRPLAY_FLAG_PIN_REQUIRED: u64 = 0x200;
 //
 //   bit 26 — SupportsSystemPairing / PairSetupAndMFi
 //   bit 27 — SupportsUnifiedPairSetupAndMFi
+//   bit 40 — SupportsBufferedAudio (AirPlay 2 / multi-room)
 //   bit 46 — SupportsCoreUtilsPairingAndEncryption
 //   bit 51 — SupportsUnifiedPairVerify (AirPlay 2 access control)
 const FT_BIT_SYSTEM_PAIRING: u64 = 1 << 26;
 const FT_BIT_UNIFIED_PAIR_SETUP: u64 = 1 << 27;
+pub const FT_BIT_AIRPLAY_2: u64 = 1 << 40;
 const FT_BIT_COREUTILS_PAIR_ENC: u64 = 1 << 46;
 const FT_BIT_UNIFIED_PAIR_VERIFY: u64 = 1 << 51;
 
@@ -1096,6 +1109,12 @@ pub fn parse_airplay_features(raw: &str) -> Option<u64> {
         }
         None => Some(low),
     }
+}
+
+/// Détermine si un masque de fonctionnalités (`features` ou `ft`) annonce le support d'AirPlay 2.
+/// Le bit 40 (`SupportsBufferedAudio`) est le bit distinctif d'AirPlay 2.
+pub fn airplay_is_v2(features: u64) -> bool {
+    features & FT_BIT_AIRPLAY_2 != 0
 }
 
 /// Whether the parsed `features` mask indicates the receiver mandates a
@@ -1143,6 +1162,28 @@ mod tests {
         let raw = format!("0x000000FF,0x{:X}", 1u64 << 19);
         let bits = parse_airplay_features(&raw).unwrap();
         assert!(airplay_requires_pairing(bits));
+    }
+
+    #[test]
+    fn airplay_is_v2_detection() {
+        // Bit 40 (FT_BIT_AIRPLAY_2, bit 8 du mot haut) actif -> AirPlay 2
+        assert!(airplay_is_v2(FT_BIT_AIRPLAY_2));
+        assert!(airplay_is_v2(FT_BIT_AIRPLAY_2 | 0x5A7F_FFF7));
+
+        // Mot haut sans bit 40 (ex. shairport-sync classique avec 0xE ou 0x1E) -> AirPlay 1
+        assert!(!airplay_is_v2(0x5A7F_FFF7));
+        assert!(!airplay_is_v2((0x1E << 32) | 0x5A7F_FFF7));
+        assert!(!airplay_is_v2((0xE << 32) | 0x5A7F_FFF7));
+        assert!(!airplay_is_v2(0));
+
+        // Via parse_airplay_features de chaînes réelles :
+        // Mac récepteur (bit 40 actif dans 0x38174FDE)
+        let mac_bits = parse_airplay_features("0x4A7FCFD5,0x38174FDE").unwrap();
+        assert!(airplay_is_v2(mac_bits));
+
+        // Shairport-sync classique (sans bit 40)
+        let ap1_bits = parse_airplay_features("0x5A7FFFF7,0x1E").unwrap();
+        assert!(!airplay_is_v2(ap1_bits));
     }
 
     #[test]
@@ -1498,6 +1539,72 @@ mod tests {
 
         // Ré-enrichissement sans nouvelle information ne modifie rien
         assert!(!enrichir_appareil_airplay(&mut d1, &d2));
+    }
+
+    #[test]
+    fn appareil_raop_avec_ft_sans_bit_airplay2_reste_en_version_1() {
+        let properties = [
+            ("tp", "UDP"),
+            ("sm", "false"),
+            ("sv", "false"),
+            ("ek", "1"),
+            ("et", "0,1"),
+            ("cn", "0,1"),
+            ("ch", "2"),
+            ("ss", "16"),
+            ("sr", "44100"),
+            ("vn", "3"),
+            ("txtvers", "1"),
+            // ft classique sans bit 40 (par exemple shairport-sync classique ou AirPort Express)
+            ("ft", "0x5A7FFFF7,0x1E"),
+            ("sf", "0x4"),
+            ("am", "AirPort4,107"),
+        ];
+        let svc = ServiceInfo::new(
+            AIRPLAY_SERVICE,
+            "Salon",
+            "salon.local.",
+            "192.168.1.50",
+            5000,
+            &properties[..],
+        )
+        .expect("création ServiceInfo RAOP")
+        .as_resolved_service();
+
+        let device = service_to_device(&svc, OutputType::Airplay, 5000);
+        assert_eq!(device.airplay_version.as_deref(), Some("1"));
+        assert_eq!(device.model.as_deref(), Some("AirPort4,107"));
+    }
+
+    #[test]
+    fn appareil_raop_avec_ft_portant_bit_airplay2_passe_en_version_2() {
+        let properties = [
+            ("tp", "UDP"),
+            ("vn", "65.5"),
+            ("txtvers", "1"),
+            // ft macOS / AirPlay 2 avec bit 40 (0x100 dans le mot haut)
+            ("ft", "0x4A7FCFD5,0x38174FDE"),
+            ("sf", "0x204"),
+            ("model", "Mac14,2"),
+        ];
+        let svc = ServiceInfo::new(
+            AIRPLAY_SERVICE,
+            "MacBook Pro de Test",
+            "macbook.local.",
+            "192.168.1.50",
+            7000,
+            &properties[..],
+        )
+        .expect("création ServiceInfo RAOP AirPlay 2")
+        .as_resolved_service();
+
+        let device = service_to_device(&svc, OutputType::Airplay, 7000);
+        assert_eq!(device.airplay_version.as_deref(), Some("2"));
+        assert_eq!(device.model.as_deref(), Some("Mac14,2"));
+        assert_eq!(
+            device.capabilities.get("airplay_requires_pairing"),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 
     #[test]
