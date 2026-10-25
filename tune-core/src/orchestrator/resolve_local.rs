@@ -1142,12 +1142,14 @@ impl PlaybackOrchestrator {
             let tranche = tranche_dop(tranche_cue, req.seek_ms);
             return self
                 .anticiper_le_dop(
+                    req.zone_id,
                     track,
                     file_path.to_string(),
                     source.zone_max_sample_rate,
                     is_local_output,
                     crate::audio::bitperfect_strict::zone_enabled(&self.db, req.zone_id),
                     tranche,
+                    req.seek_ms,
                 )
                 .await;
         }
@@ -1514,10 +1516,20 @@ impl PlaybackOrchestrator {
             crate::audio::canaux_reseau_4573::plafond_de_canaux(canaux_renderer, canaux_declares),
         );
         if let Some(cible) = canaux_reduits {
+            // #6599 — la ligne dit QUI a fixé la cible : l'annonce du
+            // renderer (sondée ou en cache), la disposition déclarée pour la
+            // zone, ou les deux. Le rapport de l'A6 n'en disait rien.
             info!(
                 zone_id = req.zone_id,
                 canaux_source,
                 canaux_cible = cible,
+                canaux_renderer = ?canaux_renderer,
+                canaux_declares = ?canaux_declares,
+                origine = crate::audio::canaux_reseau_4573::origine_du_plafond(
+                    canaux_renderer,
+                    canaux_declares,
+                    cible,
+                ),
                 "reduction_de_canaux_pour_le_renderer"
             );
         }
@@ -1866,14 +1878,17 @@ impl PlaybackOrchestrator {
     /// ici même, cadence et canaux lus DANS LE FICHIER (l'en-tête WAV
     /// décrivait la ligne `tracks`). `None` quand la cadence DoP dépasse le
     /// plafond de la zone : la décision continue sur le chemin ordinaire.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn anticiper_le_dop(
         &self,
+        zone_id: i64,
         track: &crate::db::models::Track,
         file_path: String,
         zone_max_sample_rate: Option<u32>,
         is_local_output: bool,
         strict_bitperfect: bool,
         tranche: Option<(u64, Option<u64>)>,
+        seek_ms: Option<u64>,
     ) -> Result<Option<ResolvedStream>, String> {
         // La cadence et le nombre de canaux se lisent DANS LE FICHIER,
         // pas dans la base.
@@ -1934,6 +1949,9 @@ impl PlaybackOrchestrator {
             // `dop_channels` vient de `dop_wire_params`, calculé plus
             // haut avec la cadence : même source, même raison.
 
+            // #6630 — la durée annoncée est celle qui reste à SERVIR, pour la
+            // session (donc le `Content-Length`) comme pour l'en-tête WAV.
+            let duree_ms = duree_servie_du_dop(track.duration_ms as u64, tranche, seek_ms);
             let wav_info = StreamInfo {
                 format: "wav".into(),
                 mime_type: "audio/wav".into(),
@@ -1941,7 +1959,7 @@ impl PlaybackOrchestrator {
                 bit_depth: 24,
                 channels: dop_channels,
                 file_size: None,
-                duration_ms: Some(track.duration_ms as u64),
+                duration_ms: Some(duree_ms),
                 ..Default::default()
             };
 
@@ -2000,12 +2018,6 @@ impl PlaybackOrchestrator {
                 .and_then(|e| e.to_str())
                 .unwrap_or("dsf")
                 .to_lowercase();
-            // La durée annoncée est celle qui reste à jouer : pour une
-            // tranche entamée par un déplacement, pas la piste entière.
-            let duree_ms = match tranche {
-                Some((debut, Some(fin))) => fin.saturating_sub(debut),
-                _ => track.duration_ms as u64,
-            };
             tokio::task::spawn_blocking(move || {
                 // Send WAV header first
                 //
@@ -2044,6 +2056,31 @@ impl PlaybackOrchestrator {
                     Err(e) => tracing::warn!(error = %e, "dsd_dop_stream_failed"),
                 }
             });
+
+            // #6456 (Levente, fil 2305) — les VU-mètres restaient vides en
+            // DoP. Le flux DoP est un porteur DSD emballé dans du PCM 24 bits :
+            // aucun niveau ne s'y lit, et rien d'autre ne décodait la piste.
+            // L'avance gapless, elle, mesurait déjà un DSD par le décodage du
+            // fichier (`queue.rs`) : la lecture explicite et le déplacement
+            // passent désormais par le même décodage, bridé, depuis la
+            // position servie. Le flux envoyé au DAC n'est pas touché.
+            if let Some(bus) = self
+                .event_bus
+                .clone()
+                .filter(|_| self.levels_attach_allowed(zone_id))
+            {
+                let play_seq = self.playback.current_play_seq(zone_id).await;
+                let debut_fichier_ms = tranche.map(|(debut, _)| debut).unwrap_or(0);
+                spawn_local_file_levels_decode_depuis(
+                    bus,
+                    self.playback.clone(),
+                    zone_id,
+                    play_seq,
+                    file_path.clone(),
+                    debut_fichier_ms,
+                    seek_ms.unwrap_or(0),
+                );
+            }
 
             let server_ip = self.server_ip();
             let stream_url = self.streamer.get_stream_url(&session_id, &server_ip, "wav");
@@ -3589,8 +3626,14 @@ impl PlaybackOrchestrator {
                         .output_device_id
                         .as_deref()
                         .or(zone.as_ref().and_then(|z| z.output_device_id.as_deref()));
-                    self.preparer_depart_natif_6059(did, req.seek_ms, file_path)
-                        .await
+                    self.preparer_depart_natif_6059(
+                        req.zone_id,
+                        did,
+                        req.seek_ms,
+                        file_path,
+                        Some(u32::from(bit_depth)),
+                    )
+                    .await
                 } else {
                     None
                 };
@@ -3827,6 +3870,21 @@ fn duree_servie_apres_le_seek(duree_ms: Option<u64>, seek_ms: Option<u64>) -> Op
     }
 }
 
+/// #6630 — la durée que sert le DoP : la tranche entamée (`fin − début`,
+/// sur l'horloge du fichier), sinon la piste moins la position de départ —
+/// un `.dsf`/`.dff` relancé à `seek_ms`, ou la dernière piste d'une image
+/// dont la tranche n'a pas de fin. Depuis le début, la piste entière.
+fn duree_servie_du_dop(
+    duree_piste_ms: u64,
+    tranche: Option<(u64, Option<u64>)>,
+    seek_ms: Option<u64>,
+) -> u64 {
+    match tranche {
+        Some((debut, Some(fin))) => fin.saturating_sub(debut),
+        _ => duree_servie_apres_le_seek(Some(duree_piste_ms), seek_ms).unwrap_or(duree_piste_ms),
+    }
+}
+
 /// #6456 — la fenêtre du DoP, sur l'horloge du fichier : la tranche CUE/ISO
 /// entamée par le déplacement, comme avant (#5297), ou — sans tranche — le
 /// seul déplacement, jusqu'au bout du fichier. `None` : depuis le début.
@@ -3871,7 +3929,63 @@ fn sonder_l_entete_dsd(file_path: &str) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tranche_dop_tests_6456 {
-    use super::{TrancheCue, tranche_dop};
+    use super::{TrancheCue, duree_servie_du_dop, tranche_dop};
+
+    /// 🔴 #6630 — un `.dsf` de 200 s relancé à 132,581 s sert 67,419 s : la
+    /// session et l'en-tête WAV le disent, pas 200 s. Le renderer recevait
+    /// sinon un `Content-Length` de la piste entière et un corps qui
+    /// s'arrêtait 132 s plus tôt (corps incomplet).
+    #[test]
+    fn un_dsf_relance_a_une_position_annonce_la_duree_restante_6630() {
+        let seek = Some(132_581);
+        assert_eq!(
+            duree_servie_du_dop(200_000, tranche_dop(None, seek), seek),
+            67_419,
+            "#6630 — le DoP relancé à une position annonce la durée de la piste entière"
+        );
+    }
+
+    /// La tranche d'une image entamée : fin − début, comme avant.
+    #[test]
+    fn une_tranche_entamee_annonce_sa_duree_restante_6630() {
+        let t = TrancheCue {
+            debut_ms: 60_000,
+            duree_ms: Some(30_000),
+        };
+        let seek = Some(5_000);
+        assert_eq!(
+            duree_servie_du_dop(30_000, tranche_dop(Some(t), seek), seek),
+            25_000
+        );
+    }
+
+    /// La dernière piste d'une image, sans fin connue, entamée à 5 s.
+    #[test]
+    fn la_derniere_tranche_sans_fin_annonce_la_piste_moins_le_depart_6630() {
+        let t = TrancheCue {
+            debut_ms: 60_000,
+            duree_ms: None,
+        };
+        let seek = Some(5_000);
+        assert_eq!(
+            duree_servie_du_dop(30_000, tranche_dop(Some(t), seek), seek),
+            25_000,
+            "#6630 — la dernière tranche entamée annonce la piste entière"
+        );
+    }
+
+    /// Depuis le début : la piste entière, à la milliseconde près.
+    #[test]
+    fn depuis_le_debut_rien_ne_change_6630() {
+        assert_eq!(
+            duree_servie_du_dop(200_000, tranche_dop(None, None), None),
+            200_000
+        );
+        assert_eq!(
+            duree_servie_du_dop(200_000, tranche_dop(None, Some(0)), Some(0)),
+            200_000
+        );
+    }
 
     /// #6456 — un `.dsf` ordinaire (pas de tranche) déplacé à 2:12 : le DoP
     /// doit partir de 2:12, pas du début.

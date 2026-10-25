@@ -378,6 +378,47 @@ fn valeur_valide(famille: &str, op: &str, v: &Value) -> Option<Value> {
     }
 }
 
+/// Longueur au plus d'une valeur dans le journal.
+const VALEUR_JOURNAL_MAX: usize = 60;
+
+/// Une règle en une ligne de journal : `champ op valeur`, la valeur coupée.
+/// Le modèle ne voit jamais la clé : ses règles n'en portent aucune (#6731).
+fn regle_pour_journal(r: &Value) -> String {
+    let champ = r.get("field").and_then(Value::as_str).unwrap_or("?");
+    let op = r
+        .get("op")
+        .or_else(|| r.get("operator"))
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let valeur: String = r
+        .get("value")
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            autre => autre.to_string(),
+        })
+        .unwrap_or_default()
+        .chars()
+        .take(VALEUR_JOURNAL_MAX)
+        .collect();
+    format!("{champ} {op} {valeur}")
+}
+
+/// Les règles reçues (ou retenues), pour le journal : `[a; b; c]`.
+pub fn resume_pour_journal(regles: &[Value]) -> String {
+    let l: Vec<String> = regles.iter().take(20).map(regle_pour_journal).collect();
+    format!("[{}]", l.join("; "))
+}
+
+/// Les règles écartées, avec leur raison, pour le journal.
+pub fn resume_des_refusees(refusees: &[Refusee]) -> String {
+    let l: Vec<String> = refusees
+        .iter()
+        .take(20)
+        .map(|r| format!("{} ({})", regle_pour_journal(&r.regle), r.raison))
+        .collect();
+    format!("[{}]", l.join("; "))
+}
+
 /// Valide la réponse du modèle. `Err` si elle n'est pas lisible du tout.
 pub fn valider(
     brut: &Value,

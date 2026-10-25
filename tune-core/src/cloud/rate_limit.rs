@@ -51,10 +51,18 @@ pub enum CloudScope {
     CommunityShareWrite,
     /// `GET /api/v1/community/albums` : les agrégats d'un album (#6545).
     CommunityAlbumsRead,
+    /// `POST /api/v1/community/listen-counts` : les écoutes de la communauté
+    /// par lot, pour « Titre (128) » (#6738).
+    CommunityListenCountsRead,
+    /// `POST /api/v1/community/measures{,/erase}` : dépôt et effacement des
+    /// résultats d'analyse (#5594).
+    CommunityMeasuresWrite,
+    /// `GET /api/v1/community/measures` : lecture d'un seau (#5594).
+    CommunityMeasuresRead,
 }
 
 impl CloudScope {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 21] = [
         Self::Telemetry,
         Self::InstanceHeartbeat,
         Self::BiosWrite,
@@ -73,6 +81,9 @@ impl CloudScope {
         Self::ListensSync,
         Self::CommunityShareWrite,
         Self::CommunityAlbumsRead,
+        Self::CommunityListenCountsRead,
+        Self::CommunityMeasuresWrite,
+        Self::CommunityMeasuresRead,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -95,6 +106,9 @@ impl CloudScope {
             Self::ListensSync => "listens_sync",
             Self::CommunityShareWrite => "community_share_write",
             Self::CommunityAlbumsRead => "community_albums_read",
+            Self::CommunityListenCountsRead => "community_listen_counts_read",
+            Self::CommunityMeasuresWrite => "community_measures_write",
+            Self::CommunityMeasuresRead => "community_measures_read",
         }
     }
 

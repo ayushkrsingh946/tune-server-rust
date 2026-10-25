@@ -413,6 +413,27 @@ pub struct LabelInfo {
     pub albums: Vec<StreamAlbum>,
 }
 
+/// #6934 — une PAGE du catalogue d'un label, lue par son identifiant chez le
+/// service (Qobuz `label/get`, `extra=albums`) : la page « Label » et son
+/// « Voir tout ».
+///
+/// `total` est le compte que le service annonce pour tout le catalogue,
+/// précommandes comprises ; `albums` n'en garde que les albums sortis et
+/// écoutables, si bien qu'une page peut en compter moins que `limit`. La page
+/// suivante commence à `offset + limit` tant que cette somme est sous `total`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelPage {
+    pub id: String,
+    pub name: String,
+    /// Le logo du label chez le service, seulement une adresse http(s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub albums: Vec<StreamAlbum>,
+}
+
 /// An editorial playlist tag/category (Qobuz `playlist/getTags`): moods,
 /// "Focus", genres… Used to browse curated playlists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -856,6 +877,25 @@ pub trait StreamingService: Send + Sync {
             "labels not supported for this service".into(),
         ))
     }
+    /// #6934 — TOUT le catalogue d'un label (borné par le service : 500
+    /// albums chez Qobuz, sans précommandes), pour en tirer ses artistes.
+    async fn get_label_catalogue(&self, _label_id: &str) -> Result<Vec<StreamAlbum>, TuneError> {
+        Err(TuneError::Unsupported(
+            "labels not supported for this service".into(),
+        ))
+    }
+    /// #6934 — une page du catalogue d'un label, par son identifiant chez le
+    /// service. `limit` est déjà borné par la route.
+    async fn get_label(
+        &self,
+        _label_id: &str,
+        _limit: usize,
+        _offset: usize,
+    ) -> Result<LabelPage, TuneError> {
+        Err(TuneError::Unsupported(
+            "labels not supported for this service".into(),
+        ))
+    }
     /// Editorial playlist tags/categories (moods, "Focus", genres…).
     async fn get_playlist_tags(&self) -> Result<Vec<PlaylistTag>, TuneError> {
         Ok(vec![])
@@ -962,6 +1002,24 @@ pub trait StreamingService: Send + Sync {
     ) -> Result<Option<Vec<serde_json::Value>>, TuneError> {
         let _ = fav_type;
         Ok(None)
+    }
+
+    /// #5997 — la liste datée de [`Self::get_user_favorites_dated`], mais
+    /// seulement si elle est COMPLÈTE : `Err` quand le connecteur sait que le
+    /// service ne l'a pas servie en entier (page manquante, total non tenu,
+    /// réponse sans la clé attendue).
+    ///
+    /// C'est la lecture que réconcilie le miroir des favoris : un favori
+    /// confirmé que le service ne nomme plus y est retiré de Tune, pour tous
+    /// les profils. L'écran Favoris du service, lui, garde la liste partielle
+    /// de `get_user_favorites_dated` : mieux vaut voir 100 titres sur 150 que
+    /// rien. Le défaut délègue, pour les connecteurs qui ne savent rien de
+    /// plus.
+    async fn favoris_dates_complets(
+        &self,
+        fav_type: &str,
+    ) -> Result<Option<Vec<serde_json::Value>>, TuneError> {
+        self.get_user_favorites_dated(fav_type).await
     }
     /// #4577 — ce service accepte-t-il qu'on ÉCRIVE ses favoris ?
     ///

@@ -10,6 +10,10 @@
 //! (`tune-server/src/routes/cloud.rs`). Le contrat existait ; il n'etait pas
 //! honore.
 //!
+//! S'y ajoutent l'adresse FIXE de retour OAuth du client, `/oauth/retour`
+//! (#6742), et ses ressources `/assets/…` (et `/oauth/assets/…` pour un client
+//! construit en base relative).
+//!
 //! Le repertoire vient de `TUNE_BRIDGE_WEB_DIR`. **Absent ou introuvable, ces
 //! routes ne sont pas montees du tout** : le relais se comporte exactement
 //! comme avant, plutot que de servir des 404 depuis un chemin vide. Un
@@ -17,6 +21,7 @@
 //! existant.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::Path as AxumPath;
@@ -87,14 +92,83 @@ where
         return routeur;
     };
     info!(dir = %dir.display(), "bridge_web_ui_montee");
+    monter_depuis(routeur, dir)
+}
+
+/// Les routes du client web, servies depuis `dir`.
+///
+/// Separee de [`monter`] pour que les tests montent un repertoire a eux sans
+/// toucher a `TUNE_BRIDGE_WEB_DIR`, variable partagee par tous les tests du
+/// processus. Le repertoire est lu une fois, au montage, puis capture par les
+/// gestionnaires.
+fn monter_depuis<S>(routeur: Router<S>, dir: PathBuf) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let dir = Arc::new(dir);
+    let d_index = dir.clone();
+    let d_fichier = dir.clone();
+    let d_retour = dir.clone();
+    let d_assets = dir.clone();
+    let d_assets_oauth = dir;
 
     routeur
         // `/{id}` sans barre finale : sans cette redirection, les URL
         // relatives de la page se resoudraient a la racine du relais et
         // toutes les ressources tomberaient en 404.
         .route("/{server_id}", get(rediriger_vers_racine))
-        .route("/{server_id}/", get(servir_index))
-        .route("/{server_id}/{*chemin}", get(servir_fichier))
+        .route(
+            "/{server_id}/",
+            get(move |AxumPath(server_id): AxumPath<String>| {
+                let dir = d_index.clone();
+                async move { servir_index(&dir, &server_id).await }
+            }),
+        )
+        .route(
+            "/{server_id}/{*chemin}",
+            get(
+                move |AxumPath((server_id, chemin)): AxumPath<(String, String)>| {
+                    let dir = d_fichier.clone();
+                    async move { servir_fichier(&dir, &server_id, &chemin).await }
+                },
+            ),
+        )
+        // Retour OAuth du client web (#6742, tune-web-client#2302). L'adresse
+        // de retour declaree au site est FIXE (`/oauth/retour`, le
+        // `server_id` voyage dans `state`) : elle ne peut pas etre sous
+        // `/{server_id}/`. Sans jeton, comme `/{server_id}/` : la page ne
+        // porte aucune donnee, c'est le client qui echange le code. La query
+        // (`code`, `state`) reste dans l'URL du navigateur, rien a en faire
+        // ici. Segment statique : axum le fait primer sur `{server_id}`.
+        .route(
+            "/oauth/retour",
+            get(move || {
+                let dir = d_retour.clone();
+                async move { servir(&dir.join("index.html")).await }
+            }),
+        )
+        // Ressources de la page. Le client publie est construit avec la base
+        // par defaut de Vite (`/`) : `index.html` charge `/assets/…` a la
+        // racine, quelle que soit l'adresse de la page — depuis
+        // `/oauth/retour` comme depuis `/{server_id}/`. Construit en base
+        // relative (`--base=./`), il chargerait `./assets/…`, soit
+        // `/oauth/assets/…` depuis `/oauth/retour` : les deux sont servis.
+        // PAS de repli SPA ici : une ressource absente est un 404, pas une
+        // page HTML qu'un `<script type=module>` refuserait sans le dire.
+        .route(
+            "/assets/{*chemin}",
+            get(move |AxumPath(chemin): AxumPath<String>| {
+                let dir = d_assets.clone();
+                async move { servir_ressource(&dir, &chemin).await }
+            }),
+        )
+        .route(
+            "/oauth/assets/{*chemin}",
+            get(move |AxumPath(chemin): AxumPath<String>| {
+                let dir = d_assets_oauth.clone();
+                async move { servir_ressource(&dir, &chemin).await }
+            }),
+        )
 }
 
 async fn rediriger_vers_racine(AxumPath(server_id): AxumPath<String>) -> Response {
@@ -104,33 +178,38 @@ async fn rediriger_vers_racine(AxumPath(server_id): AxumPath<String>) -> Respons
     Redirect::permanent(&format!("/{server_id}/")).into_response()
 }
 
-async fn servir_index(AxumPath(server_id): AxumPath<String>) -> Response {
-    if !ressemble_a_un_server_id(&server_id) {
+async fn servir_index(dir: &Path, server_id: &str) -> Response {
+    if !ressemble_a_un_server_id(server_id) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(dir) = repertoire_web() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
     servir(&dir.join("index.html")).await
 }
 
-async fn servir_fichier(AxumPath((server_id, chemin)): AxumPath<(String, String)>) -> Response {
-    if !ressemble_a_un_server_id(&server_id) {
+async fn servir_fichier(dir: &Path, server_id: &str, chemin: &str) -> Response {
+    if !ressemble_a_un_server_id(server_id) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(dir) = repertoire_web() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
 
     // Repli SPA : une route interne de l'application (`/{id}/library`) n'a
     // aucun fichier derriere elle. On rend `index.html`, et le routeur du
     // client fait le reste — sinon un rechargement de page en pleine
     // navigation tomberait en 404.
-    let cible = dir.join(&chemin);
-    if chemin_est_sur(&dir, &cible) && cible.is_file() {
+    let cible = dir.join(chemin);
+    if chemin_est_sur(dir, &cible) && cible.is_file() {
         servir(&cible).await
     } else {
         servir(&dir.join("index.html")).await
+    }
+}
+
+/// Un fichier de `dir/assets/`, ou 404 — jamais de repli SPA.
+async fn servir_ressource(dir: &Path, chemin: &str) -> Response {
+    let assets = dir.join("assets");
+    let cible = assets.join(chemin);
+    if chemin_est_sur(&assets, &cible) && cible.is_file() {
+        servir(&cible).await
+    } else {
+        StatusCode::NOT_FOUND.into_response()
     }
 }
 
@@ -254,5 +333,134 @@ mod tests {
         unsafe { std::env::set_var(WEB_DIR_ENV, tmp.path().to_str().unwrap()) };
         assert!(repertoire_web().is_none());
         unsafe { std::env::remove_var(WEB_DIR_ENV) };
+    }
+
+    // --- #6742 : retour OAuth du client web -------------------------------
+
+    const INDEX: &str =
+        "<!doctype html><title>Tune</title><script type=module src=/assets/index-abc.js></script>";
+    const MODULE: &str = "console.log('tune')";
+    const SERVEUR: &str = "75f24b9e-fb8a-4de2-8007-99edd3454263";
+
+    /// Un client web construit, dans un repertoire temporaire.
+    fn client_construit() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("index.html"), INDEX).unwrap();
+        std::fs::create_dir(tmp.path().join("assets")).unwrap();
+        std::fs::write(tmp.path().join("assets/index-abc.js"), MODULE).unwrap();
+        tmp
+    }
+
+    /// Le VRAI routeur du relais (`crate::routes()`) plus le client web, sur
+    /// 127.0.0.1 : la route doit tenir a cote de celles du relais, pas seule.
+    async fn pont_avec_client(dir: Option<&Path>) -> String {
+        let app = crate::routes();
+        let app = match dir {
+            Some(d) => monter_depuis(app, d.to_path_buf()),
+            None => app,
+        };
+        let app = app.with_state(std::sync::Arc::new(crate::state::RelayState::new()));
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let adresse = ecoute.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(ecoute, app).await;
+        });
+        format!("http://{adresse}")
+    }
+
+    async fn obtenir(url: &str) -> (u16, String, String) {
+        let r = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
+        let statut = r.status().as_u16();
+        let type_ = r
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        (statut, type_, r.text().await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn le_retour_oauth_sert_l_index_du_client_avec_sa_query() {
+        let client = client_construit();
+        let base = pont_avec_client(Some(client.path())).await;
+        let (statut, type_, corps) =
+            obtenir(&format!("{base}/oauth/retour?code=abc&state=xyz")).await;
+        assert_eq!(
+            statut, 200,
+            "GET /oauth/retour?code=…&state=… doit rendre index.html du client web (#6742) : \
+             sans cette route, le retour OAuth du client (tune-web-client#2302) tombe en 404"
+        );
+        assert_eq!(
+            corps, INDEX,
+            "/oauth/retour doit rendre index.html tel quel"
+        );
+        // Memes en-tetes que l'index servi sous `/{server_id}/`.
+        let (_, type_index, _) = obtenir(&format!("{base}/{SERVEUR}/")).await;
+        assert_eq!(type_, type_index);
+        assert_eq!(type_, "text/html; charset=utf-8");
+    }
+
+    /// `index.html` charge ses modules a la racine (`/assets/…`, base Vite par
+    /// defaut) ou, construit en base relative, sous `/oauth/assets/…` depuis
+    /// `/oauth/retour`. Les deux doivent rendre le module, en JavaScript.
+    #[tokio::test]
+    async fn les_ressources_de_la_page_de_retour_se_resolvent() {
+        let client = client_construit();
+        let base = pont_avec_client(Some(client.path())).await;
+        for chemin in ["/assets/index-abc.js", "/oauth/assets/index-abc.js"] {
+            let (statut, type_, corps) = obtenir(&format!("{base}{chemin}")).await;
+            assert_eq!(statut, 200, "{chemin} doit etre servi depuis dist/assets");
+            assert_eq!(type_, "text/javascript; charset=utf-8", "{chemin}");
+            assert_eq!(corps, MODULE, "{chemin}");
+        }
+        // Ressource absente : 404, pas index.html (un module HTML serait
+        // refuse sans bruit par le navigateur).
+        let (statut, _, _) = obtenir(&format!("{base}/assets/absent.js")).await;
+        assert_eq!(statut, 404);
+        // Sortie du repertoire : refusee.
+        let (statut, _, _) = obtenir(&format!("{base}/assets/..%2Findex.html")).await;
+        assert_eq!(statut, 404, "/assets/ ne doit servir que dist/assets");
+    }
+
+    /// Sans `TUNE_BRIDGE_WEB_DIR`, rien n'est monte : `/oauth/retour` est un
+    /// 404 comme le reste du client, et les routes du relais sont intactes.
+    #[tokio::test]
+    async fn sans_client_web_le_retour_oauth_reste_un_404() {
+        let base = pont_avec_client(None).await;
+        let (statut, _, _) = obtenir(&format!("{base}/oauth/retour?code=abc&state=xyz")).await;
+        assert_eq!(statut, 404);
+        let (statut, _, _) = obtenir(&format!("{base}/assets/index-abc.js")).await;
+        assert_eq!(statut, 404);
+        let (statut, _, _) = obtenir(&format!("{base}/health")).await;
+        assert_eq!(statut, 200);
+    }
+
+    /// Le retour fixe n'ouvre pas `/oauth/*` en grand, et ne rend pas le
+    /// relais permissif : les chemins non UUID restent des 404.
+    #[tokio::test]
+    async fn le_retour_oauth_n_avale_pas_les_autres_chemins() {
+        let client = client_construit();
+        let base = pont_avec_client(Some(client.path())).await;
+        for chemin in [
+            "/oauth/autre",
+            "/oauth/",
+            "/oauth",
+            "/pas-un-uuid/",
+            "/health/x",
+        ] {
+            let (statut, _, _) = obtenir(&format!("{base}{chemin}")).await;
+            assert_eq!(statut, 404, "{chemin} doit rester un 404");
+        }
+        let (statut, _, corps) = obtenir(&format!("{base}/{SERVEUR}/")).await;
+        assert_eq!((statut, corps.as_str()), (200, INDEX));
+        let (statut, _, _) = obtenir(&format!("{base}/health")).await;
+        assert_eq!(statut, 200);
     }
 }

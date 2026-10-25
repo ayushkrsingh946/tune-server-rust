@@ -1230,6 +1230,7 @@ fn decoded_radio_source_uses_the_detected_source_rate() {
                 format: Some("mp3"),
                 sample_rate: Some(48_000),
                 bit_depth: None,
+                ..Default::default()
             }),
             ..wire("wav", 48_000, 16)
         }),
@@ -3132,6 +3133,7 @@ fn radio_4346_signal_path_preserves_source_codec_and_output_container() {
                 format: codec,
                 sample_rate: rate,
                 bit_depth: bits,
+                ..Default::default()
             }),
             ..wire("wav", rate.unwrap_or(44_100).max(44_100), 16)
         };
@@ -3163,6 +3165,77 @@ fn radio_4346_signal_path_preserves_source_codec_and_output_container() {
             }
             assert!(step_desc(&sp, "Decoder").is_some());
         }
+    }
+}
+
+/// #6357 — une station HLS se nomme par son protocole, son profil réel et
+/// son débit mesuré : « HLS · HE-AAC 97 kbit/s 48kHz », et non un « AAC »
+/// qui tairait le SBR. Le débit de la lecture en cours, quand il existe,
+/// garde la main.
+#[test]
+fn radio_hls_6357_le_chemin_du_signal_nomme_hls_et_le_profil() {
+    use tune_core::http::streamer::RadioSourceInfo;
+    let (backend, mut zone) = dlna_zone();
+    zone.output_type = Some("dlna".into());
+    let ps = |bitrate: Option<u32>| ZoneState {
+        state: PlayState::Playing,
+        now_playing: Some(NowPlaying {
+            source: "radio".into(),
+            format: Some("wav".into()),
+            bitrate_kbps: bitrate,
+            ..Default::default()
+        }),
+        volume: 1.0,
+        ..Default::default()
+    };
+    for (profil, format, np_bitrate, attendu) in [
+        (
+            Some("HE-AAC"),
+            Some("aac"),
+            None,
+            "HLS · HE-AAC 97 kbit/s 48kHz",
+        ),
+        (
+            Some("HE-AACv2"),
+            Some("aac"),
+            None,
+            "HLS · HE-AACv2 97 kbit/s 48kHz",
+        ),
+        (
+            Some("AAC-LC"),
+            Some("aac"),
+            Some(320),
+            "HLS · AAC-LC 320 kbit/s 48kHz",
+        ),
+        (None, Some("mp3"), None, "HLS · MP3 97 kbit/s 48kHz"),
+    ] {
+        let stream = StreamInfo {
+            radio_source: Some(RadioSourceInfo {
+                channels: Some(2),
+                format,
+                sample_rate: Some(48_000),
+                transport: Some("hls"),
+                profil,
+                debit_kbps: Some(97),
+                ..Default::default()
+            }),
+            ..wire("wav", 48_000, 16)
+        };
+        let sp = build_signal_path(
+            &ps(np_bitrate),
+            &zone,
+            &backend,
+            Some("Renderer"),
+            "none",
+            Some(&stream),
+        )
+        .unwrap();
+        assert_eq!(step_desc(&sp, "Source").as_deref(), Some(attendu));
+        assert_eq!(
+            sp["lossless"],
+            json!(false),
+            "un HLS AAC ou MP3 est avec perte"
+        );
     }
 }
 
@@ -3242,6 +3315,7 @@ fn radio_4346_flac_truncated_before_local_output_is_not_bit_perfect() {
                 format: Some("flac"),
                 sample_rate: Some(96_000),
                 bit_depth: Some(24),
+                ..Default::default()
             }),
             ..wire("wav", 96_000, 16)
         };
@@ -3376,6 +3450,7 @@ fn codec_connu_4346_lossless_reste_un_booleen_sans_code() {
                 format: Some(codec),
                 sample_rate: Some(44_100),
                 bit_depth: bits,
+                ..Default::default()
             }),
             ..wire("wav", 44_100, 16)
         };
@@ -3520,6 +3595,11 @@ fn le_transport_local_dit_son_mode_et_son_verdict_4172() {
     assert!(
         bloc.contains("None => transport_partage_est_intact(audio_backend, pcm_local)"),
         "sans contrat, le verdict est celui du mode partagé, PCM compris (fil 2161)"
+    );
+    // #6734 — et celui de l'anneau flottant.
+    assert!(
+        bloc.contains("pcm_local) && anneau_intact,"),
+        "sans contrat, l'anneau f32 qui tronque la source fait tomber le verdict (#6734)"
     );
     // Fil 2161 — le PCM qui arrive au bras est celui du parc, pour la zone.
     assert!(
@@ -5091,4 +5171,219 @@ fn air_6542_flac_24_192_vers_devialet_air_affiche_le_reechantillonnage_a_96_khz(
         step_desc(&sp, "Resampler").as_deref(),
         Some("192kHz \u{2192} 96kHz (mesuré)")
     );
+}
+
+// ── #6734 — sortie locale sans contrat : l'anneau f32 ne garde que 24 bits ──
+
+/// Le WAV 32 bits entiers du fil 2358 (test RME « 192 kHz 32 bit ADI-2 Pro
+/// Bit Test »), joué sur une zone locale ALSA sans contrat de signal publié.
+fn wav32_local_alsa() -> (Zone, ZoneState, Arc<dyn DbBackend>) {
+    let db = SqliteDb::open_in_memory().unwrap();
+    db.init_schema().unwrap();
+    let backend: Arc<dyn DbBackend> = Arc::new(db);
+    let repo = ZoneRepo::with_backend(backend.clone());
+    let id = repo
+        .create("ADI-2 DAC", Some("local"), Some("local:adi-2-dac-6734"))
+        .unwrap();
+    let zone = repo.get(id).unwrap().unwrap();
+    let mut ps = wav24_playing();
+    if let Some(np) = ps.now_playing.as_mut() {
+        np.sample_rate = Some(192_000);
+        np.bit_depth = Some(32);
+    }
+    (zone, ps, backend)
+}
+
+fn step_bit_perfect(v: &Value, name: &str) -> Option<bool> {
+    v.get("steps")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("name").and_then(|n| n.as_str()) == Some(name))
+        .and_then(|s| s.get("bit_perfect").and_then(Value::as_bool))
+}
+
+/// **LA MESURE DU TICKET.** Sans contrat de signal (Linux/ALSA, la sortie
+/// CPAL partagée), un PCM 32 bits entiers traverse l'anneau `f32` et y perd
+/// ses 8 bits de poids faible : le panneau ne doit plus dire « bit-perfect ».
+#[test]
+fn wav_32_bits_sur_la_sortie_locale_alsa_n_est_pas_bit_perfect_6734() {
+    let (zone, ps, backend) = wav32_local_alsa();
+    assert!(ps.output_signal_path.is_none(), "aucun contrat publié");
+
+    let sp = build_signal_path(&ps, &zone, &backend, Some("ADI-2 DAC"), "ALSA", None).unwrap();
+
+    assert_eq!(
+        step_bit_perfect(&sp, "Transport"),
+        Some(false),
+        "étape Transport : une source PCM 32 bits traverse l'anneau f32 (24 bits \
+         de mantisse) de la sortie locale ALSA, ses 8 bits de poids faible sont \
+         perdus — le transport ne peut pas se dire bit-perfect (#6734)"
+    );
+    assert_eq!(
+        sp.get("bit_perfect").and_then(Value::as_bool),
+        Some(false),
+        "verdict global : « bit-perfect » annoncé alors que l'anneau f32 tronque \
+         la source 32 bits (#6734)"
+    );
+    assert_eq!(
+        step_detail(&sp, "Transport").as_deref(),
+        Some(
+            "Anneau flottant 32 bits : une source de plus de 24 bits y perd ses bits \
+             de poids faible"
+        ),
+        "la cause est dite dans le détail de l'étape"
+    );
+}
+
+/// Contre-témoin : 24 bits tiennent dans la mantisse d'un `f32`, le verdict
+/// d'avant ne bouge pas (ni détail, ni rouge).
+#[test]
+fn wav_24_bits_sur_la_sortie_locale_alsa_reste_bit_perfect_6734() {
+    let (zone, mut ps, backend) = wav32_local_alsa();
+    if let Some(np) = ps.now_playing.as_mut() {
+        np.bit_depth = Some(24);
+    }
+
+    let sp = build_signal_path(&ps, &zone, &backend, Some("ADI-2 DAC"), "ALSA", None).unwrap();
+
+    assert_eq!(step_bit_perfect(&sp, "Transport"), Some(true));
+    assert_eq!(sp.get("bit_perfect").and_then(Value::as_bool), Some(true));
+    assert_eq!(step_detail(&sp, "Transport"), None);
+}
+
+/// Un bras exclusif qui PUBLIE son contrat (WASAPI exclusif, ASIO :
+/// `Puits::Natif`, octets tels quels) reste cru sur parole : la règle de
+/// l'anneau flottant ne vaut que sans contrat.
+#[test]
+fn un_contrat_natif_publie_reste_autoritaire_en_32_bits_6734() {
+    use tune_core::outputs::traits::{
+        OutputDspState, OutputSampleTransport, OutputSignalPathStatus, OutputVolumeState,
+    };
+    let (zone, mut ps, backend) = wav32_local_alsa();
+    ps.output_signal_path = Some(OutputSignalPathStatus {
+        bit_perfect: true,
+        sample_transport: OutputSampleTransport::NativeInteger,
+        dsp: OutputDspState::Inactive,
+        volume: OutputVolumeState::Unity,
+        reasons: Vec::new(),
+    });
+
+    let sp = build_signal_path(&ps, &zone, &backend, Some("ADI-2 DAC"), "ASIO", None).unwrap();
+
+    assert_eq!(step_bit_perfect(&sp, "Transport"), Some(true));
+    assert_eq!(step_detail(&sp, "Transport"), None);
+}
+
+/// La règle elle-même : au-delà de 24 bits de PCM seulement, jamais le DSD.
+#[test]
+fn l_anneau_flottant_ne_tronque_que_le_pcm_de_plus_de_24_bits_6734() {
+    use super::signal_path::anneau_flottant_tronque_la_source as tronque;
+    assert!(tronque(32, false));
+    assert!(!tronque(24, false));
+    assert!(!tronque(16, false));
+    assert!(
+        !tronque(0, false),
+        "profondeur inconnue : rien n'est conclu"
+    );
+    assert!(!tronque(1, true), "DSD");
+}
+
+/// #6741 (suite de #6524 b, Jean Valjean) — égaliseur coupé, préampli gardé :
+/// le voyant de la sortie locale NOMME ce gain au lieu d'un « DSP appliqué »
+/// ambigu, qu'il soit observé au rappel (sonde Windows) ou seulement déclaré
+/// par les transformations réelles.
+#[test]
+fn un_preampli_garde_se_nomme_dans_le_chemin_du_signal_6741() {
+    use tune_core::outputs::traits::{
+        OutputDspState, OutputSampleTransport, OutputSignalPathStatus, OutputSignalReason,
+        OutputVolumeState,
+    };
+    let (backend, zone) = local_zone_migrated();
+    let mut ps = flac_playing();
+    ps.transformations_reelles =
+        Some(transformations_mesurees(96_000, 2, true).avec_preampli_garde(-8.4, false));
+    let sp = build_signal_path(&ps, &zone, &backend, Some("DAC"), "WASAPI", None).unwrap();
+    assert_eq!(
+        step_desc(&sp, "DSP").as_deref(),
+        Some("préampli -8.4 dB conservé jusqu’au prochain réglage (mesuré)"),
+        "déclaré par la sortie : le préampli gardé se nomme, chiffre compris"
+    );
+
+    // Sonde du rappel : « DSP appliqué » devient le nom du gain.
+    ps.output_signal_path = Some(OutputSignalPathStatus {
+        bit_perfect: false,
+        sample_transport: OutputSampleTransport::NativeInteger,
+        dsp: OutputDspState::Applied,
+        volume: OutputVolumeState::Unity,
+        reasons: vec![OutputSignalReason::DspApplied],
+    });
+    ps.transformations_reelles =
+        Some(transformations_mesurees(96_000, 2, true).avec_preampli_garde(-3.0, true));
+    let sp = build_signal_path(&ps, &zone, &backend, Some("DAC"), "WASAPI", None).unwrap();
+    assert_eq!(
+        step_desc(&sp, "DSP").as_deref(),
+        Some("préampli -3.0 dB, retour en cours au niveau d’avant l’égaliseur"),
+        "pendant la remontée, le voyant dit qu'elle est en cours"
+    );
+
+    // Contre-témoin : sans préampli gardé, rien ne change.
+    ps.transformations_reelles = Some(transformations_mesurees(96_000, 2, true));
+    let sp = build_signal_path(&ps, &zone, &backend, Some("DAC"), "WASAPI", None).unwrap();
+    assert_eq!(step_desc(&sp, "DSP").as_deref(), Some("DSP appliqué"));
+}
+
+/// #6821 — l'étape Source d'une radio porte le débit que la station annonce
+/// (`icy-br`), comme celle d'un MP3 de bibliothèque. Jamais sur un FLAC, et
+/// rien quand la station ne dit rien.
+#[test]
+fn radio_6821_source_porte_le_debit_annonce() {
+    use tune_core::http::streamer::RadioSourceInfo;
+    let (backend, mut zone) = dlna_zone();
+    let ps = ZoneState {
+        state: PlayState::Playing,
+        now_playing: Some(NowPlaying {
+            source: "radio".into(),
+            format: Some("wav".into()),
+            sample_rate: Some(44_100),
+            bit_depth: Some(16),
+            ..Default::default()
+        }),
+        volume: 1.0,
+        ..Default::default()
+    };
+    for (codec, bits, debit, attendu) in [
+        (Some("mp3"), None, Some(128), "MP3 128 kbit/s 44kHz"),
+        (Some("aac"), None, Some(64), "AAC 64 kbit/s 44kHz"),
+        (Some("mp3"), None, None, "MP3 44kHz"),
+        (Some("flac"), Some(16), Some(900), "FLAC 44kHz/16bit"),
+    ] {
+        let stream = StreamInfo {
+            radio_source: Some(RadioSourceInfo {
+                channels: Some(2),
+                format: codec,
+                sample_rate: Some(44_100),
+                bit_depth: bits,
+                bitrate_kbps: debit,
+                ..Default::default()
+            }),
+            ..wire("wav", 44_100, 16)
+        };
+        for output in ["local", "oaat", "dlna"] {
+            zone.output_type = Some(output.into());
+            let sp = build_signal_path(
+                &ps,
+                &zone,
+                &backend,
+                Some("Renderer"),
+                "none",
+                Some(&stream),
+            )
+            .unwrap();
+            assert_eq!(
+                step_desc(&sp, "Source").as_deref(),
+                Some(attendu),
+                "{output}"
+            );
+        }
+    }
 }

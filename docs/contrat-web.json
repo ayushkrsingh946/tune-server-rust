@@ -1,6 +1,6 @@
 {
   "genere_depuis": {
-    "web_sha": "c054c741876f6e9cb849925a8c68ef1017f04270",
+    "web_sha": "5cf3acc4302dfcf1699d49211897aae77d4a2585",
     "regenerer": "scripts/web-contract-map.py --web <tune-web-client> --web-sha <sha> -o docs/contrat-web.json",
     "gardee_par": [
       "tune-server/tests/web_response_contracts.rs (la_carte_web_ne_cite_que_des_routes_encore_servies)",
@@ -442,6 +442,21 @@
       ]
     },
     {
+      "route": "/eq/room-modes",
+      "methode": "POST",
+      "type": "RoomModes",
+      "liste": false,
+      "champs_obligatoires": [
+        "filters",
+        "modes",
+        "modes_total",
+        "assumptions"
+      ],
+      "champs_optionnels": [
+        "bounds"
+      ]
+    },
+    {
       "route": "/ext/bandcamp/album",
       "methode": "GET",
       "type": "BandcampAlbumDetail",
@@ -784,6 +799,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -824,6 +840,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -864,6 +881,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -1086,6 +1104,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -1147,6 +1166,7 @@
         "name"
       ],
       "champs_optionnels": [
+        "community_listens",
         "sort_name",
         "musicbrainz_id",
         "discogs_id",
@@ -1179,6 +1199,7 @@
         "name"
       ],
       "champs_optionnels": [
+        "community_listens",
         "sort_name",
         "musicbrainz_id",
         "discogs_id",
@@ -1200,6 +1221,7 @@
         "name"
       ],
       "champs_optionnels": [
+        "community_listens",
         "sort_name",
         "musicbrainz_id",
         "discogs_id",
@@ -1221,6 +1243,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -1308,6 +1331,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -1667,6 +1691,81 @@
       ]
     },
     {
+      "route": "/library/integrity",
+      "methode": "GET",
+      "type": "EtatIntegrite",
+      "liste": false,
+      "champs_obligatoires": [
+        "status",
+        "total",
+        "traites",
+        "sains",
+        "corrompus",
+        "non_verifiables",
+        "alertes_taille",
+        "erreur",
+        "lecture_prioritaire"
+      ],
+      "champs_optionnels": []
+    },
+    {
+      "route": "/library/integrity",
+      "methode": "POST",
+      "type": "EtatIntegrite",
+      "liste": false,
+      "champs_obligatoires": [
+        "status",
+        "total",
+        "traites",
+        "sains",
+        "corrompus",
+        "non_verifiables",
+        "alertes_taille",
+        "erreur",
+        "lecture_prioritaire"
+      ],
+      "champs_optionnels": []
+    },
+    {
+      "route": "/library/integrity/report",
+      "methode": "GET",
+      "type": "(en ligne)",
+      "liste": false,
+      "champs_obligatoires": [
+        "etat",
+        "lignes"
+      ],
+      "champs_optionnels": []
+    },
+    {
+      "route": "/library/labels",
+      "methode": "GET",
+      "type": "LibraryLabel",
+      "liste": true,
+      "champs_obligatoires": [
+        "name",
+        "album_count"
+      ],
+      "champs_optionnels": [
+        "image_url",
+        "qobuz_label_id"
+      ]
+    },
+    {
+      "route": "/library/labels/{}/artists",
+      "methode": "GET",
+      "type": "ArtistesDuLabel",
+      "liste": false,
+      "champs_obligatoires": [
+        "name",
+        "bibliotheque"
+      ],
+      "champs_optionnels": [
+        "qobuz_label_id",
+        "decouvrir"
+      ]
+    },
+    {
       "route": "/library/repertoires/ordre",
       "methode": "GET",
       "type": "MusicDirectoryOrder",
@@ -1950,6 +2049,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -2528,6 +2628,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3293,6 +3394,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3324,6 +3426,19 @@
       ]
     },
     {
+      "route": "/streaming/{}/albums/{}/context",
+      "methode": "GET",
+      "type": "StreamingAlbumContext",
+      "liste": false,
+      "champs_obligatoires": [],
+      "champs_optionnels": [
+        "genre_id",
+        "genre_name",
+        "label_id",
+        "label_name"
+      ]
+    },
+    {
       "route": "/streaming/{}/albums/{}/tracks",
       "methode": "GET",
       "type": "Track",
@@ -3333,6 +3448,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3384,6 +3500,7 @@
         "name"
       ],
       "champs_optionnels": [
+        "community_listens",
         "sort_name",
         "musicbrainz_id",
         "discogs_id",
@@ -3405,6 +3522,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3445,6 +3563,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3620,6 +3739,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3660,6 +3780,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3705,6 +3826,34 @@
       ]
     },
     {
+      "route": "/streaming/{}/labels/{}",
+      "methode": "GET",
+      "type": "StreamingLabelPage",
+      "liste": false,
+      "champs_obligatoires": [
+        "id",
+        "name",
+        "total",
+        "offset",
+        "limit",
+        "albums"
+      ],
+      "champs_optionnels": [
+        "image_url"
+      ]
+    },
+    {
+      "route": "/streaming/{}/labels/{}/artists",
+      "methode": "GET",
+      "type": "StreamingLabelArtists",
+      "liste": false,
+      "champs_obligatoires": [
+        "id",
+        "artists"
+      ],
+      "champs_optionnels": []
+    },
+    {
       "route": "/streaming/{}/new-releases",
       "methode": "GET",
       "type": "Album",
@@ -3714,6 +3863,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "added_at",
         "focus_track_ids",
         "credit_roles",
@@ -3794,6 +3944,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3889,6 +4040,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -3940,6 +4092,7 @@
         "title"
       ],
       "champs_optionnels": [
+        "community_listens",
         "album_id",
         "album_id_service",
         "album_title",
@@ -4262,6 +4415,7 @@
       ],
       "champs_optionnels": [
         "cpu_temp_c",
+        "analyses_bridage_leve",
         "asio_warm_scan",
         "output_providers"
       ]
@@ -6657,6 +6811,11 @@
       "raison": "type non structurel"
     },
     {
+      "route": "/library/integrity/pause",
+      "type": "void",
+      "raison": "type non structurel"
+    },
+    {
       "route": "/system/config/import/preview",
       "type": "unknown",
       "raison": "type non structurel"
@@ -6743,7 +6902,7 @@
     }
   ],
   "resume": {
-    "routes_cartographiees": 335,
-    "appels_non_resolus": 154
+    "routes_cartographiees": 344,
+    "appels_non_resolus": 155
   }
 }

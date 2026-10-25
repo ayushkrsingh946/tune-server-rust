@@ -836,6 +836,22 @@ pub(super) fn runtime_signal_reason_detail_lang(
     (!details.is_empty()).then(|| details.join(" ; "))
 }
 
+/// #6734 — le détail de l'étape « Transport » d'une sortie locale sans
+/// contrat dont l'anneau flottant tronque la source : le verdict tombe, la
+/// cause est dite.
+pub(super) fn detail_de_l_anneau_flottant(
+    lang: &str,
+    output_type: &str,
+    contrat_publie: bool,
+    bit_depth: i32,
+    is_dsd: bool,
+) -> Option<String> {
+    (output_type == "local"
+        && !contrat_publie
+        && anneau_flottant_tronque_la_source(bit_depth, is_dsd))
+    .then(|| ts(lang, "float_precision").to_string())
+}
+
 /// #6452 — le détail de l'étape « Transport ». Sous le repli de démarrage,
 /// une zone locale dit pourquoi elle ne joue pas en ASIO : le démarrage
 /// précédent n'a pas abouti, celui-ci s'est fait sur l'hôte par défaut.
@@ -1636,6 +1652,25 @@ fn assembler_les_etapes_lang(
             "eq_non_finite_samples": metrics.eq_non_finite_samples,
         })
     });
+    // #6741 — un égaliseur COUPÉ qui applique encore son préampli le dit,
+    // chiffre compris, au lieu d'un « DSP appliqué » ambigu (#6524 b, Jean
+    // Valjean : −8,4 dB gardés, égaliseur inactif et remis à plat).
+    let preampli_garde = ps
+        .transformations_reelles
+        .as_ref()
+        .and_then(|t| t.preampli_garde())
+        .map(|(db, en_retour)| {
+            fs(
+                lang,
+                if en_retour {
+                    "preampli_en_retour"
+                } else {
+                    "preampli_garde"
+                },
+                &[&format!("{db:.1}")],
+            )
+        });
+    let eq_step_description = preampli_garde.or(eq_step_description);
     if let Some(runtime) = runtime_signal_path {
         let dsp_step = match runtime.dsp {
             OutputDspState::Applied => Some((
@@ -1864,7 +1899,17 @@ fn assembler_les_etapes_lang(
         "bit_perfect": transport_bit_perfect,
         "detail": detail_du_transport(
             output_type,
-            runtime_signal_path.and_then(|r| runtime_signal_reason_detail_lang(lang, r)),
+            runtime_signal_path
+                .and_then(|r| runtime_signal_reason_detail_lang(lang, r))
+                .or_else(|| {
+                    detail_de_l_anneau_flottant(
+                        lang,
+                        output_type,
+                        runtime_signal_path.is_some(),
+                        bit_depth,
+                        is_dsd,
+                    )
+                }),
             tune_core::demarrage_inacheve::repli_actif(),
         ),
     }));
@@ -2006,8 +2051,12 @@ fn rendre_les_verdicts(
     // Filtré sur le verdict avec perte : un débit sur un FLAC n'aurait aucun
     // sens, et un album Bandcamp ACHETÉ en lossless ne doit surtout pas
     // hériter du chiffre de l'extrait.
+    // #6821 — une radio n'a pas de fiche : son débit est celui qu'elle annonce
+    // (`icy-br`), relevé à la connexion. Même filtre : jamais sur un FLAC.
     let bitrate_label = np
         .bitrate_kbps
+        .or(source.debit_radio_kbps)
+        .or(source.debit_source_kbps)
         .filter(|kbps| *kbps > 0 && !is_lossless)
         .map(|kbps| format!(" {kbps} kbit/s"))
         .unwrap_or_default();
@@ -2068,6 +2117,19 @@ pub(super) fn transport_partage_est_intact(audio_backend: &str, pcm_alsa: Option
         "ALSA" => !pcm_alsa_est_un_greffon(pcm_alsa),
         _ => true,
     }
+}
+
+/// #6734 — l'anneau des sorties locales SANS contrat de signal (CPAL partagé
+/// sous Linux/ALSA, CoreAudio, WASAPI partagé) porte des `f32` : 24 bits de
+/// mantisse. Une source PCM plus profonde y perd ses bits de poids faible,
+/// même ouverte en `hw:` et en i32 (`RingBuf` de `outputs/local.rs`, puis
+/// `build_int_stream::<i32>` qui reconvertit dans le rappel). Seuls les bras
+/// exclusifs (`Puits::Natif`, WASAPI et ASIO) transportent les octets tels
+/// quels, et ceux-là publient leur contrat.
+///
+/// Le DSD (profondeur 1, DoP sur 24 bits utiles) n'est pas concerné.
+pub(super) fn anneau_flottant_tronque_la_source(bit_depth: i32, is_dsd: bool) -> bool {
+    !is_dsd && bit_depth > 24
 }
 
 /// Fil 2161 — ce PCM ALSA est-il un greffon logiciel, et non le matériel ?
@@ -2248,9 +2310,11 @@ fn decrire_le_transport<'a>(
             let exclusif_observe = runtime_signal_path.is_some();
             let transport =
                 etiquette_du_transport_local(audio_backend, exclusif_observe, pcm_local);
+            // #6734 — sans contrat, l'anneau f32 ne garde que 24 bits.
+            let anneau_intact = !anneau_flottant_tronque_la_source(bit_depth, is_dsd);
             let intact = match runtime_signal_path {
                 Some(status) => runtime_transport_is_intact(status),
-                None => transport_partage_est_intact(audio_backend, pcm_local),
+                None => transport_partage_est_intact(audio_backend, pcm_local) && anneau_intact,
             };
             (intact, transport, format_name)
         }
@@ -2702,6 +2766,12 @@ struct Source<'w> {
     /// (`StreamInfo::dsd_reconstruit_depuis_dst`, posé par la session) : DSD
     /// natif décompressé, aucune conversion PCM.
     dst_reconstruit_en_dsf: bool,
+    /// #6357 — le débit du codec mesuré par le décodeur radio (HLS), quand
+    /// la lecture en cours n'en porte pas.
+    debit_source_kbps: Option<u32>,
+    /// #6821 — le débit qu'une RADIO annonce (`icy-br`), relevé par la sonde.
+    /// `None` hors radio : le débit d'un fichier vient de `NowPlaying`.
+    debit_radio_kbps: Option<u32>,
 }
 
 /// The radio decoder emits 16-bit PCM and can adapt low source rates.
@@ -2715,6 +2785,22 @@ fn radio_wire_preserves_source(np: &tune_core::playback::NowPlaying, source: &So
             && source
                 .wire_bit_depth
                 .is_some_and(|bits| i32::from(bits) >= source.bit_depth))
+}
+
+/// #6357 — le nom d'une source radio HLS : le protocole, puis le profil
+/// réellement décodé quand il est connu, sinon le codec. `None` hors HLS.
+fn libelle_radio_hls(radio: &tune_core::http::streamer::RadioSourceInfo) -> Option<&'static str> {
+    if radio.transport != Some("hls") {
+        return None;
+    }
+    Some(match (radio.profil, radio.format) {
+        (Some("HE-AACv2"), _) => "HLS · HE-AACv2",
+        (Some("HE-AAC"), _) => "HLS · HE-AAC",
+        (Some("AAC-LC"), _) => "HLS · AAC-LC",
+        (_, Some("aac")) => "HLS · AAC",
+        (_, Some("mp3")) => "HLS · MP3",
+        _ => "HLS",
+    })
 }
 
 /// Lit la piste, le fil et la lecture en cours pour décrire la source.
@@ -2746,6 +2832,7 @@ fn decrire_la_source<'w>(
     if let Some(radio) = radio_source {
         let source_format = radio.format.and_then(AudioFormat::from_extension);
         return Source {
+            debit_source_kbps: radio.debit_kbps,
             output_container,
             wire_sample_rate,
             wire_bit_depth,
@@ -2753,9 +2840,14 @@ fn decrire_la_source<'w>(
             is_dsd: false,
             sample_rate: radio.sample_rate.unwrap_or(0) as i32,
             bit_depth: radio.bit_depth.unwrap_or(0) as i32,
-            format_name: source_format
-                .as_ref()
-                .map_or(CODEC_INCONNU, AudioFormat::display_name),
+            // #6357 — une station HLS se nomme avec son protocole et son
+            // profil réel : « HLS · HE-AAC », et non un « AAC » qui tairait
+            // le SBR.
+            format_name: libelle_radio_hls(&radio).unwrap_or_else(|| {
+                source_format
+                    .as_ref()
+                    .map_or(CODEC_INCONNU, AudioFormat::display_name)
+            }),
             is_lossless: source_format.as_ref().is_some_and(AudioFormat::is_lossless),
             codec_connu: source_format.is_some(),
             flac_ffmpeg_vers_le_reseau: false,
@@ -2764,6 +2856,7 @@ fn decrire_la_source<'w>(
             canaux_source: None,
             canaux_du_fil: None,
             dst_reconstruit_en_dsf: false,
+            debit_radio_kbps: radio.bitrate_kbps,
         };
     }
     // Verbatim proxy radios keep their existing wire/NowPlaying metadata
@@ -2914,6 +3007,7 @@ fn decrire_la_source<'w>(
             .is_some()
         });
     Source {
+        debit_source_kbps: None,
         output_container,
         wire_sample_rate,
         wire_bit_depth,
@@ -2935,6 +3029,7 @@ fn decrire_la_source<'w>(
             .map(|c| c as u16),
         canaux_du_fil: wire.map(|w| w.channels).filter(|c| *c > 0),
         dst_reconstruit_en_dsf: is_dsd && wire.is_some_and(|w| w.dsd_reconstruit_depuis_dst),
+        debit_radio_kbps: None,
     }
 }
 

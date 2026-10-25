@@ -96,6 +96,9 @@ pub struct MockOutput {
     /// attend le feu vert (second `Notify`) : la fenêtre où une sortie locale
     /// arrête le flux précédent avant d'ouvrir le nouveau.
     barriere_de_lecture: Arc<std::sync::Mutex<Option<BarriereDeLecture>>>,
+    /// #6932 — tant qu'il reste positif, `get_status` PANIQUE et le décompte :
+    /// la panique d'un tour du sondeur, rejouée sans vraie sortie.
+    paniques_au_statut: Arc<AtomicU64>,
 }
 
 /// #6658 — (entrée dans `play_media`, feu vert pour en sortir).
@@ -136,7 +139,13 @@ impl MockOutput {
             session_perdue_a_la_reprise: Arc::new(AtomicBool::new(false)),
             session_perdue: Arc::new(AtomicBool::new(false)),
             barriere_de_lecture: Arc::new(std::sync::Mutex::new(None)),
+            paniques_au_statut: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// #6932 — les `n` prochains `get_status` paniqueront.
+    pub fn paniquer_au_statut(&self, n: u64) {
+        self.paniques_au_statut.store(n, Ordering::SeqCst);
     }
 
     /// #6658 — le prochain `play_media` s'arrêtera à mi-chemin : il signale
@@ -493,6 +502,13 @@ impl OutputTarget for MockOutput {
     }
 
     async fn get_status(&self) -> Result<OutputStatus, String> {
+        if self
+            .paniques_au_statut
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            panic!("panique simulée dans get_status (#6932)");
+        }
         Ok(OutputStatus {
             state: *self.state.lock().await,
             position_ms: self.position_ms.load(Ordering::Relaxed),

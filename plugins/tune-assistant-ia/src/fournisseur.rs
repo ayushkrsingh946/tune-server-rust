@@ -103,6 +103,11 @@ pub struct Demande {
     pub max_jetons: u32,
     /// Demander une réponse JSON quand le fournisseur sait la garantir.
     pub json: bool,
+    /// L'effort de réflexion à demander (`output_config.effort`), pour un
+    /// usage court ([`crate::couts::usage_court`]). Envoyé SEULEMENT aux
+    /// modèles qui l'acceptent ([`crate::couts::accepte_effort`]) : Haiku 4.5
+    /// le refuse par un 400. `None` : l'effort par défaut du modèle.
+    pub effort: Option<&'static str>,
 }
 
 /// Ce que le modèle rend, et ce que l'appel a coûté en jetons.
@@ -128,8 +133,14 @@ pub enum ErreurFournisseur {
     Reseau,
     /// Le modèle a refusé de répondre.
     Refus,
-    /// Toute autre réponse : le statut, sans le corps.
-    Autre(u16),
+    /// #6730 — Anthropic : une clé d'ORGANISATION, rattachée à aucun espace de
+    /// travail, exige l'en-tête `anthropic-workspace-id` (400 « not scoped to
+    /// a workspace »). Une clé créée dans un espace de travail suffit.
+    CleSansEspaceDeTravail,
+    /// Toute autre réponse : le statut, et le motif que le fournisseur a
+    /// donné (`error.message`), tronqué et expurgé de tout ce qui ressemble à
+    /// une clé ([`motif_du_fournisseur`]). `None` : le corps n'en portait pas.
+    Autre { statut: u16, motif: Option<String> },
 }
 
 impl ErreurFournisseur {
@@ -141,7 +152,8 @@ impl ErreurFournisseur {
             Self::ModeleInconnu => "modele_inconnu",
             Self::Reseau => "reseau",
             Self::Refus => "refus",
-            Self::Autre(_) => "erreur_fournisseur",
+            Self::CleSansEspaceDeTravail => "cle_sans_espace_de_travail",
+            Self::Autre { .. } => "erreur_fournisseur",
         }
     }
 
@@ -153,9 +165,90 @@ impl ErreurFournisseur {
             Self::ModeleInconnu => "Ce modèle n'existe pas chez ce fournisseur.".into(),
             Self::Reseau => "Fournisseur injoignable (réseau).".into(),
             Self::Refus => "Le modèle a refusé de répondre.".into(),
-            Self::Autre(s) => format!("Le fournisseur a répondu {s}."),
+            Self::CleSansEspaceDeTravail => "Cette clé Anthropic n'est rattachée à aucun espace de travail : renseignez l'identifiant d'espace de travail dans les réglages de l'assistant, ou créez une clé dans un espace de travail (console.anthropic.com › API keys).".into(),
+            Self::Autre {
+                statut,
+                motif: Some(m),
+            } => format!("Le fournisseur a répondu {statut} : « {m} »"),
+            Self::Autre { statut, motif: None } => format!("Le fournisseur a répondu {statut}."),
         }
     }
+
+    /// Le motif du fournisseur, déjà expurgé, pour le corps de la réponse.
+    pub fn motif(&self) -> Option<&str> {
+        match self {
+            Self::Autre { motif, .. } => motif.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Une réponse 2xx dont le corps n'est pas du JSON lisible.
+    pub(crate) fn corps_illisible(statut: u16) -> Self {
+        Self::Autre {
+            statut,
+            motif: None,
+        }
+    }
+}
+
+/// Longueur maximale du motif rendu à l'écran et au journal.
+const MOTIF_MAX: usize = 300;
+
+/// #6730 — le motif lisible d'une réponse d'erreur : `error.message`
+/// (Anthropic, compatible OpenAI, Gemini), `[0].error.message` (Gemini sous
+/// forme de liste), ou `error` quand c'est une chaîne (Ollama). Tronqué à
+/// [`MOTIF_MAX`] caractères, et tout mot qui ressemble à une clé d'API est
+/// remplacé par `[masqué]` : certains fournisseurs recopient un fragment de
+/// la clé dans leur message (« Incorrect API key provided: sk-… »). Le corps
+/// brut, lui, n'est jamais rendu ni journalisé.
+pub(crate) fn motif_du_fournisseur(corps: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(corps).ok()?;
+    let v = match &v {
+        Value::Array(a) => a.first()?.clone(),
+        _ => v,
+    };
+    let brut = match v.get("error")? {
+        Value::String(s) => s.clone(),
+        e => e.get("message")?.as_str()?.to_string(),
+    };
+    let expurge: Vec<String> = brut
+        .split_whitespace()
+        .map(|mot| {
+            if ressemble_a_une_cle(mot) {
+                "[masqué]".to_string()
+            } else {
+                mot.to_string()
+            }
+        })
+        .collect();
+    let texte = expurge.join(" ");
+    let texte = texte.trim();
+    if texte.is_empty() {
+        return None;
+    }
+    Some(if texte.chars().count() > MOTIF_MAX {
+        format!("{}…", texte.chars().take(MOTIF_MAX).collect::<String>())
+    } else {
+        texte.to_string()
+    })
+}
+
+/// Un mot qui pourrait être (un fragment de) clé : préfixe connu (`sk-`,
+/// `sk_`, `AIza`, `gsk_`, `xai-`), ou longue suite de 24 caractères ou plus
+/// mêlant lettres et chiffres sans espace.
+fn ressemble_a_une_cle(mot: &str) -> bool {
+    let m = mot.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+    if ["sk-", "sk_", "AIza", "gsk_", "xai-"]
+        .iter()
+        .any(|p| m.starts_with(p))
+    {
+        return true;
+    }
+    m.len() >= 24
+        && m.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && m.chars().any(|c| c.is_ascii_digit())
+        && m.chars().any(|c| c.is_ascii_alphabetic())
 }
 
 /// L'interface commune.
@@ -170,6 +263,11 @@ pub struct Acces {
     pub famille: Famille,
     pub url_base: String,
     pub cle: Option<String>,
+    /// #6730 — Anthropic : l'identifiant d'espace de travail, envoyé dans
+    /// l'en-tête `anthropic-workspace-id` quand il est renseigné (clé
+    /// d'organisation). Ce n'est pas un secret : la console l'affiche, et il
+    /// n'ouvre rien sans la clé. Ignoré des autres fournisseurs.
+    pub espace_de_travail: Option<String>,
 }
 
 // La clé ne s'imprime jamais, même dans un `{:?}` de débogage.
@@ -179,6 +277,7 @@ impl std::fmt::Debug for Acces {
             .field("famille", &self.famille)
             .field("url_base", &self.url_base)
             .field("cle", &self.cle.as_ref().map(|_| "********"))
+            .field("espace_de_travail", &self.espace_de_travail)
             .finish()
     }
 }
@@ -198,6 +297,37 @@ pub fn fabrique_reelle() -> Fabrique {
 }
 
 pub(crate) const DELAI: Duration = Duration::from_secs(90);
+
+/// L'en-tête d'Anthropic qui désigne l'espace de travail d'une clé
+/// d'organisation (#6730).
+pub const ENTETE_ESPACE_DE_TRAVAIL: &str = "anthropic-workspace-id";
+
+/// #6730 — les en-têtes d'authentification d'une requête Anthropic : la clé,
+/// la version, et l'espace de travail s'il est renseigné. Un seul endroit
+/// pour les deux chemins (fournisseur et passerelle de `/ai/query`).
+pub(crate) fn entetes_anthropic(
+    requete: reqwest::RequestBuilder,
+    acces: &Acces,
+) -> reqwest::RequestBuilder {
+    let requete = requete
+        .header("x-api-key", acces.cle.as_deref().unwrap_or(""))
+        .header("anthropic-version", "2023-06-01");
+    match acces.espace_de_travail.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => requete.header(ENTETE_ESPACE_DE_TRAVAIL, id),
+        _ => requete,
+    }
+}
+
+/// #6730 — un identifiant d'espace de travail acceptable : non vide,
+/// 128 caractères au plus, lettres, chiffres, `_` et `-` seulement (la
+/// console rend `wrkspc_…`). Tout autre caractère pourrait casser l'en-tête.
+pub fn espace_de_travail_valide(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
 
 pub(crate) fn client() -> &'static reqwest::Client {
     tune_core::http::client::shared()
@@ -219,12 +349,15 @@ pub(crate) fn erreur_reseau(famille: Famille, e: &reqwest::Error) -> ErreurFourn
     ErreurFournisseur::Reseau
 }
 
-/// Un statut d'échec, traduit. `corps` ne sert qu'à reconnaître un crédit
-/// épuisé ou un modèle inconnu ; il n'est jamais journalisé.
+/// Un statut d'échec, traduit. Le corps brut n'est jamais journalisé : seul
+/// son motif expurgé l'est ([`motif_du_fournisseur`], #6730).
 pub(crate) fn erreur_de_statut(famille: Famille, statut: u16, corps: &str) -> ErreurFournisseur {
+    let motif = motif_du_fournisseur(corps);
     warn!(
         fournisseur = famille.nom(),
-        statut, "assistant_ia_fournisseur_erreur"
+        statut,
+        motif = motif.as_deref().unwrap_or("-"),
+        "assistant_ia_fournisseur_erreur"
     );
     let bas = corps.to_ascii_lowercase();
     match statut {
@@ -239,8 +372,11 @@ pub(crate) fn erreur_de_statut(famille: Famille, statut: u16, corps: &str) -> Er
         {
             ErreurFournisseur::ModeleInconnu
         }
+        400 if famille == Famille::Anthropic && bas.contains("not scoped to a workspace") => {
+            ErreurFournisseur::CleSansEspaceDeTravail
+        }
         500..=599 => ErreurFournisseur::Surcharge,
-        s => ErreurFournisseur::Autre(s),
+        statut => ErreurFournisseur::Autre { statut, motif },
     }
 }
 
@@ -258,6 +394,28 @@ pub(crate) fn jetons(v: &Value, cle: &str) -> u64 {
     v.get(cle).and_then(Value::as_u64).unwrap_or(0)
 }
 
+/// Pose `output_config.effort` sur un corps de l'API Messages, si un effort
+/// est demandé ET que `modele` l'accepte. Sinon, le corps reste tel quel.
+pub(crate) fn poser_effort(corps: &mut Value, modele: &str, effort: Option<&str>) {
+    if let Some(e) = effort
+        && crate::couts::accepte_effort(modele)
+    {
+        corps["output_config"] = json!({ "effort": e });
+    }
+}
+
+/// Pose `options.num_ctx` sur un corps d'Ollama (`/api/chat`), d'après la
+/// taille de ce qu'il porte déjà (`messages`, `tools`) et la sortie attendue
+/// ([`crate::couts::num_ctx_ollama`]).
+pub(crate) fn poser_num_ctx(corps: &mut Value, max_sortie: u32) {
+    let taille = corps
+        .get("messages")
+        .map(|m| m.to_string().len())
+        .unwrap_or(0)
+        + corps.get("tools").map(|t| t.to_string().len()).unwrap_or(0);
+    corps["options"] = json!({ "num_ctx": crate::couts::num_ctx_ollama(taille, max_sortie) });
+}
+
 // ---------------------------------------------------------------------------
 // Anthropic
 // ---------------------------------------------------------------------------
@@ -269,21 +427,22 @@ struct Anthropic {
 #[async_trait]
 impl Fournisseur for Anthropic {
     async fn completer(&self, d: &Demande) -> Result<Reponse, ErreurFournisseur> {
-        let corps = json!({
+        let mut corps = json!({
             "model": d.modele,
             "max_tokens": d.max_jetons,
             "system": d.systeme,
             "messages": [{ "role": "user", "content": d.message }],
         });
-        let rep = client()
-            .post(format!("{}/v1/messages", base(&self.acces)))
-            .header("x-api-key", self.acces.cle.as_deref().unwrap_or(""))
-            .header("anthropic-version", "2023-06-01")
-            .timeout(DELAI)
-            .json(&corps)
-            .send()
-            .await
-            .map_err(|e| erreur_reseau(Famille::Anthropic, &e))?;
+        poser_effort(&mut corps, &d.modele, d.effort);
+        let rep = entetes_anthropic(
+            client().post(format!("{}/v1/messages", base(&self.acces))),
+            &self.acces,
+        )
+        .timeout(DELAI)
+        .json(&corps)
+        .send()
+        .await
+        .map_err(|e| erreur_reseau(Famille::Anthropic, &e))?;
         let statut = rep.status().as_u16();
         let texte = rep
             .text()
@@ -293,7 +452,7 @@ impl Fournisseur for Anthropic {
             return Err(erreur_de_statut(Famille::Anthropic, statut, &texte));
         }
         let v: Value =
-            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::Autre(statut))?;
+            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::corps_illisible(statut))?;
         if v.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
             return Err(ErreurFournisseur::Refus);
         }
@@ -364,7 +523,7 @@ impl Fournisseur for CompatibleOpenai {
             return Err(erreur_de_statut(famille, statut, &texte));
         }
         let v: Value =
-            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::Autre(statut))?;
+            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::corps_illisible(statut))?;
         let sortie = v
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
@@ -401,6 +560,7 @@ impl Fournisseur for Ollama {
         if d.json {
             corps["format"] = json!("json");
         }
+        poser_num_ctx(&mut corps, d.max_jetons);
         let rep = client()
             .post(format!("{}/api/chat", base(&self.acces)))
             .timeout(DELAI)
@@ -417,7 +577,7 @@ impl Fournisseur for Ollama {
             return Err(erreur_de_statut(Famille::Ollama, statut, &texte));
         }
         let v: Value =
-            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::Autre(statut))?;
+            serde_json::from_str(&texte).map_err(|_| ErreurFournisseur::corps_illisible(statut))?;
         Ok(Reponse {
             texte: v
                 .pointer("/message/content")
@@ -449,7 +609,108 @@ mod tests {
             erreur_de_statut(f, 404, ""),
             ErreurFournisseur::ModeleInconnu
         );
-        assert_eq!(erreur_de_statut(f, 418, ""), ErreurFournisseur::Autre(418));
+        assert_eq!(
+            erreur_de_statut(f, 418, ""),
+            ErreurFournisseur::Autre {
+                statut: 418,
+                motif: None
+            }
+        );
+    }
+
+    /// #6730 — la réponse réelle d'Anthropic à une clé d'organisation
+    /// (relevée par curl le 22/10/2026 sur le .18).
+    const SANS_ESPACE: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use."}}"#;
+
+    #[test]
+    fn une_cle_sans_espace_de_travail_est_nommee_6730() {
+        let e = erreur_de_statut(Famille::Anthropic, 400, SANS_ESPACE);
+        assert_eq!(
+            e,
+            ErreurFournisseur::CleSansEspaceDeTravail,
+            "#6730 : le 400 « not scoped to a workspace » est retombé en « Autre »"
+        );
+        assert_eq!(e.code(), "cle_sans_espace_de_travail");
+        assert!(e.message().contains("espace de travail"), "{}", e.message());
+    }
+
+    #[test]
+    fn un_400_inconnu_garde_le_motif_du_fournisseur_6730() {
+        // Compatible OpenAI.
+        let e = erreur_de_statut(
+            Famille::CompatibleOpenai,
+            400,
+            r#"{"error":{"message":"Unsupported parameter: 'temperature'","type":"invalid_request_error"}}"#,
+        );
+        assert_eq!(
+            e.motif(),
+            Some("Unsupported parameter: 'temperature'"),
+            "#6730 : le motif du fournisseur est perdu"
+        );
+        assert!(
+            e.message().contains("Unsupported parameter"),
+            "{}",
+            e.message()
+        );
+        // Gemini, réponse en liste.
+        let e = erreur_de_statut(
+            Famille::Gemini,
+            400,
+            r#"[{"error":{"code":400,"message":"API key not valid for this project","status":"INVALID_ARGUMENT"}}]"#,
+        );
+        assert_eq!(e.motif(), Some("API key not valid for this project"));
+        // Ollama : `error` est une chaîne.
+        let e = erreur_de_statut(Famille::Ollama, 400, r#"{"error":"invalid format"}"#);
+        assert_eq!(e.motif(), Some("invalid format"));
+        // Un corps qui n'est pas du JSON : pas de motif, pas de corps brut.
+        let e = erreur_de_statut(Famille::Anthropic, 400, "<html>Bad Request</html>");
+        assert_eq!(e.motif(), None);
+    }
+
+    #[test]
+    fn le_motif_ne_porte_jamais_la_cle_et_reste_court_6730() {
+        let corps = r#"{"error":{"message":"Incorrect API key provided: sk-proj-AbCdEf0123456789. You can find your key at https://platform.openai.com.","type":"invalid_request_error"}}"#;
+        let m = motif_du_fournisseur(corps).unwrap();
+        assert!(
+            !m.contains("sk-proj") && !m.contains("0123456789"),
+            "#6730 : un fragment de clé part dans le motif : {m}"
+        );
+        assert!(m.contains("[masqué]"), "{m}");
+        let long = format!(r#"{{"error":{{"message":"{}"}}}}"#, "mot ".repeat(400));
+        let m = motif_du_fournisseur(&long).unwrap();
+        assert!(m.chars().count() <= MOTIF_MAX + 1, "{}", m.chars().count());
+        let m =
+            motif_du_fournisseur(r#"{"error":{"message":"clé AIzaSyD-abcdefghijklmnop rejetée"}}"#)
+                .unwrap();
+        assert!(
+            !m.contains("AIza"),
+            "#6730 : une clé Gemini part dans le motif : {m}"
+        );
+    }
+
+    #[test]
+    fn l_effort_n_est_pose_que_pour_un_modele_qui_l_accepte() {
+        let mut c = json!({"model": "claude-haiku-5-5"});
+        poser_effort(&mut c, "claude-haiku-5-5", Some("low"));
+        assert_eq!(c["output_config"]["effort"], "low");
+        let mut c = json!({"model": "claude-haiku-4-5"});
+        poser_effort(&mut c, "claude-haiku-4-5", Some("low"));
+        assert!(
+            c.get("output_config").is_none(),
+            "Haiku 4.5 refuse `effort` par un 400 : {c}"
+        );
+        let mut c = json!({});
+        poser_effort(&mut c, "claude-haiku-5-5", None);
+        assert!(c.get("output_config").is_none(), "{c}");
+    }
+
+    #[test]
+    fn ollama_recoit_un_contexte_a_la_taille_de_la_demande() {
+        let long = "x".repeat(60_000);
+        let mut c = json!({"messages": [{"role": "user", "content": long}]});
+        poser_num_ctx(&mut c, 4096);
+        let n = c["options"]["num_ctx"].as_u64().unwrap();
+        assert!(n >= 20_000 + 4096, "contexte trop court : {n}");
     }
 
     #[test]
@@ -458,6 +719,7 @@ mod tests {
             famille: Famille::Anthropic,
             url_base: String::new(),
             cle: Some("sk-ant-secret-123456".into()),
+            espace_de_travail: Some("wrkspc_01Essai".into()),
         };
         let vu = format!("{a:?}");
         assert!(!vu.contains("secret"), "{vu}");

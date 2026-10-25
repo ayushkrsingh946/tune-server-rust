@@ -138,6 +138,16 @@ pub mod sql {
         )
     }
 
+    /// #6460 — l'album d'un dossier désigné aussi par son titre.
+    pub fn get_id_by_folder_and_title<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "SELECT id FROM albums WHERE folder_path = {} AND LOWER(title) = LOWER({}) \
+             ORDER BY id LIMIT 1",
+            d.placeholder(1),
+            d.placeholder(2)
+        )
+    }
+
     /// Albums homonymes déjà rattachés à un AUTRE dossier, avec leur dossier
     /// et les numéros de piste qu'ils occupent : de quoi décider si le dossier
     /// courant est l'éclat d'une même compilation (#1440).
@@ -781,6 +791,23 @@ pub mod sql {
         )
     }
 
+    /// TOUS les labels de la bibliothèque (#6736) : nom (espaces de bord
+    /// retirés, comme le regroupement de l'onglet Labels), nombre d'albums
+    /// visibles, et l'identifiant Qobuz d'un album Qobuz de la bibliothèque
+    /// qui porte ce label, s'il y en a un — la correspondance la plus sûre
+    /// pour retrouver le label chez Qobuz. Aucun emplacement.
+    pub fn labels_de_la_bibliotheque<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "SELECT TRIM(a.label) AS nom, COUNT(*) AS n, \
+             MAX(CASE WHEN a.source = 'qobuz' THEN a.source_id END) AS qobuz \
+             FROM albums a \
+             WHERE a.label IS NOT NULL AND TRIM(a.label) <> '' AND {} AND {} \
+             GROUP BY TRIM(a.label) ORDER BY TRIM(a.label)",
+            crate::db::facet_filter::hidden_albums_excluded(),
+            crate::db::facet_filter::album_distant_double_exclu(d.engine(), "a"),
+        )
+    }
+
     /// Les LABELS dont le nom contient la recherche, avec leur nombre
     /// d'albums visibles (point 8, Yves Corbat, 17/09/2026). Un label n'a pas
     /// d'identité en base : c'est la chaîne `albums.label`, comme dans
@@ -807,6 +834,15 @@ pub mod sql {
             d.placeholder(7)
         )
     }
+}
+
+/// Un label de la bibliothèque, tel que l'onglet Labels le regroupe (#6736).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelDeBibliotheque {
+    pub nom: String,
+    pub album_count: i64,
+    /// L'identifiant Qobuz d'un album Qobuz de la bibliothèque qui le porte.
+    pub album_qobuz: Option<String>,
 }
 
 /// Une tranche de Dynamic Range, bornes **incluses** (#2144).
@@ -1825,6 +1861,53 @@ impl AlbumRepo {
                 Ok(candidate)
             }
         }
+    }
+
+    /// #6460 — l'album `title` d'un dossier qui range PLUSIEURS parutions
+    /// distinctes (deux albums dont les numéros de piste se recouvrent, voir
+    /// `scan_import::PreuvesDuDossier`). Le dossier seul n'identifie plus la
+    /// parution : sans le titre, [`Self::get_or_create_for_folder_with_track`]
+    /// rendrait au second album la ligne du premier lu, titre et artiste
+    /// compris. Les deux lignes partagent le même `folder_path`.
+    pub fn get_or_create_for_folder_and_title(
+        &self,
+        folder: &str,
+        title: &str,
+        artist_id: i64,
+        year: Option<i32>,
+        mbid: Option<&str>,
+    ) -> Result<Album, TuneError> {
+        if folder.is_empty() {
+            return self.get_or_create_with_mbid(title, artist_id, year, mbid);
+        }
+        let sql = self.dialect_sql(
+            sql::get_id_by_folder_and_title,
+            sql::get_id_by_folder_and_title,
+        );
+        let params: [&dyn ToSqlValue; 2] = [&folder, &title];
+        let deja = self
+            .db
+            .query_one_strong(&sql, &params)?
+            .and_then(|row| row.first()?.as_i64());
+        if let Some(id) = deja {
+            let sql = self.dialect_sql(sql::get_by_id, sql::get_by_id);
+            let params: [&dyn ToSqlValue; 1] = [&id];
+            if let Some(row) = self.db.query_one_strong(&sql, &params)? {
+                let mut album = row_to_album(&row);
+                self.reclaim_unknown_artist(&mut album, artist_id)?;
+                return Ok(album);
+            }
+        }
+        let create_sql = self.dialect_sql(sql::create_with_mbid, sql::create_with_mbid);
+        let params: [&dyn ToSqlValue; 4] = [&title, &artist_id, &year, &mbid];
+        let id = self.db.execute_returning_id(&create_sql, &params)?;
+        self.set_folder_path(id, folder)?;
+        let mut album = Album::new(title.to_string());
+        album.id = Some(id);
+        album.artist_id = Some(artist_id);
+        album.year = year;
+        album.musicbrainz_release_id = mbid.map(String::from);
+        Ok(album)
     }
 
     /// L'album déjà rangé sous le dossier MIROIR de `folder` — le même chemin
@@ -4632,6 +4715,29 @@ impl AlbumRepo {
         ];
         let rows = self.db.query_many(&sql, &params)?;
         Ok(rows.iter().map(row_to_album).collect())
+    }
+
+    /// Tous les labels de la bibliothèque (#6736), voir
+    /// [`sql::labels_de_la_bibliotheque`].
+    pub fn labels_de_la_bibliotheque(&self) -> Result<Vec<LabelDeBibliotheque>, TuneError> {
+        let sql = self.dialect_sql(
+            sql::labels_de_la_bibliotheque,
+            sql::labels_de_la_bibliotheque,
+        );
+        let rows = self.db.query_many(&sql, &[])?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(LabelDeBibliotheque {
+                    nom: r.first().and_then(|v| v.as_string())?,
+                    album_count: r.get(1).and_then(|v| v.as_i64()).unwrap_or(0),
+                    album_qobuz: r
+                        .get(2)
+                        .and_then(|v| v.as_string())
+                        .filter(|s| !s.trim().is_empty()),
+                })
+            })
+            .collect())
     }
 
     /// Labels correspondant à la recherche : `(nom, nombre d'albums)`, les

@@ -287,16 +287,17 @@ fn le_controle_hls_ne_touche_pas_la_liste_noire_page_web() {
     assert!(!is_hls_manifest("http://example.net/live", "text/html"));
 }
 
-/// L'ÉPREUVE : la fonction de production qui lit réellement les radios,
-/// appelée telle quelle, refuse un manifeste HLS — et le refuse AVANT le
-/// réseau.
+/// #6357 — la fonction de production qui lit réellement les radios, appelée
+/// telle quelle, confie une liste `.m3u8` au chargeur HLS : elle ne la
+/// refuse plus (#2307 la refusait avant le réseau) et ne la traite pas non
+/// plus comme un flux Icecast.
 ///
 /// L'adresse pointe sur `127.0.0.1:9` (discard), qui refuse la connexion
-/// instantanément. Si la garde disparaissait, le décodeur ouvrirait le
-/// réseau et rendrait `radio HTTP fetch failed: …` : l'assertion tombe.
-/// Le test ne peut donc pas passer pour une mauvaise raison.
+/// instantanément. Le chargeur HLS rend alors `radio HLS: …` ; le chemin
+/// Icecast aurait rendu `radio HTTP fetch failed: …`, l'ancienne porte
+/// `radio_hls_unsupported`. Le témoin distingue les trois.
 #[tokio::test]
-async fn le_decodeur_de_production_refuse_le_hls_avant_tout_appel_reseau() {
+async fn le_decodeur_de_production_confie_le_hls_au_chargeur_de_segments() {
     use crate::http::streamer::{AudioStreamer, StreamInfo};
     let streamer = Arc::new(AudioStreamer::new(0));
     let info = StreamInfo {
@@ -308,9 +309,7 @@ async fn le_decodeur_de_production_refuse_le_hls_avant_tout_appel_reseau() {
     // Appelée EXACTEMENT comme la production l'appelle : ses trois sites
     // (sortie locale, OAAT, DLNA proxifiée) l'enveloppent dans
     // `spawn_blocking`, parce que symphonia et `reqwest::blocking` sont
-    // synchrones. Le test emprunte donc le même chemin, et un sabotage de
-    // la garde y produit la vraie erreur réseau plutôt qu'une panique de
-    // runtime qui masquerait ce qui s'est passé.
+    // synchrones.
     let erreur = tokio::task::spawn_blocking(move || {
         decode_radio_stream_to_pcm(
             "http://127.0.0.1:9/live/master.m3u8?token=abc".to_string(),
@@ -325,11 +324,14 @@ async fn le_decodeur_de_production_refuse_le_hls_avant_tout_appel_reseau() {
     })
     .await
     .expect("la tâche de décodage ne doit pas paniquer")
-    .expect_err("un manifeste HLS ne doit jamais être accepté comme flux");
+    .expect_err("une station injoignable échoue à la première connexion");
     assert!(
-        erreur.starts_with(RADIO_HLS_UNSUPPORTED),
-        "le décodeur doit refuser en NOMMANT HLS, pas en laissant symphonia \
-         échouer sur un message obscur : {erreur}"
+        erreur.starts_with("radio HLS"),
+        "une liste .m3u8 doit passer par le chargeur HLS : {erreur}"
+    );
+    assert!(
+        !erreur.starts_with(RADIO_HLS_UNSUPPORTED),
+        "le HLS n'est plus refusé d'office : {erreur}"
     );
 }
 
@@ -6585,7 +6587,15 @@ async fn test_set_volume() {
     orch.playback.play(zone_id, np).await;
 
     // Set volume to 80%
-    orch.set_volume(zone_id, 0.8, None).await.unwrap();
+    // #6721 — hausse confirmée : la garde n'est pas l'objet de ce test.
+    orch.set_volume_avec_garde(
+        zone_id,
+        0.8,
+        None,
+        crate::audio::garde_de_hausse::Hausse::Confirmee,
+    )
+    .await
+    .unwrap();
     let state = orch.playback.get_state(zone_id).await;
     assert!((state.volume - 0.8).abs() < f64::EPSILON);
 
@@ -6595,7 +6605,14 @@ async fn test_set_volume() {
     assert!((state.volume - 0.0).abs() < f64::EPSILON);
 
     // Set volume to 1.0 (max)
-    orch.set_volume(zone_id, 1.0, None).await.unwrap();
+    orch.set_volume_avec_garde(
+        zone_id,
+        1.0,
+        None,
+        crate::audio::garde_de_hausse::Hausse::Confirmee,
+    )
+    .await
+    .unwrap();
     let state = orch.playback.get_state(zone_id).await;
     assert!((state.volume - 1.0).abs() < f64::EPSILON);
 }
@@ -6624,7 +6641,15 @@ async fn le_trim_ne_touche_pas_le_volume_utilisateur() {
         .set(&format!("zone_{zone_id}_gain_trim_db"), "-6")
         .unwrap();
 
-    orch.set_volume(zone_id, 0.8, None).await.unwrap();
+    // #6721 — hausse confirmée : la garde n'est pas l'objet de ce test.
+    orch.set_volume_avec_garde(
+        zone_id,
+        0.8,
+        None,
+        crate::audio::garde_de_hausse::Hausse::Confirmee,
+    )
+    .await
+    .unwrap();
     let state = orch.playback.get_state(zone_id).await;
     assert!((state.volume - 0.8).abs() < f64::EPSILON);
     let zone = zone_repo.get(zone_id).unwrap().unwrap();
@@ -7722,6 +7747,66 @@ async fn le_dop_d_une_piste_iso_ne_sert_que_la_piste_depuis_le_deplacement() {
     assert!(
         recu[44..] == attendu[..],
         "le DoP servi n'est pas celui de la piste à partir du déplacement"
+    );
+}
+
+/// 🔴 #6630 — le DoP d'une piste d'ISO entamée par un déplacement ANNONCE la
+/// longueur qu'il sert : la session (donc le `Content-Length`) porte la durée
+/// restante de la tranche, pas celle de la piste entière. Sans cela, le
+/// client recevait un `Content-Length` trop long et un corps fermé plus tôt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn le_dop_d_une_piste_iso_entamee_annonce_la_longueur_servie_6630() {
+    use crate::audio::sacd::fabrique::{ImageFabriquee, ecrire, octets_attendus};
+    let orch = test_orchestrator();
+    let dossier = tempfile::tempdir().unwrap();
+    let iso = dossier.path().join("Kind of Blue.iso");
+    let bornes = ecrire(&iso, &ImageFabriquee::deux_pistes());
+    let isos = vec![crate::audio::sacd::IsoSacdLu {
+        chemin: iso.clone(),
+        disque: crate::audio::sacd::lire_disque(&iso).unwrap(),
+    }];
+    let mut bilan = crate::scanner::cue_bibliotheque::BilanCue::default();
+    crate::scanner::cue_bibliotheque::ecrire_les_iso_sacd(&orch.db, &isos, &mut bilan);
+    let (debut, fin) = bornes[0];
+    let piste = crate::db::track_repo::TrackRepo::with_backend(orch.db.clone())
+        .get_by_cue_identity(
+            &iso.to_string_lossy(),
+            crate::audio::sacd::trames_en_ms(debut) as i64,
+        )
+        .unwrap()
+        .unwrap();
+    let zones = ZoneRepo::with_backend(orch.db.clone());
+    let zone_id = zones
+        .create("DAC DoP", Some("local"), Some("local:dac-6630"))
+        .unwrap();
+    zones.update_dsd_mode(zone_id, "dop").unwrap();
+    let mut req = requete_locale_3234(zone_id, piste.id.unwrap());
+    req.output_device_id = Some("local:dac-6630".into());
+    req.seek_ms = Some(crate::audio::sacd::trames_en_ms(debut + 1) as u64);
+
+    let resolu = match orch.resolve_local_track(&req).await {
+        Ok(r) => r,
+        Err(e) => panic!("le DoP d'une piste d'ISO doit se résoudre : {e}"),
+    };
+    let info = orch
+        .streamer
+        .stream_output_wire(resolu.stream_id.as_deref().unwrap())
+        .await
+        .expect("session DoP");
+    let servis = 44
+        + crate::audio::dsd_to_dop::DsdToDoP::new(2, false)
+            .feed(&octets_attendus(debut + 1, fin))
+            .len() as u64;
+    let annonce = info.wav_content_length().expect("Content-Length annoncé");
+    // Tolérance : 2 ms de DoP (176,4 kHz, 2 × 24 bits), l'arrondi des trames
+    // SACD en millisecondes. La piste entière en annonce une trame de plus
+    // (1/75 s, plus de 14 000 octets).
+    let tolerance = 2 * 176_400 * 6 / 1000;
+    assert!(
+        annonce.abs_diff(servis) <= tolerance,
+        "#6630 — le DoP entamé annonce {annonce} octets pour {servis} servis \
+         (durée de session {:?} ms) : la longueur de la piste entière, pas celle servie",
+        info.duration_ms
     );
 }
 

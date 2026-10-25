@@ -597,13 +597,6 @@ pub struct PositionPoller {
     /// nulle : seules celles-là peuvent être dites « figées à 0 ». Certains
     /// renderers rendent 0 en permanence tout en jouant.
     zones_a_position_prouvee: std::sync::Mutex<std::collections::HashSet<i64>>,
-    /// #5695 — zones PURE verrouillées dont le volume a déjà été réimposé et
-    /// DIT : l'avertissement part une fois par zone, pas à chaque écart.
-    volumes_pure_reimposes: std::sync::Mutex<std::collections::HashSet<i64>>,
-    /// #5695 — zones dont l'épisode « PURE verrouillé » a déjà été rattrapé
-    /// une fois (voir `volume_pure_concilie`). Une zone en sort dès qu'elle
-    /// est vue hors verrou, pour que le prochain armement soit rattrapé.
-    volumes_pure_concilies: std::sync::Mutex<std::collections::HashSet<i64>>,
     /// #6541 — dernier volume rapporté au-dessus de la limite de sécurité,
     /// par zone : la consigne n'est recommandée qu'une fois par valeur.
     volumes_plafonnes: std::sync::Mutex<std::collections::HashMap<i64, f64>>,
@@ -652,8 +645,6 @@ impl PositionPoller {
             zones_masquees_signalees: std::sync::Mutex::new(std::collections::HashSet::new()),
             relances_demarrage_fige: std::sync::Mutex::new(std::collections::HashMap::new()),
             zones_a_position_prouvee: std::sync::Mutex::new(std::collections::HashSet::new()),
-            volumes_pure_reimposes: std::sync::Mutex::new(std::collections::HashSet::new()),
-            volumes_pure_concilies: std::sync::Mutex::new(std::collections::HashSet::new()),
             volumes_plafonnes: std::sync::Mutex::new(std::collections::HashMap::new()),
             volumes_100_ignores: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
@@ -690,6 +681,8 @@ impl PositionPoller {
             // Derniere valeur annoncee de `levels_available`, par zone.
             let mut niveaux_annonces: HashMap<i64, bool> = HashMap::new();
 
+            let mut paniques: u64 = 0;
+
             loop {
                 // Wake on either the regular 1-second tick OR an immediate
                 // notification from a local output that finished a track.
@@ -697,12 +690,60 @@ impl PositionPoller {
                     _ = ticker.tick() => {},
                     _ = notify.notified() => {},
                 }
-                self.tick(&mut poll_states, &mut idle_backoff, &startup_at)
-                    .await;
-                self.annoncer_bascule_des_niveaux(&mut niveaux_annonces)
-                    .await;
+                // #6932 — le tour passe par `tour_protege` : sa panique ne
+                // tue plus le sondeur de toutes les zones.
+                let tour = async {
+                    self.tick(&mut poll_states, &mut idle_backoff, &startup_at)
+                        .await;
+                    self.annoncer_bascule_des_niveaux(&mut niveaux_annonces)
+                        .await;
+                };
+                if let Err(message) = Self::tour_protege(tour).await {
+                    paniques += 1;
+                    if decisions::panique_du_tour_a_journaliser(paniques) {
+                        tracing::error!(
+                            panique = %message,
+                            paniques_total = paniques,
+                            "position_poller_tick_panicked"
+                        );
+                    }
+                }
             }
         })
+    }
+
+    /// #6932 — un tour du sondeur, protégé contre sa propre panique.
+    ///
+    /// Le sondeur est UNE tâche pour toutes les zones, lancée une seule fois
+    /// au démarrage et que personne ne surveille. Une panique dans un tour —
+    /// une seule zone, un seul relevé — tuait la tâche : plus aucune position
+    /// relevée (la barre d'avancement figée sur toutes les zones), plus aucune
+    /// fin de piste constatée (la lecture s'arrête au bout du titre en cours),
+    /// jusqu'au redémarrage du serveur. Sous Windows la panique n'allait qu'au
+    /// `tune-crash.log`, pas au journal joint aux rapports.
+    ///
+    /// La panique est rattrapée ici et rendue en `Err(message)` ; le tour
+    /// suivant repart. Les verrous tokio se libèrent au déroulement, les
+    /// verrous std empoisonnés sont déjà relus par `into_inner` dans le
+    /// sondeur.
+    ///
+    /// Le tour lui-même (relevé puis annonce de la bascule des niveaux) reste
+    /// écrit dans `spawn` : la garde `tests/poller_bascule.rs` (#2285) y
+    /// cherche l'appel à l'annonce.
+    pub(crate) async fn tour_protege(
+        tour: impl std::future::Future<Output = ()>,
+    ) -> Result<(), String> {
+        use futures_util::FutureExt;
+        std::panic::AssertUnwindSafe(tour)
+            .catch_unwind()
+            .await
+            .map_err(|charge| {
+                charge
+                    .downcast_ref::<&str>()
+                    .map(|m| m.to_string())
+                    .or_else(|| charge.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "panique sans message".to_string())
+            })
     }
 
     /// Annoncer quand une zone se met — ou cesse — de mesurer ses niveaux.
@@ -872,9 +913,14 @@ impl PositionPoller {
         zone_state: &crate::playback::ZoneState,
     ) -> Option<i64> {
         let p = Self::next_position(zone_state)?;
-        crate::orchestrator::lignes_bannies_a_enjamber(db, zone_id, p)
-            .0
-            .position_depuis(p)
+        crate::orchestrator::lignes_bannies_a_enjamber(
+            db,
+            zone_id,
+            p,
+            zone_state.session_profile_id,
+        )
+        .0
+        .position_depuis(p)
     }
 
     /// Next-track decision for a MANUAL skip (the `next` button). A manual skip
@@ -1065,14 +1111,19 @@ mod demarrage_fige_5522_tests;
 mod volume_plafond_6541;
 #[cfg(test)]
 mod volume_plafond_6541_tests;
-/// #5695 — sous PURE verrouillé, réimposer 100 % au lieu d'adopter le volume
-/// du renderer.
-mod volume_pure_5695;
+/// #6721 — sous PURE verrouillé, le sondeur respecte une baisse faite sur
+/// l'appareil : il ne remonte jamais le volume tout seul (le banc `Banc` sert
+/// aussi à #6008, #6541 et à la sourdine).
 #[cfg(test)]
 mod volume_pure_5695_tests;
 
 /// #6233 — radio sur sortie locale : le contrat de signal relu à chaque tour.
 mod contrat_radio_locale_6233;
+/// #6739 — un relevé du volume de l'appareil ne remonte jamais la consigne.
+mod releve_ne_monte_pas_6739;
+/// #6739 — ses témoins, sur le vrai sondeur et le vrai orchestrateur.
+#[cfg(test)]
+mod releve_ne_monte_pas_6739_tests;
 /// #5662 — un renderer à 100 % ignoré par l'adoption est signalé au journal.
 mod volume_100_ignore_5662;
 /// #6008 — l'adoption du volume du renderer est dite au journal.
@@ -1086,6 +1137,10 @@ mod tests;
 
 #[cfg(test)]
 mod status_timeout_tests;
+
+/// #6932 — une panique dans un tour ne tue plus le sondeur.
+#[cfg(test)]
+mod sondeur_survit_a_une_panique_6932;
 
 /// Sourdine par zéro (Eversolo DMP-A8) : le silence commandé n'est pas
 /// rouvert par le volume que l'appareil remonte.
@@ -1307,6 +1362,11 @@ mod annonce_navigateur_guard;
 #[cfg(test)]
 mod remontee_des_pannes_de_sortie_tests;
 
+/// #6790 — une sortie qui se met en pause d'elle-même (`endpoint_release`
+/// OAAT) emmène la zone en pause.
+#[cfg(test)]
+mod pause_par_l_appareil_6790_tests;
+
 #[cfg(test)]
 mod lecture_sans_destination_tests;
 
@@ -1366,7 +1426,12 @@ mod hqplayer_enchainement_4851;
 /// un échec : préchargement, enchaînement sans blanc et reprise désignent la
 /// même suivante que l'avance de la file.
 #[cfg(test)]
-mod suivante_bannie_5143;
+pub(crate) mod suivante_bannie_5143;
+
+/// #6735 — Répéter la piste relance un morceau plus court que les gardes
+/// anti-double-appui de `play` ; un double appui de contrôleur reste coalescé.
+#[cfg(test)]
+mod repeter_piste_courte_6735;
 
 /// #5395 — la radio artiste se recharge par la vraie fin de file, et une file
 /// qui s'achève hors radio rend la main au réglage d'auto-lecture de la zone.
@@ -1475,3 +1540,9 @@ mod zone_masquee_en_lecture_4970;
 /// l'arrivée du contrat s'annonce — une fois, et une seule.
 #[cfg(test)]
 mod annonce_du_contrat_de_signal_4559;
+
+/// #6717 — un renderer qui se dit arrêté mais dont la position avance joue :
+/// sa zone n'est plus coupée sur « flux à sec ». Le banc monte le vrai `tick`
+/// et rejoue les deux coupures du journal, plus la contre-garde.
+#[cfg(test)]
+mod arret_dementi_par_la_position_6717;

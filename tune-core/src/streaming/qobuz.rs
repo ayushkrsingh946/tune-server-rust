@@ -103,7 +103,20 @@ pub struct BasesQobuz {
 }
 
 /// Une lecture de favoris partagée par les demandes qui l'attendent.
-type FavorisEnVol = tokio::sync::OnceCell<Result<Vec<serde_json::Value>, String>>;
+type FavorisEnVol = tokio::sync::OnceCell<Result<ListePaginee, String>>;
+
+/// Une liste paginée relue chez Qobuz, et si elle est COMPLÈTE (#5997).
+///
+/// `incomplete` porte le motif quand la liste ne peut pas être tenue pour
+/// entière : moins d'éléments que le `total` annoncé (Qobuz sert parfois des
+/// pages plus courtes qu'il ne l'annonce, #6616), une réponse sans la clé
+/// attendue, ou une page pleine sans `total`. L'affichage s'en contente ; le
+/// miroir des favoris, lui, ne doit rien retirer sur une telle lecture.
+#[derive(Clone, Debug)]
+struct ListePaginee {
+    items: Vec<serde_json::Value>,
+    incomplete: Option<String>,
+}
 
 /// Une réponse éditoriale, et l'instant où elle a été obtenue.
 struct EntreeCache {
@@ -491,7 +504,130 @@ fn log_favorite_result(
     }
 }
 
+/// Un album du catalogue d'un label qu'on peut montrer : écoutable et déjà
+/// sorti. Les précommandes (`streamable` vrai mais date future) rendent « no
+/// url » (502) à la lecture (garde du LMS, `_isReleased`).
+fn sorti_et_ecoutable(item: &serde_json::Value, maintenant: u64) -> bool {
+    let streamable = item["streamable"].as_bool() != Some(false);
+    let released = item["released_at"]
+        .as_u64()
+        .map_or(true, |ts| ts <= maintenant);
+    streamable && released
+}
+
+fn secondes_d_epoque() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 impl QobuzService {
+    /// #6934 — UNE page du catalogue d'un label, par son identifiant : un
+    /// seul `label/get` (`extra=albums`, `limit`, `offset`). Le nom et le logo
+    /// viennent de la même réponse (le logo par [`logos_labels::image_de_label`],
+    /// la lecture du lot L). Sans les précommandes, comme
+    /// [`Self::albums_du_label`] ; `total` reste celui que Qobuz annonce.
+    pub(crate) async fn page_du_label(
+        &self,
+        label_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<LabelPage, TuneError> {
+        let lim = limit.to_string();
+        let off = offset.to_string();
+        let data = self
+            .api_get(
+                "/label/get",
+                &[
+                    ("label_id", label_id),
+                    ("extra", "albums"),
+                    ("limit", &lim),
+                    ("offset", &off),
+                ],
+            )
+            .await?;
+        let maintenant = secondes_d_epoque();
+        let albums = data["albums"]["items"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|it| sorti_et_ecoutable(it, maintenant))
+                    .map(Self::map_album)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let id = data["id"]
+            .as_u64()
+            .map(|id| id.to_string())
+            .or_else(|| data["id"].as_str().map(Into::into))
+            .unwrap_or_else(|| label_id.to_string());
+        Ok(LabelPage {
+            id,
+            name: data["name"].as_str().unwrap_or("").trim().to_string(),
+            image_url: logos_labels::image_de_label(&data),
+            total: data["albums"]["total"].as_u64().unwrap_or(0) as usize,
+            offset,
+            limit,
+            albums,
+        })
+    }
+
+    /// Le catalogue d'un label (`label/get`, `extra=albums`), paginé et borné
+    /// à 500 albums, sans les précommandes. Partagé par la page d'un label
+    /// ([`StreamingService::get_album_label`]) et la découverte des artistes
+    /// du même label (#6782, [`crate::library::artistes_du_label`]).
+    pub(crate) async fn albums_du_label(
+        &self,
+        label_id: &str,
+    ) -> Result<Vec<StreamAlbum>, TuneError> {
+        // Bounded pagination: big majors (e.g. Columbia) expose 10k+ albums.
+        // We cap at MAX and the app offers a text filter over the loaded set.
+        const MAX: usize = 500;
+        const PAGE: usize = 50;
+        let now = secondes_d_epoque();
+        let mut albums: Vec<StreamAlbum> = Vec::new();
+        let mut offset: usize = 0;
+        loop {
+            let off = offset.to_string();
+            let lim = PAGE.to_string();
+            let data = self
+                .api_get(
+                    "/label/get",
+                    &[
+                        ("label_id", label_id),
+                        ("extra", "albums"),
+                        ("limit", &lim),
+                        ("offset", &off),
+                    ],
+                )
+                .await?;
+            let items = data["albums"]["items"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let n = items.len();
+            // A label's full catalogue includes not-yet-released pre-orders
+            // (streamable=true but a future release date) whose tracks resolve
+            // to "no url" (502) on playback. Keep only released + streamable
+            // albums (mirrors the LMS plugin's `_isReleased` check).
+            albums.extend(
+                items
+                    .iter()
+                    .filter(|it| sorti_et_ecoutable(it, now))
+                    .map(Self::map_album),
+            );
+            let total = data["albums"]["total"].as_u64().unwrap_or(0) as usize;
+            offset += n;
+            if n < PAGE || offset >= total || albums.len() >= MAX {
+                break;
+            }
+        }
+        albums.truncate(MAX);
+        Ok(albums)
+    }
+
     /// Écrire un favori exige le jeton utilisateur : l'app_id seul identifie
     /// l'application, pas le compte. Sans jeton, Qobuz accepte la requête sans
     /// rien enregistrer — un succès en trompe-l'œil. On refuse avant d'émettre.
@@ -1144,18 +1280,10 @@ impl QobuzService {
         Ok(data)
     }
 
-    async fn api_get_all_pages(
-        &self,
-        path: &str,
-        base_params: &[(&str, &str)],
-        items_key: &str,
-    ) -> Result<Vec<serde_json::Value>, String> {
-        self.api_get_all_pages_bornee(path, base_params, items_key, usize::MAX)
-            .await
-    }
-
-    /// Comme `api_get_all_pages`, mais cesse de paginer une fois `plafond`
-    /// éléments atteints. Voir `remaining_page_offsets_bornees` (#1969).
+    /// Toutes les pages d'une liste Qobuz, en cessant de paginer une fois
+    /// `plafond` éléments atteints. Voir `remaining_page_offsets_bornees`
+    /// (#1969). Les favoris passent par [`Self::liste_paginee`], qui dit en
+    /// plus si la liste est complète (#5997).
     async fn api_get_all_pages_bornee(
         &self,
         path: &str,
@@ -1163,6 +1291,21 @@ impl QobuzService {
         items_key: &str,
         plafond: usize,
     ) -> Result<Vec<serde_json::Value>, String> {
+        Ok(self
+            .liste_paginee(path, base_params, items_key, plafond)
+            .await?
+            .items)
+    }
+
+    /// La pagination de `api_get_all_pages_bornee`, qui dit en plus si la
+    /// liste rendue est complète (#5997, voir [`ListePaginee`]).
+    async fn liste_paginee(
+        &self,
+        path: &str,
+        base_params: &[(&str, &str)],
+        items_key: &str,
+        plafond: usize,
+    ) -> Result<ListePaginee, String> {
         use futures_util::StreamExt;
         const PAGE_SIZE: usize = 50;
         const MAX_CONCURRENT_PAGES: usize = 4;
@@ -1213,9 +1356,34 @@ impl QobuzService {
             }
         }
 
+        // #5997 — ce que la première page permet de dire de la complétude.
+        let total_annonce = data[items_key]["total"].as_u64().map(|t| t as usize);
+        let cle_presente = data.get(items_key).map(|v| v.is_object()).unwrap_or(false);
+        let complete = |recus: usize| -> Option<String> {
+            if !cle_presente {
+                return Some(format!("qobuz: réponse sans « {items_key} »"));
+            }
+            match total_annonce {
+                Some(t) if recus < t => Some(format!(
+                    "qobuz: lecture de « {items_key} » incomplète ({recus} sur {t})"
+                )),
+                Some(_) => None,
+                // Sans total, une page pleine peut avoir une suite qu'on n'a
+                // pas demandée.
+                None if recus >= PAGE_SIZE => Some(format!(
+                    "qobuz: lecture de « {items_key} » sans total annoncé"
+                )),
+                None => None,
+            }
+        };
+
         let offsets = remaining_page_offsets_bornees(count, total, PAGE_SIZE, plafond);
         if offsets.is_empty() {
-            return Ok(all_items);
+            let incomplete = complete(all_items.len());
+            return Ok(ListePaginee {
+                items: all_items,
+                incomplete,
+            });
         }
 
         // `buffered` preserves page order, so the merged list matches what the
@@ -1247,7 +1415,11 @@ impl QobuzService {
             all_items.extend(page?);
         }
 
-        Ok(all_items)
+        let incomplete = complete(all_items.len());
+        Ok(ListePaginee {
+            items: all_items,
+            incomplete,
+        })
     }
 
     /// Rôles Qobuz d'écriture pure (comparés sans espaces) : un intervenant qui
@@ -1410,6 +1582,29 @@ impl QobuzService {
     /// Les demandes concurrentes d'un même type partagent UNE requête en vol
     /// (voir `favoris_en_vol`) ; aucune réponse n'est gardée après elle.
     async fn favoris_bruts(&self, type_qobuz: &str) -> Result<Vec<serde_json::Value>, TuneError> {
+        Ok(self.lecture_des_favoris(type_qobuz).await?.items)
+    }
+
+    /// Les favoris d'un type, seulement si Qobuz les a servis EN ENTIER
+    /// (#5997) : `Err` sur une lecture incomplète (voir [`ListePaginee`]).
+    ///
+    /// C'est la lecture du miroir des favoris : un favori `synchro` que le
+    /// service ne nomme plus y est retiré de Tune. Une liste coupée à la
+    /// troisième page aurait retiré tout ce qui la dépasse, à chaque
+    /// rafraîchissement.
+    async fn favoris_complets(
+        &self,
+        type_qobuz: &str,
+    ) -> Result<Vec<serde_json::Value>, TuneError> {
+        let lecture = self.lecture_des_favoris(type_qobuz).await?;
+        if let Some(motif) = lecture.incomplete {
+            warn!(type_qobuz, motif = %motif, "qobuz_favoris_lecture_incomplete_5997");
+            return Err(motif.into());
+        }
+        Ok(lecture.items)
+    }
+
+    async fn lecture_des_favoris(&self, type_qobuz: &str) -> Result<ListePaginee, TuneError> {
         let vol = {
             let mut en_vol = self
                 .favoris_en_vol
@@ -1422,10 +1617,11 @@ impl QobuzService {
         };
         let reponse = vol
             .get_or_init(|| async {
-                self.api_get_all_pages(
+                self.liste_paginee(
                     "/favorite/getUserFavorites",
                     &[("type", type_qobuz)],
                     type_qobuz,
+                    usize::MAX,
                 )
                 .await
             })
@@ -2945,61 +3141,25 @@ impl StreamingService for QobuzService {
             .or_else(|| album["label"]["id"].as_str().map(Into::into))
             .ok_or_else(|| TuneError::NotFound("album has no label".into()))?;
         let name = album["label"]["name"].as_str().unwrap_or("").into();
-        // Bounded pagination: big majors (e.g. Columbia) expose 10k+ albums.
-        // We cap at MAX and the app offers a text filter over the loaded set.
-        const MAX: usize = 500;
-        const PAGE: usize = 50;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let mut albums: Vec<StreamAlbum> = Vec::new();
-        let mut offset: usize = 0;
-        loop {
-            let off = offset.to_string();
-            let lim = PAGE.to_string();
-            let data = self
-                .api_get(
-                    "/label/get",
-                    &[
-                        ("label_id", &label_id),
-                        ("extra", "albums"),
-                        ("limit", &lim),
-                        ("offset", &off),
-                    ],
-                )
-                .await?;
-            let items = data["albums"]["items"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            let n = items.len();
-            // A label's full catalogue includes not-yet-released pre-orders
-            // (streamable=true but a future release date) whose tracks resolve
-            // to "no url" (502) on playback. Keep only released + streamable
-            // albums (mirrors the LMS plugin's `_isReleased` check).
-            albums.extend(
-                items
-                    .iter()
-                    .filter(|it| {
-                        let streamable = it["streamable"].as_bool() != Some(false);
-                        let released = it["released_at"].as_u64().map_or(true, |ts| ts <= now);
-                        streamable && released
-                    })
-                    .map(Self::map_album),
-            );
-            let total = data["albums"]["total"].as_u64().unwrap_or(0) as usize;
-            offset += n;
-            if n < PAGE || offset >= total || albums.len() >= MAX {
-                break;
-            }
-        }
-        albums.truncate(MAX);
+        let albums = self.albums_du_label(&label_id).await?;
         Ok(LabelInfo {
             id: label_id,
             name,
             albums,
         })
+    }
+
+    async fn get_label(
+        &self,
+        label_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<LabelPage, TuneError> {
+        self.page_du_label(label_id, limit, offset).await
+    }
+
+    async fn get_label_catalogue(&self, label_id: &str) -> Result<Vec<StreamAlbum>, TuneError> {
+        self.albums_du_label(label_id).await
     }
 
     async fn get_playlist_tags(&self) -> Result<Vec<PlaylistTag>, TuneError> {
@@ -3311,6 +3471,24 @@ impl StreamingService for QobuzService {
             return Ok(None);
         }
         let items = self.favoris_bruts(fav_type).await?;
+        Ok(Some(
+            items
+                .iter()
+                .map(|brut| Self::favori_date(brut, fav_type))
+                .collect(),
+        ))
+    }
+
+    /// #5997 — la même liste datée, mais `Err` si Qobuz ne l'a pas servie en
+    /// entier : c'est elle que le miroir réconcilie.
+    async fn favoris_dates_complets(
+        &self,
+        fav_type: &str,
+    ) -> Result<Option<Vec<serde_json::Value>>, TuneError> {
+        if !matches!(fav_type, "tracks" | "albums" | "artists") {
+            return Ok(None);
+        }
+        let items = self.favoris_complets(fav_type).await?;
         Ok(Some(
             items
                 .iter()
@@ -7897,3 +8075,13 @@ mod tests_livrets_qobuz_6481 {
         );
     }
 }
+
+/// #6736 — le logo d'un label, rapproché par `label/search` ou par l'album.
+#[path = "qobuz_logos_labels.rs"]
+mod logos_labels;
+
+/// #6934 — une page du catalogue d'un label (`label/get`), sur un Qobuz simulé
+/// qui rend une réponse reconstituée (aucun appel réel, aucun jeton).
+#[cfg(test)]
+#[path = "qobuz_page_du_label_tests.rs"]
+mod page_du_label_tests;

@@ -14,7 +14,9 @@
 //!    pas tant qu'il est tenu ;
 //! 2. **la lecture arrêtée**, elle reprend le fichier reporté et le grave ;
 //! 3. **sans lecture**, rien ne change : aucune pause, aucune passe au relevé,
-//!    tout est gravé d'un trait.
+//!    tout est gravé d'un trait ;
+//! 4. **#6692** : le fichier de la piste SUIVANTE, celle que le poller arme
+//!    pour l'enchaînement, reste intact lui aussi tant que la zone joue.
 //!
 //! ## Pourquoi une cible `[[test]]` à elle seule
 //!
@@ -156,6 +158,26 @@ impl Banc {
         noter_etat_de_lecture(ZONE, "playing");
     }
 
+    /// Une piste de plus à graver, dans le dossier du banc.
+    fn ajouter_piste(&self, id: i64, nom: &str, dr: &str) -> String {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tune-core/tests/fixtures/test.flac");
+        let chemin = self._dossier.path().join(nom);
+        std::fs::copy(&fixture, &chemin).unwrap();
+        let chemin = chemin.to_string_lossy().into_owned();
+        self.state
+            .backend
+            .execute(
+                "INSERT INTO tracks (id, title, file_path) VALUES (?1, ?2, ?3)",
+                &[&id, &nom, &chemin],
+            )
+            .unwrap();
+        let meta = TrackMetadataRepo::with_backend(self.state.backend.clone());
+        meta.set(id, "dr_track", dr).unwrap();
+        meta.set(id, "dr_source", "analysis").unwrap();
+        chemin
+    }
+
     async fn arreter(&self) {
         self.state.playback.stop(ZONE).await;
         noter_etat_de_lecture(ZONE, "stopped");
@@ -249,4 +271,69 @@ async fn sans_lecture_la_gravure_ne_change_pas_6212() {
     for (id, _) in &banc.pistes {
         assert_eq!(banc.source(*id).as_deref(), Some("tag"));
     }
+}
+
+/// 🔴 #6692 — la zone joue la piste 1 et sa file porte la piste 2 juste
+/// après : c'est elle que le poller arme près de la fin (session préchargée
+/// ou `SetNext`). La gravure laisse son fichier intact octet pour octet tant
+/// que la zone joue, grave la piste 3 qui n'est ni jouée ni suivante, et
+/// reprend la piste 2 une fois la lecture arrêtée.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pendant_une_lecture_la_gravure_epargne_aussi_la_piste_suivante_6692() {
+    let _g = VERROU.lock().await;
+    a_neuf(50);
+    let banc = Banc::monter().await;
+    let [(jouee, chemin_joue), (suivante, chemin_suivant)] = banc.pistes.clone();
+    let chemin_tiers = banc.ajouter_piste(3, "tierce.flac", "7");
+    // La file appartient à une zone : la ligne `zones` d'abord (clé étrangère).
+    banc.state
+        .backend
+        .execute(
+            "INSERT INTO zones (id, name) VALUES (?1, 'Zone 6692')",
+            &[&ZONE],
+        )
+        .unwrap();
+    tune_core::db::play_queue_repo::PlayQueueRepo::with_backend(banc.state.backend.clone())
+        .set_queue(ZONE, &[jouee, suivante, 3])
+        .unwrap();
+    let joue_avant = std::fs::read(&chemin_joue).unwrap();
+    let suivant_avant = std::fs::read(&chemin_suivant).unwrap();
+    let tiers_avant = std::fs::read(&chemin_tiers).unwrap();
+
+    banc.jouer(jouee).await;
+    banc.state.playback.update_queue_info(ZONE, 0, 3).await;
+    banc.lancer().await;
+    banc.attendre("un premier fichier gravé", |s| {
+        s["dans_les_fichiers"].as_i64() >= Some(1)
+    })
+    .await;
+
+    // Plusieurs tours de relecture des reportées.
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let statut = banc.statut().await;
+    assert!(
+        std::fs::read(&chemin_suivant).unwrap() == suivant_avant,
+        "#6692 — la gravure a réécrit le fichier de la piste SUIVANTE, armée \
+         par le gapless, pendant la lecture (statut {statut})"
+    );
+    assert!(std::fs::read(&chemin_joue).unwrap() == joue_avant);
+    assert!(
+        std::fs::read(&chemin_tiers).unwrap() != tiers_avant,
+        "la piste 3, ni jouée ni suivante, doit être gravée pendant la lecture"
+    );
+    assert_eq!(banc.source(suivante).as_deref(), Some("analysis"));
+    assert_eq!(banc.source(3).as_deref(), Some("tag"));
+    assert_eq!(statut["status"], "running", "{statut}");
+
+    banc.arreter().await;
+    let statut = banc
+        .attendre("la passe finie après l'arrêt", |s| s["status"] == "done")
+        .await;
+    assert_eq!(statut["written"], 3, "{statut}");
+    assert_eq!(statut["errors"], 0, "{statut}");
+    assert!(
+        std::fs::read(&chemin_suivant).unwrap() != suivant_avant,
+        "lecture arrêtée : le fichier de la suivante doit être gravé"
+    );
+    a_neuf(priorite::politique::DEFAUT.pause_between_items_ms);
 }

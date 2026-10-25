@@ -499,7 +499,7 @@ impl PositionPoller {
         loop {
             match self
                 .orchestrator
-                .play_from_queue(zone_id, attempt_pos)
+                .play_from_queue_en_fin_de_piste(zone_id, attempt_pos)
                 .await
             {
                 Ok(_) => {

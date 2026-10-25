@@ -27,6 +27,12 @@
 //!   lots de [`PAR_ENVOI`], une pause de [`PAUSE_ENTRE_ENVOIS`] entre deux
 //!   lots, sous la portée de débit [`CloudScope::CircleThumbnails`] (un 429
 //!   est mémorisé et respecté).
+//! * #6733 — tant qu'il reste des vignettes à envoyer et que le site n'a rien
+//!   refusé, le passage suivant part après [`SUITE`] et non après
+//!   [`INTERVALLE`] : c'est le site (429, `Retry-After`, quota) qui borne le
+//!   débit, plus la passe. Les albums les plus récemment ajoutés partent
+//!   d'abord (identifiant décroissant), et une pochette illisible ne compte
+//!   pas dans le plafond du passage.
 //!
 //! ## Contrat (site-mozaiklabs, `auth.cloud-library`, jeton de liaison exigé)
 //!
@@ -71,6 +77,16 @@ pub const PAUSE_ENTRE_ENVOIS: Duration = Duration::from_secs(1);
 pub const RELIRE_LE_MANIFESTE: Duration = Duration::from_secs(6 * 3600);
 /// Entre deux passages de fond.
 pub const INTERVALLE: Duration = Duration::from_secs(15 * 60);
+/// #6733 — entre deux passages quand le précédent a laissé des vignettes à
+/// envoyer sans que le site ait refusé quoi que ce soit. À 200 vignettes par
+/// passage, une bibliothèque de 31 000 albums prenait plus de 30 h au rythme
+/// d'un passage toutes les [`INTERVALLE`].
+pub const SUITE: Duration = Duration::from_secs(5);
+
+/// Le délai avant le passage suivant, selon le bilan de celui qui finit.
+pub fn delai_avant_le_prochain_passage(bilan: &Bilan) -> Duration {
+    if bilan.reste { SUITE } else { INTERVALLE }
+}
 
 /// Le réglage est-il actif ? Absent ou illisible = oui (défaut du 19/10).
 pub fn reglage_actif(settings: &SettingsRepo) -> bool {
@@ -151,6 +167,9 @@ pub struct Bilan {
     pub rien: bool,
     /// Le cloud a confirmé l'effacement de toutes les vignettes.
     pub effacees: bool,
+    /// #6733 — le passage s'est arrêté au plafond, sans refus du site : il
+    /// reste des vignettes à envoyer, le passage suivant part tout de suite.
+    pub reste: bool,
 }
 
 pub struct Vignettes {
@@ -162,6 +181,11 @@ pub struct Vignettes {
     manifeste: Mutex<Option<(Instant, HashMap<i64, Tenue>)>>,
     pause: Duration,
     reveil: tokio::sync::Notify,
+    /// #6733 — `(album_id, clé de source)` dont la pochette ne s'est pas lue
+    /// ou pas décodée : sautés aux passages suivants, tant que la pochette ne
+    /// change pas. Sans eux, des albums à pochette illisible en tête de liste
+    /// occuperaient le plafond de chaque passage sans jamais rien envoyer.
+    illisibles: std::sync::Mutex<std::collections::HashSet<(i64, String)>>,
 }
 
 impl Vignettes {
@@ -174,6 +198,7 @@ impl Vignettes {
             manifeste: Mutex::new(None),
             pause: PAUSE_ENTRE_ENVOIS,
             reveil: tokio::sync::Notify::new(),
+            illisibles: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -205,11 +230,12 @@ impl Vignettes {
                     sources_seules = bilan.sources_seules,
                     refusees = bilan.refusees,
                     effacees = bilan.effacees,
+                    reste = bilan.reste,
                     "circle_vignettes_passage"
                 );
             }
             tokio::select! {
-                _ = tokio::time::sleep(INTERVALLE) => {}
+                _ = tokio::time::sleep(delai_avant_le_prochain_passage(&bilan)) => {}
                 _ = self.reveil.notified() => {}
             }
         }
@@ -294,18 +320,22 @@ impl Vignettes {
             return bilan;
         };
 
-        // Les albums de la bibliothèque qui ont une pochette LOCALE.
-        let mut a_envoyer: Vec<(i64, String, String)> = Vec::new();
-        for (album_id, cover_path) in albums_avec_pochette(&self.backend) {
-            let source = cle_de_source(&cover_path);
-            if tenues.get(&album_id).and_then(|t| t.source.as_deref()) == Some(source.as_str()) {
-                continue;
-            }
-            a_envoyer.push((album_id, cover_path, source));
-            if a_envoyer.len() >= PLAFOND_PAR_PASSAGE {
-                break;
-            }
-        }
+        // Les albums de la bibliothèque qui ont une pochette LOCALE, les plus
+        // récents d'abord (#6733), moins ceux que le cloud tient déjà et ceux
+        // dont la pochette n'a pas pu se lire.
+        let a_envoyer: Vec<(i64, String, String)> = {
+            let illisibles = self.illisibles.lock().unwrap_or_else(|e| e.into_inner());
+            albums_avec_pochette(&self.backend)
+                .into_iter()
+                .filter_map(|(album_id, cover_path)| {
+                    let source = cle_de_source(&cover_path);
+                    let tenue = tenues.get(&album_id).and_then(|t| t.source.as_deref())
+                        == Some(source.as_str());
+                    (!tenue && !illisibles.contains(&(album_id, source.clone())))
+                        .then_some((album_id, cover_path, source))
+                })
+                .collect()
+        };
         if a_envoyer.is_empty() {
             bilan.rien = true;
             return bilan;
@@ -313,8 +343,11 @@ impl Vignettes {
 
         let mut lot: Vec<Value> = Vec::new();
         let mut premiers = true;
-        for (album_id, cover_path, source) in a_envoyer {
+        let mut retenues = 0usize;
+        let mut candidats = a_envoyer.into_iter();
+        for (album_id, cover_path, source) in candidats.by_ref() {
             let Some(octets) = self.lire_la_pochette(&cover_path).await else {
+                self.noter_illisible(album_id, source);
                 continue;
             };
             let Some(v) = tokio::task::spawn_blocking(move || vignette(&octets))
@@ -322,6 +355,7 @@ impl Vignettes {
                 .ok()
                 .flatten()
             else {
+                self.noter_illisible(album_id, source);
                 continue;
             };
             let sha = empreinte(&v);
@@ -333,7 +367,8 @@ impl Vignettes {
                 item["data"] = json!(base64::engine::general_purpose::STANDARD.encode(&v));
             }
             lot.push(item);
-            if lot.len() >= PAR_ENVOI {
+            retenues += 1;
+            if lot.len() >= PAR_ENVOI || retenues >= PLAFOND_PAR_PASSAGE {
                 if !premiers && !self.pause.is_zero() {
                     tokio::time::sleep(self.pause).await;
                 }
@@ -352,15 +387,31 @@ impl Vignettes {
                     return bilan;
                 }
             }
+            if retenues >= PLAFOND_PAR_PASSAGE {
+                break;
+            }
         }
         if !lot.is_empty() {
             if !premiers && !self.pause.is_zero() {
                 tokio::time::sleep(self.pause).await;
             }
-            self.envoyer(&s, &server_id, &acces, &liaison, lot, &mut bilan)
-                .await;
+            if !self
+                .envoyer(&s, &server_id, &acces, &liaison, lot, &mut bilan)
+                .await
+            {
+                return bilan;
+            }
         }
+        // Arrêté au plafond, rien de refusé : la suite part sans attendre.
+        bilan.reste = retenues >= PLAFOND_PAR_PASSAGE && candidats.next().is_some();
         bilan
+    }
+
+    fn noter_illisible(&self, album_id: i64, source: String) {
+        self.illisibles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((album_id, source));
     }
 
     /// La pochette locale d'un album, depuis le cache de pochettes. Une
@@ -534,14 +585,17 @@ fn identite(s: &SettingsRepo) -> Option<(String, String, String)> {
 }
 
 /// `(album_id, cover_path)` des albums qui ont au moins une piste et une
-/// pochette, par identifiant croissant.
+/// pochette, les plus récemment ajoutés d'abord : identifiant DÉCROISSANT
+/// (#6733). Dans l'ordre croissant, une grande bibliothèque envoyait d'abord
+/// ses albums les plus anciens, ceux qu'un ami a le moins de chances de
+/// chercher.
 fn albums_avec_pochette(backend: &Arc<dyn DbBackend>) -> Vec<(i64, String)> {
     backend
         .query_many(
             "SELECT a.id, a.cover_path FROM albums a \
              WHERE a.cover_path IS NOT NULL AND a.cover_path <> '' \
                AND EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id) \
-             ORDER BY a.id",
+             ORDER BY a.id DESC",
             &[],
         )
         .unwrap_or_default()
