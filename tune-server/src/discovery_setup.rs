@@ -20,6 +20,10 @@ use crate::state::AppState;
 #[path = "discovery_media_server_tests_3786.rs"]
 mod media_server_tests_3786;
 
+#[cfg(test)]
+#[path = "renderer_allume_avant_le_serveur_tests_6961.rs"]
+mod renderer_allume_avant_le_serveur_tests_6961;
+
 /// Resolve a UPnP service `controlURL` (from the device description) into an
 /// absolute URL usable by the SOAP client.
 ///
@@ -1231,6 +1235,70 @@ async fn handle_ssdp_discovered(
 /// les suivants, le démarrage sondait un par un.
 const SONDE_RENDERER_BORNE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// #6961 — où envoyer le `M-SEARCH` unicast de recours, et combien de temps
+/// attendre sa réponse. Injectable pour qu'un banc tienne un faux répondeur
+/// sans privilège sur le port 1900.
+#[derive(Debug, Clone, Copy)]
+struct RecoursUnicast {
+    port_ssdp: u16,
+    budget: std::time::Duration,
+}
+
+impl RecoursUnicast {
+    const PRODUCTION: Self = Self {
+        port_ssdp: tune_core::discovery::redecouverte::PORT_SSDP,
+        budget: tune_core::discovery::redecouverte::BUDGET_REPONSE,
+    };
+}
+
+async fn sonder_a(
+    device_id: &str,
+    location: &str,
+    borne: std::time::Duration,
+) -> Option<tune_core::discovery::device::DiscoveredDevice> {
+    tokio::time::timeout(
+        borne,
+        tune_core::discovery::ssdp::probe_renderer(device_id, location),
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+/// #6961 — la `LOCATION` mémorisée ne répond plus : on demande à l'appareil,
+/// par un `M-SEARCH` unicast filtré sur son UDN, où il est désormais, et on
+/// sonde cette nouvelle adresse.
+///
+/// C'est le cas du NanoPlayer de Silviu : allumé avant le serveur, il ne
+/// s'annonce plus, et le port tiré à son redémarrage n'est plus celui du
+/// magasin. Sans ce recours, sa zone restait hors ligne jusqu'à ce qu'on
+/// redémarre l'appareil — seul geste qui lui faisait émettre un `NOTIFY`.
+async fn retrouver_par_unicast(
+    kr: &KnownRenderer,
+    borne: std::time::Duration,
+    recours: RecoursUnicast,
+) -> Option<tune_core::discovery::device::DiscoveredDevice> {
+    let nouvelle = tune_core::discovery::redecouverte::location_actuelle_par_unicast(
+        &kr.location,
+        recours.port_ssdp,
+        &kr.device_id,
+        recours.budget,
+    )
+    .await?;
+    if nouvelle == kr.location {
+        return None;
+    }
+    let dev = sonder_a(&kr.device_id, &nouvelle, borne).await?;
+    info!(
+        id = %kr.device_id,
+        name = %kr.name,
+        ancienne = %kr.location,
+        nouvelle = %nouvelle,
+        "known_renderer_retrouve_par_msearch_unicast"
+    );
+    Some(dev)
+}
+
 /// Sonde tous les renderers connus EN MÊME TEMPS, chacun borné, et rend les
 /// résultats dans l'ordre reçu — l'appelant applique ensuite séquentiellement.
 /// La durée totale est celle de la sonde la plus lente, plus la borne au pire,
@@ -1238,18 +1306,16 @@ const SONDE_RENDERER_BORNE: std::time::Duration = std::time::Duration::from_secs
 async fn sonder_les_renderers_en_parallele(
     renderers: Vec<KnownRenderer>,
     borne: std::time::Duration,
+    recours: RecoursUnicast,
 ) -> Vec<(
     KnownRenderer,
     Option<tune_core::discovery::device::DiscoveredDevice>,
 )> {
     futures_util::future::join_all(renderers.into_iter().map(|kr| async move {
-        let sonde = tokio::time::timeout(
-            borne,
-            tune_core::discovery::ssdp::probe_renderer(&kr.device_id, &kr.location),
-        )
-        .await
-        .ok()
-        .flatten();
+        let sonde = match sonder_a(&kr.device_id, &kr.location, borne).await {
+            Some(dev) => Some(dev),
+            None => retrouver_par_unicast(&kr, borne, recours).await,
+        };
         (kr, sonde)
     }))
     .await
@@ -1269,7 +1335,14 @@ async fn sonder_les_renderers_en_parallele(
 /// so we skip it and let live discovery handle the newcomer. Best-effort per
 /// device; failures are logged and never block boot. Mirrors
 /// `routes::devices::reregister_manual_devices`.
+///
+/// #6961 — quand la `LOCATION` mémorisée ne répond plus, un `M-SEARCH`
+/// unicast vers son hôte demande la nouvelle (voir [`retrouver_par_unicast`]).
 pub async fn reregister_known_renderers(state: &AppState) {
+    reregister_known_renderers_avec(state, RecoursUnicast::PRODUCTION).await;
+}
+
+async fn reregister_known_renderers_avec(state: &AppState, recours: RecoursUnicast) {
     let stored = load_known_renderers(&state.backend);
     if stored.is_empty() {
         return;
@@ -1331,7 +1404,7 @@ pub async fn reregister_known_renderers(state: &AppState) {
     // enregistrement, déduplicat par hôte) reste séquentielle et
     // déterministe : deux registres de renderers persistés coexistent, avec
     // des verdicts d'identité qui ne doivent pas courir l'un contre l'autre.
-    let sondes = sonder_les_renderers_en_parallele(renderers, SONDE_RENDERER_BORNE).await;
+    let sondes = sonder_les_renderers_en_parallele(renderers, SONDE_RENDERER_BORNE, recours).await;
     for (kr, sonde) in sondes {
         match sonde {
             Some(dev) => {
@@ -1354,7 +1427,9 @@ pub async fn reregister_known_renderers(state: &AppState) {
                     manufacturer: dev.manufacturer.as_deref().unwrap_or_default(),
                     model_name: dev.model.as_deref().unwrap_or_default(),
                 };
-                // Précondition : `probe_renderer` a lu `kr.location` mot pour mot.
+                // Précondition : `probe_renderer` a lu `kr.location` mot pour mot,
+                // ou la `LOCATION` que l'appareil a lui-même rendue à un
+                // M-SEARCH filtré sur cet UDN (#6961) — la même identité.
                 let verdict = compare_at_same_location(kr.identity(), observed);
                 match verdict {
                     IdentityVerdict::NoDisagreement | IdentityVerdict::SameHardware(_) => {
@@ -1843,12 +1918,35 @@ pub fn spawn_mdns_handler(
                                     }
                                     _ => false,
                                 };
+                                // #6947 — une zone montée vers un protocole
+                                // préféré ne redescend pas parce qu'une
+                                // annonce moins bonne porte son nom.
+                                let retrogradation = same_name_zone.is_some_and(|z| {
+                                    let ancienne_enregistree = z
+                                        .output_device_id
+                                        .as_deref()
+                                        .is_some_and(|a| a != dev.id && reg.type_of(a).is_some());
+                                    retrogradation_par_meme_nom(
+                                        z.output_type.as_deref(),
+                                        ancienne_enregistree,
+                                        dev.device_type,
+                                    )
+                                });
                                 if ancienne_en_service {
                                     info!(
                                         name = %dev.name,
                                         id = %dev.id,
                                         old_id = ?same_name_zone.and_then(|z| z.output_device_id.clone()),
                                         "mdns_zone_device_update_deferred_while_in_use"
+                                    );
+                                } else if retrogradation {
+                                    info!(
+                                        name = %dev.name,
+                                        id = %dev.id,
+                                        old_id = ?same_name_zone.and_then(|z| z.output_device_id.clone()),
+                                        old_type = ?same_name_zone.and_then(|z| z.output_type.clone()),
+                                        new_type = output_type_str,
+                                        "mdns_zone_meme_nom_retrogradation_refusee"
                                     );
                                 } else if let Some(z) = same_name_zone
                                     && let Some(zid) = z.id
@@ -2230,18 +2328,44 @@ fn zone_a_monter_en_priorite<'a>(
             return false;
         }
         // Only upgrade if new protocol has higher priority
-        let old_prio = match z.output_type.as_deref() {
-            Some("oaat") => OutputType::Oaat.priority(),
-            Some("openhome") => OutputType::Openhome.priority(),
-            Some("bluos") => OutputType::Bluos.priority(),
-            Some("squeezebox") => OutputType::Squeezebox.priority(),
-            Some("dlna") => OutputType::Dlna.priority(),
-            Some("chromecast") => OutputType::Chromecast.priority(),
-            Some("airplay") => OutputType::Airplay.priority(),
-            _ => 0,
-        };
-        nouveau.priority() > old_prio
+        nouveau.priority() > priorite_du_type_de_zone(z.output_type.as_deref())
     })
+}
+
+/// La priorité du protocole enregistré sur une zone (`zones.output_type`) ;
+/// 0 pour un type inconnu ou absent.
+fn priorite_du_type_de_zone(type_zone: Option<&str>) -> u8 {
+    use tune_core::discovery::device::OutputType;
+    match type_zone {
+        Some("oaat") => OutputType::Oaat.priority(),
+        Some("openhome") => OutputType::Openhome.priority(),
+        Some("bluos") => OutputType::Bluos.priority(),
+        Some("squeezebox") => OutputType::Squeezebox.priority(),
+        Some("dlna") => OutputType::Dlna.priority(),
+        Some("chromecast") => OutputType::Chromecast.priority(),
+        Some("airplay") => OutputType::Airplay.priority(),
+        _ => 0,
+    }
+}
+
+/// #6947 — refuser le ré-ancrage « même nom » qui ferait redescendre une zone
+/// vers un protocole de priorité inférieure tant que sa sortie actuelle est
+/// encore enregistrée.
+///
+/// Le cas du Verox : son endpoint OAAT reprend, par montée de priorité, la
+/// zone AirPlay « Zone 6 » du même hôte, et en garde le nom. Le récepteur
+/// AirPlay de la machine s'annonce ensuite toujours sous « Zone 6 » : le filet
+/// « même nom » lui rendait la zone, de type `airplay`, et l'annonce OAAT
+/// suivante la remontait. La zone oscillait entre les deux protocoles.
+///
+/// Une sortie actuelle disparue du registre laisse le ré-ancrage se faire,
+/// comme avant : la zone ne reste pas accrochée à un appareil parti.
+fn retrogradation_par_meme_nom(
+    type_zone: Option<&str>,
+    ancienne_enregistree: bool,
+    nouvelle: tune_core::discovery::device::OutputType,
+) -> bool {
+    ancienne_enregistree && priorite_du_type_de_zone(type_zone) > nouvelle.priority()
 }
 
 fn find_cross_protocol_zone_conflict<'a>(
@@ -3094,6 +3218,77 @@ mod reancrage_4520 {
 }
 
 #[cfg(test)]
+mod retrogradation_meme_nom_6947 {
+    use super::retrogradation_par_meme_nom;
+    use tune_core::discovery::device::OutputType;
+
+    /// Le cas du Verox : la zone, montée en OAAT, porte le nom de l'ancien
+    /// récepteur AirPlay ; l'annonce `_raop` « Zone 6 » ne la reprend pas.
+    #[test]
+    fn une_zone_oaat_n_est_pas_reprise_par_l_airplay_du_meme_nom() {
+        assert!(
+            retrogradation_par_meme_nom(Some("oaat"), true, OutputType::Airplay),
+            "la zone OAAT redescend en AirPlay sur une annonce du même nom (#6947)"
+        );
+        assert!(retrogradation_par_meme_nom(
+            Some("dlna"),
+            true,
+            OutputType::Chromecast
+        ));
+    }
+
+    /// Contre-épreuves : même protocole, protocole meilleur, sortie actuelle
+    /// partie, zone sans type — le filet « même nom » agit comme avant.
+    #[test]
+    fn hors_du_cas_le_filet_meme_nom_agit_comme_avant() {
+        assert!(!retrogradation_par_meme_nom(
+            Some("airplay"),
+            true,
+            OutputType::Airplay
+        ));
+        assert!(!retrogradation_par_meme_nom(
+            Some("airplay"),
+            true,
+            OutputType::Oaat
+        ));
+        assert!(!retrogradation_par_meme_nom(
+            Some("oaat"),
+            false,
+            OutputType::Airplay
+        ));
+        assert!(!retrogradation_par_meme_nom(
+            None,
+            true,
+            OutputType::Airplay
+        ));
+    }
+
+    /// Le branchement : le filet « même nom » consulte la règle AVANT de
+    /// réécrire l'identifiant de la zone.
+    #[test]
+    fn le_filet_meme_nom_consulte_la_regle_avant_d_ecrire() {
+        // Coupé AVANT la définition de la règle : ce module porte les mêmes
+        // littéraux et satisferait la garde à lui seul.
+        let complet: String = include_str!("discovery_setup.rs")
+            .split_whitespace()
+            .collect();
+        let source = &complet[..complet
+            .find("fnpriorite_du_type_de_zone(")
+            .expect("la règle est définie dans ce fichier")];
+        let regle = source
+            .find("retrogradation_par_meme_nom(z.output_type.as_deref(),")
+            .expect("le filet même nom appelle la règle");
+        let refus = source
+            .find("}elseifretrogradation{")
+            .expect("le refus est une branche du filet");
+        let ecrit = source
+            .find("origine:\"mdns_meme_nom\"")
+            .expect("le ré-ancrage même nom existe");
+        assert!(regle < refus && refus < ecrit);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         AnnonceAppareil, find_cross_protocol_zone_conflict, may_reanchor, refus_nommes,
@@ -3145,7 +3340,12 @@ mod tests {
             })
             .collect();
         let depart = std::time::Instant::now();
-        let sondes = super::sonder_les_renderers_en_parallele(renderers, borne).await;
+        // Recours unicast vers un port fermé : seule la sonde HTTP est mesurée.
+        let recours = super::RecoursUnicast {
+            port_ssdp: 9,
+            budget: std::time::Duration::from_millis(50),
+        };
+        let sondes = super::sonder_les_renderers_en_parallele(renderers, borne, recours).await;
         let duree = depart.elapsed();
         assert!(
             duree < borne * 2,

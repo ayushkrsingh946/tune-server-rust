@@ -33,6 +33,9 @@ pub async fn spawn_background_tasks(state: &AppState, config: &TuneConfig) {
     spawn_session_gc(state);
     spawn_dash_temp_gc();
     spawn_position_poller(state);
+    // #6155 — les zones d'un groupe suivent sa meneuse (lecture, pause,
+    // reprise, arrêt). Un test de câblage garde la ligne.
+    crate::routes::zones::relais_de_groupe_6155::lancer_le_relais_de_groupe(state);
     spawn_token_refresher(state);
     spawn_tune_tested_refresher(state);
     // #6285 — la passe des faux hi-res. Elle DORT tant que son réglage n'est

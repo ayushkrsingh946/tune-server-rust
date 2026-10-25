@@ -123,10 +123,18 @@ pub fn descriptor(id: &str) -> Value {
         "ui":{"view":view,"zone_scoped":kind=="dsp","endpoints":endpoints,"levels_event":"playback.audio_levels","levels_premium":false},
         "lifecycle":{"disable":"pending_restart","uninstall":"preserve_configuration","running_jobs":"finish_or_explicit_cancel"}})
 }
-/// Les trois champs d'état d'un greffon audio premium, lus en base :
-/// `installed`, `install_proposed`, `existing_configuration`. `None` pour tout
+/// Les champs d'état d'un greffon audio premium, lus en base : `installed`,
+/// `enabled`, `install_proposed`, `existing_configuration`. `None` pour tout
 /// identifiant hors des quatre. C'est le contrat du client web pour la fiche
 /// `GET /api/v1/plugins/{id}` (à la racine) et pour [`descriptor_with_state`].
+///
+/// #6924 — `enabled` est [`premium_plugins::enabled`], le prédicat même qui
+/// ouvre les routes du greffon ([`require_installed`]) : ce qui fait marcher
+/// l'égaliseur, ce sont ses réglages, pas le chargement de son descripteur.
+/// La fiche dormante l'écrivait `false` en dur tant que ce processus ne
+/// l'avait pas chargé : l'interrupteur d'Extensions se décochait et la barre
+/// latérale (`installed && enabled`) effaçait l'entrée d'un égaliseur
+/// installé, actif et dont les routes répondaient.
 pub fn state_fields(settings: &SettingsRepo, id: &str) -> Option<serde_json::Map<String, Value>> {
     if !premium_plugins::contains(id) {
         return None;
@@ -135,6 +143,10 @@ pub fn state_fields(settings: &SettingsRepo, id: &str) -> Option<serde_json::Map
     fields.insert(
         "installed".into(),
         Value::Bool(premium_plugins::installed(settings, id)),
+    );
+    fields.insert(
+        "enabled".into(),
+        Value::Bool(premium_plugins::enabled(settings, id)),
     );
     fields.insert(
         "install_proposed".into(),
@@ -461,6 +473,100 @@ pub(crate) mod tests {
             settings.get("zone_1_eq_profile").unwrap().as_deref(),
             Some(r#"{"enabled":true,"bass_gain_db":4.0}"#),
             "le réglage doit rester intact"
+        );
+    }
+
+    /// La fiche d'un greffon dans `GET /api/v1/plugins`.
+    async fn fiche_du_catalogue(app: &axum::Router, id: &str) -> Value {
+        let (status, catalogue) = appel(app, "GET", "/api/v1/plugins").await;
+        assert_eq!(status, StatusCode::OK, "{catalogue}");
+        catalogue
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == id)
+            .unwrap_or_else(|| panic!("{id} absent du catalogue : {catalogue}"))
+            .clone()
+    }
+
+    /// Ce que lit la barre latérale du client web (`entreeStudioVisible`,
+    /// `greffonsStudio.ts`) : l'entrée d'un greffon se montre s'il est
+    /// installé ET actif.
+    fn visible_dans_la_barre(fiche: &Value) -> bool {
+        fiche["installed"] == true && fiche["enabled"] == true
+    }
+
+    /// #6924 (régis, forum-hifi.fr) — l'égaliseur installé puis le serveur
+    /// redémarré : il doit rester actif dans Extensions et visible dans la
+    /// barre latérale, AVANT le redémarrage (ce processus ne l'a pas chargé)
+    /// comme APRÈS (un nouveau processus sur la même base).
+    #[tokio::test]
+    async fn temoin_6924_l_egaliseur_installe_reste_actif_et_visible_au_redemarrage() {
+        dossier_de_donnees_jetable();
+        let dossier = tempfile::tempdir().unwrap();
+        let base = dossier.path().join("tune.db");
+        let base = base.to_string_lossy();
+
+        // Premier processus : démarré sans égaliseur, puis « Installer ».
+        let state = AppState::new(&base, 0, Default::default()).unwrap();
+        let routers = crate::plugins::init(&state, "http://127.0.0.1:0", vec![]).await;
+        let app = crate::routes::router_with_plugins(state.clone(), routers);
+        let (status, reponse) = appel(&app, "POST", "/api/v1/plugins/equalizer/install").await;
+        assert_eq!(status, StatusCode::OK, "{reponse}");
+        let (status, reponse) = appel(&app, "POST", "/api/v1/plugins/equalizer/enable").await;
+        assert_eq!(status, StatusCode::OK, "{reponse}");
+        let settings = SettingsRepo::with_backend(state.backend.clone());
+        assert!(premium_plugins::enabled(&settings, "equalizer"));
+
+        let fiche = fiche_du_catalogue(&app, "equalizer").await;
+        assert!(
+            visible_dans_la_barre(&fiche),
+            "égaliseur installé et actif (ses routes répondent) mais dit désactivé : \
+             l'interrupteur d'Extensions se décoche et la barre latérale l'efface — {fiche}"
+        );
+
+        // Redémarrage : un nouveau processus sur la même base.
+        let state = AppState::new(&base, 0, Default::default()).unwrap();
+        let routers = crate::plugins::init(&state, "http://127.0.0.1:0", vec![]).await;
+        let app = crate::routes::router_with_plugins(state.clone(), routers);
+        let settings = SettingsRepo::with_backend(state.backend.clone());
+        assert!(
+            premium_plugins::enabled(&settings, "equalizer"),
+            "l'activation de l'égaliseur perdue au redémarrage"
+        );
+        let fiche = fiche_du_catalogue(&app, "equalizer").await;
+        assert!(
+            visible_dans_la_barre(&fiche),
+            "égaliseur désactivé ou absent de la barre après le redémarrage — {fiche}"
+        );
+        let (_, detail) = appel(&app, "GET", "/api/v1/plugins/equalizer").await;
+        assert!(visible_dans_la_barre(&detail), "{detail}");
+    }
+
+    /// #6924, l'autre sens : « Désactiver » ferme les routes de l'égaliseur
+    /// sur-le-champ (`require_installed`) ; la fiche le dit aussitôt, sans
+    /// attendre le redémarrage, et l'entrée quitte la barre latérale.
+    #[tokio::test]
+    async fn temoin_6924_l_egaliseur_desactive_quitte_la_barre_sans_attendre() {
+        dossier_de_donnees_jetable();
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let settings = SettingsRepo::with_backend(state.backend.clone());
+        settings.set("plugin_equalizer_installed", "true").unwrap();
+        settings.set("plugin_equalizer_enabled", "true").unwrap();
+        let routers = crate::plugins::init(&state, "http://127.0.0.1:0", vec![]).await;
+        let app = crate::routes::router_with_plugins(state.clone(), routers);
+        assert!(visible_dans_la_barre(
+            &fiche_du_catalogue(&app, "equalizer").await
+        ));
+
+        let (status, reponse) = appel(&app, "POST", "/api/v1/plugins/equalizer/disable").await;
+        assert_eq!(status, StatusCode::OK, "{reponse}");
+        assert!(!premium_plugins::enabled(&settings, "equalizer"));
+        let fiche = fiche_du_catalogue(&app, "equalizer").await;
+        assert_eq!(fiche["installed"], true, "{fiche}");
+        assert_eq!(
+            fiche["enabled"], false,
+            "égaliseur désactivé, routes fermées, mais fiche encore active — {fiche}"
         );
     }
 

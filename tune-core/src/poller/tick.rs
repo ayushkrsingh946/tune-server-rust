@@ -1813,6 +1813,10 @@ impl PositionPoller {
             // enough of the track was actually played before accepting a
             // gapless transition.  We update this BEFORE checking for resets
             // so the peak reflects the last known good position.
+            //
+            // #6717 — le pic d'AVANT ce tour, pour le bras `Stopped` : une
+            // position qui le dépasse dément l'arrêt annoncé.
+            let pic_avant_ce_tour = ps.peak_position_ms;
             if status.position_ms > ps.peak_position_ms {
                 ps.peak_position_ms = status.position_ms;
             }
@@ -2253,6 +2257,10 @@ impl PositionPoller {
                         // remplace ce défaut par une mesure.
                         horloge_de_piste_couvre_l_arret: false,
                         dlna_dsd_reached_end,
+                        position_avance: fsm::arret_dementi_par_la_position(
+                            pic_avant_ce_tour,
+                            status.position_ms,
+                        ),
                     };
                     let mut fsm_actual: Option<fsm::StoppedOutcome>;
                     if in_seek_grace {
@@ -2404,6 +2412,31 @@ impl PositionPoller {
                         ps.transition(fsm::Transition::FinConstateeAvantLeSeuil {
                             motif: MotifFin::DsdDlnaPicAtteint,
                         });
+                    } else if fsm_in.position_avance {
+                        // #6717 — le renderer se dit arrêté, mais sa position
+                        // gagne du terrain : il joue. Compter ce tour comme un
+                        // arrêt faisait couper la zone au bout de 30 s
+                        // (`consommation="a_sec"`) pendant que la musique
+                        // sortait — deux fois dans le même après-midi sous
+                        // Windows rc6. La série en cours est effacée : son
+                        // horloge (`premier_arret_a`) repartira du prochain
+                        // tour réellement figé.
+                        fsm_actual = Some(fsm::StoppedOutcome::SuppressPositionAdvancing);
+                        if ps.stopped_ticks >= STOPPED_TICKS_THRESHOLD {
+                            info!(
+                                zone_id,
+                                pic_avant_ms = pic_avant_ce_tour,
+                                position_ms = status.position_ms,
+                                arret_ticks = ps.stopped_ticks,
+                                arret_secs = ps
+                                    .premier_arret_a
+                                    .map(|t| t.elapsed().as_secs())
+                                    .unwrap_or(0),
+                                "renderer_arrete_dementi_par_la_position"
+                            );
+                        }
+                        ps.stopped_ticks = 0;
+                        ps.transition(fsm::Transition::ArretEfface);
                     } else {
                         // #4480 — on entre dans une série d'arrêts : l'horloge
                         // part ici, et nulle part ailleurs. Tout site qui
