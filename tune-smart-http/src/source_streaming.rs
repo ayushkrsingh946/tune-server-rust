@@ -273,7 +273,8 @@ fn condition(rule: &Value, objet: Objet) -> String {
 /// La requête des favoris de service qui satisfont les règles, ou `None`
 /// quand aucune règle `source` ne nomme de service.
 ///
-/// Colonnes : service, service_id, title, artist, album, cover_url, year.
+/// Colonnes : service, service_id, title, artist, album, cover_url, et
+/// `year` pour un album.
 pub(crate) fn requete(
     rules_json: &str,
     match_mode: &str,
@@ -306,8 +307,14 @@ pub(crate) fn requete(
         )
     };
     let limite = limite.map(|n| format!(" LIMIT {n}")).unwrap_or_default();
+    // L'année n'est lue que pour un album (#6482) : une playlist n'en fait
+    // rien, et sa requête garde sa forme.
+    let annee = match objet {
+        Objet::Album => ", sf.year",
+        Objet::Piste => "",
+    };
     Some(format!(
-        "SELECT sf.service, sf.service_id, sf.title, sf.artist, sf.album, sf.cover_url, sf.year \
+        "SELECT sf.service, sf.service_id, sf.title, sf.artist, sf.album, sf.cover_url{annee} \
          FROM streaming_favorites sf \
          WHERE {ou} \
          ORDER BY {tri}{limite}"
