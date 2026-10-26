@@ -52,6 +52,10 @@
 //! /invitation-links/{id}`, `POST /invitations/{id}/block`, `GET /blocks`,
 //! `DELETE /blocks/{user_id}`, relayés à l'identique.
 //!
+//! rc9 (#7130), les notifications de Tune web, dans [`crate::notifications`] :
+//! `GET /notifications`, `POST /notifications/{id}/read`, `POST
+//! /notifications/read-all`, `GET|PUT /notifications/preferences`.
+//!
 //! T4, l'écoute chez un contact (#5327), Premium : `POST
 //! /contacts/{user_id}/listen`, dans [`crate::ecoute`].
 //!
@@ -106,6 +110,8 @@ pub const CODE_REPONSE_ILLISIBLE: &str = "circle.unreadable_response";
 pub const CODE_SERVEUR_NON_LIE: &str = "circle.server_not_linked";
 
 pub fn router(relais: Arc<Relais>, license: Arc<LicenseManager>) -> Router<()> {
+    // rc9 (#7130) : les notifications de Tune web, dans [`crate::notifications`].
+    let notifications = crate::notifications::router(relais.clone());
     let etat_de_la_copie = Router::new()
         .route("/library-sync", get(etat_de_la_copie_en_ligne))
         .with_state(Arc::new(EtatDeLaCopie {
@@ -181,6 +187,7 @@ pub fn router(relais: Arc<Relais>, license: Arc<LicenseManager>) -> Router<()> {
         .route("/contacts/locations", get(crate::globe::lieux_des_contacts))
         .with_state(relais)
         .merge(etat_de_la_copie)
+        .merge(notifications)
 }
 
 // #6521 — les vignettes des pochettes partagées avec le cercle -----------------
