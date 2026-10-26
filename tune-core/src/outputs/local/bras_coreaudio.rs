@@ -202,7 +202,6 @@ impl<'a> BackendLocal<'a> for BackendCoreAudio<'a> {
         let device_name = demande.device_name.to_string();
         let sample_rate = demande.spec.cadence();
         let bit_depth = demande.spec.profondeur().bits_declares();
-        let channels = demande.spec.canaux();
         // Ce que CoreAudio exclusif ne lit pas : l'endpoint et l'hôte d'origine
         // (il résout par nom), le backend demandé (le `cfg` et `exclusive_mode`
         // ont déjà choisi ce bras), la porte de rampe (le rappel n'en a pas),
@@ -216,14 +215,46 @@ impl<'a> BackendLocal<'a> for BackendCoreAudio<'a> {
             demande.device_gone,
         );
 
-        let sortie = ExclusiveOutput::new(
-            &device_name,
-            sample_rate,
-            bit_depth as u32,
-            channels as u32,
-            demande.starvation.clone(),
-            demande.volume.clone(),
-            demande.paused.clone(),
+        // #6230 (étape 2) — une grille qui pilote les voies (6 → 2) est
+        // demandée d'abord, plafonnée aux voies du format physique en place
+        // (`new_sur_voies_pilotees`). Un refus rouvre une fois au format de
+        // la source : c'est l'ouverture d'avant, et le chemin du signal dit
+        // pourquoi la règle ne s'applique pas (#6595).
+        let (sortie, _voies_pilotees) = super::reaffectation::ouvrir_sur_les_voies_pilotees(
+            demande.voies_de_la_matrice,
+            demande.spec.canaux(),
+            |canaux, pilotees| {
+                if pilotees {
+                    ExclusiveOutput::new_sur_voies_pilotees(
+                        &device_name,
+                        sample_rate,
+                        bit_depth as u32,
+                        u32::from(canaux),
+                        demande.starvation.clone(),
+                        demande.volume.clone(),
+                        demande.paused.clone(),
+                    )
+                } else {
+                    ExclusiveOutput::new(
+                        &device_name,
+                        sample_rate,
+                        bit_depth as u32,
+                        u32::from(canaux),
+                        demande.starvation.clone(),
+                        demande.volume.clone(),
+                        demande.paused.clone(),
+                    )
+                }
+            },
+            |voies, erreur| {
+                info!(
+                    device = %device_name,
+                    voies,
+                    canaux_source = demande.spec.canaux(),
+                    erreur = %erreur,
+                    "coreaudio_exclusive_voies_de_la_grille_refusees_reouverture_au_format_source"
+                );
+            },
         )
         .map_err(|erreur| RefusDOuverture::OuvertureExclusiveRefusee {
             backend: "CoreAudio",
@@ -231,7 +262,8 @@ impl<'a> BackendLocal<'a> for BackendCoreAudio<'a> {
         })?;
         // Le contrat physique a été VÉRIFIÉ par lecture (`validate_physical_
         // format_contract`) : ce que le périphérique a ouvert est ce qui a été
-        // demandé — cadence et canaux de la source.
+        // demandé — la cadence de la source, et ses canaux ou les voies de la
+        // grille quand elle les pilote (#6230).
         let info = sortie.format_info();
         let format = FormatOuvert::new(info.sample_rate, info.channels as u16);
 
@@ -420,10 +452,21 @@ pub(super) fn jouer_via_coreaudio(entrees: EntreesCoreAudio) {
         pure_bypass.clone(),
         true,
     );
+    // #6230 (étape 2) — les voies que la grille pilote pour cette piste, par
+    // la MÊME décision que les autres transports exclusifs et que la
+    // frontière gapless (`voies_a_ouvrir_en_exclusif`) : jamais en PURE ni
+    // sur un porteur DoP, jamais sur une amorce 24 bits trop courte pour
+    // écarter le DoP.
+    let voies_de_la_matrice = Some(reaffectation.voies_a_ouvrir_en_exclusif(
+        spec,
+        header_buf.get(data_offset..).unwrap_or_default(),
+        pure_bypass.load(Ordering::Relaxed),
+        false,
+    ))
+    .filter(|&voies| voies != spec.canaux());
     let demande = DemandeDOuverture {
         spec,
-        // #6230 — un transport exclusif ouvre au format de la source.
-        voies_de_la_matrice: None,
+        voies_de_la_matrice,
         device_name: &device_name,
         endpoint_id: None,
         origin_host: None,
@@ -471,6 +514,13 @@ pub(super) fn jouer_via_coreaudio(entrees: EntreesCoreAudio) {
         backend.peripherique_ouvert(),
         None,
     );
+    // #6230 — ce que l'ouverture a fait des voies demandées : noté pour les
+    // décisions de réouverture, et dit au journal.
+    reaffectation.constater_l_ouverture(
+        voies_de_la_matrice,
+        backend.format_ouvert().canaux,
+        &device_name,
+    );
 
     // Feed audio data (no resampling needed -- hardware is set to source rate)
     let pcm_data = if data_offset < header_buf.len() {
@@ -489,8 +539,10 @@ pub(super) fn jouer_via_coreaudio(entrees: EntreesCoreAudio) {
     // Le même étage que le chemin partagé, au format IDENTITÉ : la sortie est
     // ouverte à la cadence et aux canaux de la source (contrat physique
     // vérifié), donc ni adaptation de canaux ni rééchantillonnage — `convertir`
-    // rend ses mots tels quels. Le DoP n'est pas refusé sur ce bras : il
-    // traverse en f32 jusqu'à l'AudioUnit, comme avant (D1).
+    // rend ses mots tels quels. #6230 — sauf quand la grille pilote
+    // l'ouverture : `sortie` porte alors ses voies, et l'étage y applique la
+    // matrice, comme sur le chemin partagé. Le DoP n'est pas refusé sur ce
+    // bras : il traverse en f32 jusqu'à l'AudioUnit, comme avant (D1).
     let mut etage = EtageDeConversion {
         pcm: LocalPcmProcessor {
             eq: &eq,
@@ -693,10 +745,12 @@ pub(super) fn jouer_via_coreaudio(entrees: EntreesCoreAudio) {
     // Wait for ring buffer to drain — JAMAIS sans fin (#3108). La boucle
     // vit dans le backend (`drainer`) ; ici on ne calcule que sa borne, à
     // partir de ce qu'il observe.
+    // #6230 — l'anneau tient des trames aux voies OUVERTES (celles de la
+    // grille quand elle pilote l'ouverture).
     let drain_deadline = drain_deadline_for(
         backend.observer().disponible,
         sample_rate as u64,
-        channels as u64,
+        u64::from(backend.format_ouvert().canaux),
     );
     let vidage = backend.drainer(drain_deadline);
     if http_eof_excl && vidage.vide {
