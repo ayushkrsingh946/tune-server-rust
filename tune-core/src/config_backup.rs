@@ -237,7 +237,7 @@ pub fn reset_envelope(
 const OBFUSCATION_KEY: &[u8; 32] = b"TuneConfigBackup2026-obfuscate!!";
 
 fn deobfuscate(encoded: &str) -> Result<Vec<u8>, String> {
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         return Err("odd-length hex string".into());
     }
     let xored: Vec<u8> = (0..encoded.len())
