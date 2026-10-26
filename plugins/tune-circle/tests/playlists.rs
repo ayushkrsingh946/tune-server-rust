@@ -311,7 +311,6 @@ async fn la_playlist_partagee_par_un_membre_est_relayee_telle_quelle() {
     assert_eq!(r.statut, StatusCode::NOT_FOUND);
 }
 
-
 #[tokio::test]
 async fn les_routes_de_playlist_relaient_statut_et_corps() {
     let b = banc(vec![]).await;
