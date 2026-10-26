@@ -437,11 +437,15 @@ async fn decoder_le_fichier(chemin: String) -> Result<FluxDecode, EchecSonde> {
 /// Le DASH assemblé par `get_track_url` pour la sentinelle est supprimé : la
 /// lecture le fait après consommation, et un fichier laissé là ferait servir
 /// le prochain tour par le cache d'URL de TIDAL, sans parler au CDN. Seul un
-/// fichier du répertoire temporaire est supprimé.
+/// fichier au nom que lui donne TIDAL (`tune-dash-<uuid>.mp4`) est supprimé.
 fn liberer_le_fichier_dash(flux: &StreamUrl) {
     if let Some(chemin) = flux.url.strip_prefix("file://") {
         let p = std::path::Path::new(chemin);
-        if p.starts_with(std::env::temp_dir()) {
+        let du_dash = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("tune-dash-") && n.ends_with(".mp4"));
+        if du_dash {
             let _ = std::fs::remove_file(p);
         }
     }
