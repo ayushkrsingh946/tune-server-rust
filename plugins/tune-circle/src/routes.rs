@@ -47,6 +47,10 @@
 //! `GET /contacts/{user_id}/library/summary`, `GET|PUT|DELETE /me/location`,
 //! `GET /contacts/locations`, relayés à l'identique.
 //!
+//! rc9 (#7122), la carte publique anonyme, dans [`crate::globe`] : `GET
+//! /world/points`, `GET|PUT|DELETE /me/public-map-opt-out`, relayés à
+//! l'identique.
+//!
 //! #6935, inviter sans e-mail, dans [`crate::sans_email`] : `POST
 //! /invitations/by-pseudo`, `GET|POST /invitation-links`, `DELETE
 //! /invitation-links/{id}`, `POST /invitations/{id}/block`, `GET /blocks`,
@@ -179,6 +183,14 @@ pub fn router(relais: Arc<Relais>, license: Arc<LicenseManager>) -> Router<()> {
                 .delete(crate::globe::retirer_mon_lieu),
         )
         .route("/contacts/locations", get(crate::globe::lieux_des_contacts))
+        // rc9 (#7122) : la carte publique anonyme et son interrupteur.
+        .route("/world/points", get(crate::globe::points_du_monde))
+        .route(
+            "/me/public-map-opt-out",
+            get(crate::globe::mon_retrait_de_la_carte)
+                .put(crate::globe::me_retirer_de_la_carte)
+                .delete(crate::globe::revenir_sur_la_carte),
+        )
         .with_state(relais)
         .merge(etat_de_la_copie)
 }
