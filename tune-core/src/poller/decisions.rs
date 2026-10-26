@@ -2294,7 +2294,7 @@ impl SuiviFamine {
             self.retard = Some(retard);
             annonce.then(|| FamineAnneau::RappelArrete(episode(depuis, courant, cumul)))
         } else {
-            let repris = self.retard.take().and_then(|retard| {
+            self.retard.take().and_then(|retard| {
                 retard.annonce.then(|| {
                     FamineAnneau::RappelRepris(episode(
                         retard.depuis,
@@ -2302,8 +2302,7 @@ impl SuiviFamine {
                         retard.cumul_ms.saturating_add(ecoule_ms),
                     ))
                 })
-            });
-            repris
+            })
         };
         self.dernier = Some(courant);
         self.dernier_intervalle_en_retard = en_retard;
