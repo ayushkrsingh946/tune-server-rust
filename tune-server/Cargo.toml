@@ -1200,6 +1200,13 @@ path = "tests/alarm_source_3715.rs"
 name = "alarm_days_5669"
 path = "tests/alarm_days_5669.rs"
 
+# #7047 — le réveil posé sur une radio depuis l'écran de lecture, et le refus
+# en 400 d'une source vide ou mal formée. `autotests = false` en tête de ce
+# manifeste : sans cette cible, jamais compilé.
+[[test]]
+name = "alarm_radio_7047"
+path = "tests/alarm_radio_7047.rs"
+
 [[test]]
 name = "history_context_4036"
 path = "tests/history_context_4036.rs"
