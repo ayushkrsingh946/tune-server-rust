@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 use tune_core::playback::NowPlaying;
+use tune_core::streaming::podcast_annuaires::RelaisPodcastIndex;
 use tune_core::streaming::podcasts::{EchecResolution, PodcastService};
 use tune_core::streaming::radiofrance::{RadioFranceApi, RfStation};
 use tune_core::streaming::vignette_podcast;
@@ -17,9 +18,144 @@ struct SearchQuery {
     q: String,
     #[serde(default = "default_limit")]
     limit: usize,
-    #[serde(default = "default_country")]
-    country: String,
+    /// #7152 — plus de défaut `us` : sans pays, celui de l'utilisateur ou du
+    /// serveur ([`pays_de_recherche`]).
+    country: Option<String>,
     language: Option<String>,
+}
+
+/// #7152 — réglage serveur du pays de la recherche de podcasts
+/// (`PATCH /system/config`). Vide ou absent : automatique.
+pub const CLE_PAYS_PODCASTS: &str = "podcasts_country";
+
+/// D'où vient le pays de la recherche (#7152), rendu dans la réponse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginePaysPodcasts {
+    /// `?country=` : le sélecteur de pays du client web (initialisé à la
+    /// région du navigateur), ou le pays que l'application envoie.
+    Requete,
+    /// Le réglage [`CLE_PAYS_PODCASTS`].
+    Reglage,
+    /// La région de la langue de l'interface (`Accept-Language`).
+    Langue,
+    /// La locale du système du serveur (`LC_ALL`, `LC_MESSAGES`, `LANG`).
+    Systeme,
+    /// Rien de tout cela : la boutique américaine, comme avant.
+    ParDefaut,
+}
+
+impl OriginePaysPodcasts {
+    pub fn cle(self) -> &'static str {
+        match self {
+            Self::Requete => "request",
+            Self::Reglage => "setting",
+            Self::Langue => "language",
+            Self::Systeme => "system",
+            Self::ParDefaut => "default",
+        }
+    }
+}
+
+/// Un code pays à deux lettres, en minuscules, ou `None`.
+fn code_pays(brut: &str) -> Option<String> {
+    let c = brut.trim();
+    (c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic())).then(|| c.to_ascii_lowercase())
+}
+
+/// Le pays par défaut d'une langue SANS région (`fr` → `fr`, `sv` → `se`,
+/// `en` → `us`…). Couvre les langues de l'interface ; inconnue : `None`.
+fn pays_de_la_langue(langue: &str) -> Option<&'static str> {
+    Some(match langue {
+        "fr" => "fr",
+        "en" => "us",
+        "de" => "de",
+        "es" | "ca" => "es",
+        "it" => "it",
+        "nl" => "nl",
+        "pt" => "pt",
+        "pl" => "pl",
+        "sv" => "se",
+        "nb" | "no" | "nn" => "no",
+        "da" => "dk",
+        "fi" => "fi",
+        "cs" => "cz",
+        "el" => "gr",
+        "hu" => "hu",
+        "ro" => "ro",
+        "ru" => "ru",
+        "uk" => "ua",
+        "tr" => "tr",
+        "ja" => "jp",
+        "ko" => "kr",
+        "zh" => "cn",
+        "vi" => "vn",
+        "ar" => "sa",
+        "he" => "il",
+        _ => return None,
+    })
+}
+
+/// Le pays d'une étiquette de langue (`fr-FR`, `zh-Hant-TW`, `fr_FR.UTF-8`,
+/// `de`) : sa région si elle en porte une à deux lettres, sinon le pays par
+/// défaut de la langue. `C`, `POSIX` : `None`.
+fn pays_d_une_etiquette(etiquette: &str) -> Option<String> {
+    let sans_jeu = etiquette.split(['.', '@']).next().unwrap_or("").trim();
+    let mut morceaux = sans_jeu.split(['-', '_']);
+    let langue = morceaux.next()?.to_ascii_lowercase();
+    if langue.is_empty() || langue == "c" || langue == "posix" {
+        return None;
+    }
+    if let Some(region) = morceaux.find_map(code_pays) {
+        return Some(region);
+    }
+    pays_de_la_langue(&langue).map(str::to_string)
+}
+
+/// Le pays de la recherche de podcasts (#7152) : `?country=` du client, sinon
+/// le réglage du serveur, sinon la langue de l'interface (première langue de
+/// `Accept-Language` par poids qui donne un pays), sinon la locale du
+/// système, sinon `us`.
+pub fn pays_de_recherche(
+    requete: Option<&str>,
+    reglage: Option<&str>,
+    accept_language: Option<&str>,
+    locale_systeme: Option<&str>,
+) -> (String, OriginePaysPodcasts) {
+    if let Some(p) = requete.and_then(code_pays) {
+        return (p, OriginePaysPodcasts::Requete);
+    }
+    if let Some(p) = reglage.and_then(code_pays) {
+        return (p, OriginePaysPodcasts::Reglage);
+    }
+    if let Some(entete) = accept_language {
+        let mut langues: Vec<(f32, &str)> = entete
+            .split(',')
+            .filter_map(|part| {
+                let mut m = part.split(';');
+                let tag = m.next()?.trim();
+                let q = m
+                    .find_map(|p| p.trim().strip_prefix("q="))
+                    .map_or(Some(1.0), |v| v.trim().parse::<f32>().ok())?;
+                (q > 0.0 && !tag.is_empty() && tag != "*").then_some((q, tag))
+            })
+            .collect();
+        langues.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some(p) = langues.iter().find_map(|(_, t)| pays_d_une_etiquette(t)) {
+            return (p, OriginePaysPodcasts::Langue);
+        }
+    }
+    if let Some(p) = locale_systeme.and_then(pays_d_une_etiquette) {
+        return (p, OriginePaysPodcasts::Systeme);
+    }
+    ("us".into(), OriginePaysPodcasts::ParDefaut)
+}
+
+/// La locale du système : `LC_ALL`, puis `LC_MESSAGES`, puis `LANG`.
+fn locale_du_systeme() -> Option<String> {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .find(|v| !v.trim().is_empty())
 }
 fn default_limit() -> usize {
     20
@@ -110,16 +246,37 @@ pub fn router() -> Router<AppState> {
 }
 async fn search_podcasts(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let svc = PodcastService::with_client(state.http_client.clone());
+    let reglage = tune_core::db::settings_repo::SettingsRepo::with_backend(state.backend.clone())
+        .get(CLE_PAYS_PODCASTS)
+        .ok()
+        .flatten();
+    let accept_language = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok());
+    let (pays, origine) = pays_de_recherche(
+        q.country.as_deref(),
+        reglage.as_deref(),
+        accept_language,
+        locale_du_systeme().as_deref(),
+    );
+    // #7152 — Podcast Index, troisième annuaire, par le relais du site au nom
+    // du compte relié ; sans compte, la source est sautée.
+    let svc = PodcastService::with_client(state.http_client.clone())
+        .avec_relais_podcast_index(RelaisPodcastIndex::du_compte(&state.backend));
     match svc
-        .search(&q.q, q.limit, &q.country, q.language.as_deref())
+        .search(&q.q, q.limit, &pays, q.language.as_deref())
         .await
     {
-        Ok(results) => Ok(Json(
-            json!({"query": q.q, "count": results.len(), "items": results}),
-        )),
+        Ok(results) => Ok(Json(json!({
+            "query": q.q,
+            "country": pays,
+            "country_source": origine.cle(),
+            "count": results.len(),
+            "items": results,
+        }))),
         Err(e) => {
             warn!(query = %q.q, error = %e, "podcast_search_failed");
             Err(AppError::internal(e))
@@ -307,7 +464,8 @@ async fn discover_podcasts(
     Query(q): Query<DiscoverQuery>,
 ) -> Result<Json<Value>, AppError> {
     let curated = PodcastService::curated_for_country(&q.country);
-    let svc = PodcastService::with_client(state.http_client.clone());
+    let svc = PodcastService::with_client(state.http_client.clone())
+        .avec_relais_podcast_index(RelaisPodcastIndex::du_compte(&state.backend));
     let top = svc.top_podcasts(None, &q.country).await.unwrap_or_default();
     Ok(Json(json!({
         "country": q.country,
@@ -329,7 +487,8 @@ async fn top_podcasts(
     State(state): State<AppState>,
     Query(q): Query<TopQuery>,
 ) -> Result<Json<Value>, AppError> {
-    let svc = PodcastService::with_client(state.http_client.clone());
+    let svc = PodcastService::with_client(state.http_client.clone())
+        .avec_relais_podcast_index(RelaisPodcastIndex::du_compte(&state.backend));
     match svc.top_podcasts(q.genre, &q.country).await {
         Ok(podcasts) => Ok(Json(json!({
             "genre": q.genre,
@@ -894,6 +1053,55 @@ mod tests {
             top.country,
             "/discover et /top doivent partager la valeur par défaut"
         );
+    }
+
+    /// #7152 — le pays de la recherche, dans l'ordre : requête, réglage,
+    /// langue de l'interface, système, `us`.
+    #[test]
+    fn le_pays_de_la_recherche_suit_l_utilisateur_7152() {
+        let p = |r, g, a, s| pays_de_recherche(r, g, a, s);
+        assert_eq!(
+            p(Some("FR"), Some("de"), Some("it-IT"), Some("es_ES.UTF-8")),
+            ("fr".into(), OriginePaysPodcasts::Requete)
+        );
+        assert_eq!(
+            p(None, Some("de"), Some("it-IT"), None),
+            ("de".into(), OriginePaysPodcasts::Reglage)
+        );
+        assert_eq!(
+            p(Some(""), Some(""), Some("fr-FR,fr;q=0.9,en;q=0.5"), None),
+            ("fr".into(), OriginePaysPodcasts::Langue)
+        );
+        // La région de la langue gagne sur la langue : fr-CA est le Canada.
+        assert_eq!(p(None, None, Some("fr-CA"), None).0, "ca");
+        // Une langue sans région : son pays par défaut ; le poids q compte.
+        assert_eq!(p(None, None, Some("en;q=0.2, sv;q=0.9"), None).0, "se");
+        assert_eq!(p(None, None, Some("zh-Hant-TW"), None).0, "tw");
+        assert_eq!(
+            p(None, None, None, Some("fr_FR.UTF-8")),
+            ("fr".into(), OriginePaysPodcasts::Systeme)
+        );
+        assert_eq!(
+            p(None, None, Some("*"), Some("C.UTF-8")),
+            ("us".into(), OriginePaysPodcasts::ParDefaut)
+        );
+        // Un pays illisible n'est pas transmis tel quel.
+        assert_eq!(
+            p(Some("fra"), None, None, None).1,
+            OriginePaysPodcasts::ParDefaut
+        );
+    }
+
+    /// #7152 — la route ne pose plus `us` d'office : un client qui n'envoie
+    /// pas de pays laisse la place au pays de l'utilisateur.
+    #[test]
+    fn la_recherche_n_impose_plus_us_7152() {
+        let uri: axum::http::Uri = "/podcasts/search?q=x".parse().unwrap();
+        let q = Query::<SearchQuery>::try_from_uri(&uri).unwrap().0;
+        assert_eq!(q.country, None);
+        let uri: axum::http::Uri = "/podcasts/search?q=x&country=fr".parse().unwrap();
+        let q = Query::<SearchQuery>::try_from_uri(&uri).unwrap().0;
+        assert_eq!(q.country.as_deref(), Some("fr"));
     }
 
     /// #3395 — la sélection éditoriale n'est servie que sous son drapeau.
