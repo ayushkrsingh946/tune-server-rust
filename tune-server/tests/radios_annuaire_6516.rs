@@ -445,3 +445,100 @@ async fn un_nom_ambigu_ne_lie_rien_et_le_rapprochement_est_idempotent() {
         Some("S999999")
     );
 }
+
+// ---------------------------------------------------------------------------
+// #7043 — la fréquence des relevés est BORNÉE : pas de rafale vers le site.
+// ---------------------------------------------------------------------------
+
+/// Un annuaire en panne : répond 500 et compte les requêtes.
+async fn annuaire_en_panne() -> (String, Arc<AtomicUsize>) {
+    let total = Arc::new(AtomicUsize::new(0));
+    let t = total.clone();
+    let app = axum::Router::new().route(
+        "/api/v2/radios",
+        axum::routing::get(move || {
+            let t = t.clone();
+            async move {
+                t.fetch_add(1, Ordering::SeqCst);
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    (format!("http://127.0.0.1:{port}/api/v2/radios"), total)
+}
+
+const UNE_HEURE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+#[tokio::test]
+async fn cinquante_ouvertures_de_directory_en_rafale_font_un_seul_releve() {
+    let dossier = tempfile::tempdir().unwrap();
+    let cache = dossier.path().join("annuaire.json");
+    let (url, total, _) = faux_annuaire().await;
+    let state = etat();
+
+    let mut taches = Vec::new();
+    for _ in 0..50 {
+        taches.extend(radios_annuaire::relever_a_l_ouverture(
+            &state, &url, &cache, UNE_HEURE,
+        ));
+    }
+    assert_eq!(taches.len(), 1, "une seule passe lancée sur 50 ouvertures");
+    for t in taches {
+        t.await.unwrap();
+    }
+    assert_eq!(
+        total.load(Ordering::SeqCst),
+        1,
+        "le site ne reçoit qu'UNE requête pour 50 ouvertures"
+    );
+    assert_eq!(state.annuaire_radios.read().unwrap().len(), 4);
+
+    // Une ouverture de plus, la passe finie : toujours rien (moins d'une heure).
+    assert!(radios_annuaire::relever_a_l_ouverture(&state, &url, &cache, UNE_HEURE).is_none());
+    assert_eq!(total.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn un_site_en_panne_n_est_pas_reinterroge_a_chaque_ouverture() {
+    let dossier = tempfile::tempdir().unwrap();
+    let cache = dossier.path().join("annuaire.json");
+    let (url, total) = annuaire_en_panne().await;
+    let state = etat();
+    let mut taches = Vec::new();
+    for _ in 0..20 {
+        taches.extend(radios_annuaire::relever_a_l_ouverture(
+            &state, &url, &cache, UNE_HEURE,
+        ));
+        // Laisser la passe finir entre deux ouvertures : l'échec ne rouvre pas
+        // la porte.
+        if let Some(t) = taches.pop() {
+            t.await.unwrap();
+        }
+    }
+    assert_eq!(
+        total.load(Ordering::SeqCst),
+        1,
+        "un échec compte comme une tentative"
+    );
+}
+
+#[tokio::test]
+async fn l_ouverture_relit_l_annuaire_quand_l_heure_est_passee() {
+    let dossier = tempfile::tempdir().unwrap();
+    let cache = dossier.path().join("annuaire.json");
+    let (url, total, _) = faux_annuaire().await;
+    let state = etat();
+    // Délai nul : toute tentative précédente est « assez vieille ».
+    for attendu in 1..=3 {
+        let t =
+            radios_annuaire::relever_a_l_ouverture(&state, &url, &cache, std::time::Duration::ZERO)
+                .expect("une passe due");
+        t.await.unwrap();
+        assert_eq!(total.load(Ordering::SeqCst), attendu);
+    }
+}

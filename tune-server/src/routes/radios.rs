@@ -968,6 +968,8 @@ pub struct RattrapageLogos {
     /// #6516 — l'annuaire a été relevé sur le réseau à cette passe (200, ou
     /// 304 : rien n'a changé). Faux quand la passe a servi le cache local.
     pub annuaire_a_jour: bool,
+    /// #7043 — stations de l'annuaire dont l'adresse du flux a suivi leur fiche.
+    pub flux_updated: usize,
 }
 
 impl RattrapageLogos {
@@ -1001,11 +1003,27 @@ impl RattrapageLogos {
 /// la conserver ne coûte pas une requête de plus, et c'est ce qui permet à
 /// `/radios/search` d'interroger l'annuaire sans jamais toucher au réseau.
 pub async fn refresh_radio_logos(state: &AppState) -> RattrapageLogos {
+    refresh_radio_logos_depuis(
+        state,
+        super::radios_annuaire::ANNUAIRE_V2_URL,
+        &super::radios_annuaire::chemin_du_cache(),
+    )
+    .await
+}
+
+/// [`refresh_radio_logos`] sur l'annuaire `url` et le cache `chemin` (#7043) :
+/// la même passe, l'adresse et le cache en paramètres pour que les essais
+/// montent leur propre annuaire.
+pub async fn refresh_radio_logos_depuis(
+    state: &AppState,
+    url: &str,
+    chemin: &std::path::Path,
+) -> RattrapageLogos {
     // #6516 — l'annuaire n'est plus téléchargé ici : il est relevé en v2 par
     // `radios_annuaire`, qui le garde en cache local (`ETag`, hors ligne) et le
     // publie dans `state.annuaire_radios`. Les logos se tirent ensuite de CE
     // relevé — y compris hors ligne, depuis le cache.
-    let releve = super::radios_annuaire::rafraichir(state).await;
+    let releve = super::radios_annuaire::rafraichir_depuis(state, url, chemin).await;
     let annuaire: Vec<StationAnnuaire> = state
         .annuaire_radios
         .read()
@@ -1028,8 +1046,15 @@ pub async fn refresh_radio_logos(state: &AppState) -> RattrapageLogos {
             json!({"action": "logos_refreshed", "updated": bilan.updated}),
         );
     }
+    if bilan.flux_updated > 0 {
+        state.event_bus.emit(
+            "library.radios_changed",
+            json!({"action": "flux_refreshed", "updated": bilan.flux_updated}),
+        );
+    }
     tracing::info!(
         updated = bilan.updated,
+        flux_updated = bilan.flux_updated,
         sans_logo = bilan.sans_logo,
         annuaire_a_jour = bilan.annuaire_a_jour,
         "radio_logos_refreshed_from_directory"
@@ -1053,6 +1078,7 @@ pub(crate) fn rattraper_les_logos(
     let liens = repo.liens_annuaire().unwrap_or_default();
     for mut st in repo.list().unwrap_or_default() {
         let lien = st.id.and_then(|id| liens.get(&id)).map(String::as_str);
+        let mut logo_change = false;
         match logo_a_poser(annuaire, &st, lien) {
             DecisionLogo::Garder => {
                 if st.logo_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
@@ -1061,14 +1087,63 @@ pub(crate) fn rattraper_les_logos(
             }
             DecisionLogo::Poser(logo) => {
                 st.logo_url = logo;
-                if repo.update(&st).is_ok() {
-                    bilan.updated += 1;
-                } else {
-                    bilan.sans_logo += 1;
-                }
+                logo_change = true;
             }
         }
+        // #7043 — l'adresse du flux suit la fiche, sans popup.
+        let flux_change = flux_a_poser(annuaire, &mut st, lien);
+        if !logo_change && !flux_change {
+            continue;
+        }
+        if repo.update(&st).is_ok() {
+            bilan.updated += usize::from(logo_change);
+            bilan.flux_updated += usize::from(flux_change);
+        } else if logo_change {
+            bilan.sans_logo += 1;
+        }
     }
+}
+
+/// #7043 — Rémi (rapport RC7) : une station venue de l'annuaire est gérée en
+/// central, flux compris ; la popup « mettre à jour le flux » n'a plus lieu
+/// d'être. Si `st` est LIÉE à une fiche (`external_id`) et que son adresse n'est
+/// plus aucune de celles que la fiche publie, elle prend l'adresse principale
+/// de la fiche (et son format, son débit). Rend `true` si `st` a changé.
+///
+/// Garde-fous :
+/// * sans lien enregistré (station saisie à la main), RIEN ne change : le
+///   rapprochement par l'adresse, lui, ne touche jamais à l'adresse ;
+/// * une adresse qui reste l'une des adresses publiées de la fiche (même
+///   secondaire) est gardée : ce n'est pas un flux périmé ;
+/// * une fiche sortie de l'annuaire (retirée, refusée) n'est plus dans le
+///   relevé : la station garde son adresse.
+pub(crate) fn flux_a_poser(
+    annuaire: &[StationAnnuaire],
+    st: &mut RadioStation,
+    lien: Option<&str>,
+) -> bool {
+    let Some(ext) = lien else {
+        return false;
+    };
+    let Some(fiche) = annuaire
+        .iter()
+        .find(|f| f.external_id.as_deref() == Some(ext))
+    else {
+        return false;
+    };
+    if fiche.stream_url.trim().is_empty()
+        || super::radios_annuaire::flux_de_la_fiche(fiche, &st.url)
+    {
+        return false;
+    }
+    st.url = fiche.stream_url.clone();
+    if let Some(c) = fiche.codec.as_deref() {
+        st.codec = Some(c.to_ascii_lowercase());
+    }
+    if fiche.bitrate.is_some() {
+        st.bitrate = fiche.bitrate;
+    }
+    true
 }
 
 /// Ce que le rattrapage fait du logo d'une station.
@@ -3945,6 +4020,10 @@ mod tests_validation_url_flux {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "radios_flux_auto_7043_tests.rs"]
+mod tests_flux_auto_7043;
 
 #[cfg(test)]
 #[path = "radios_logos_exacts_tests.rs"]

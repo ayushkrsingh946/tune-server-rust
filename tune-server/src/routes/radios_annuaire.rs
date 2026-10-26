@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path as CheminDisque, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -48,9 +48,14 @@ use crate::state::AppState;
 /// L'annuaire v2 de mozaiklabs.fr.
 pub const ANNUAIRE_V2_URL: &str = "https://mozaiklabs.fr/api/v2/radios";
 
-/// Le relevé se refait une fois par jour (et à l'ouverture de l'écran quand il
-/// a plus d'un jour).
-pub const PERIODE_DE_RELEVE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// Le relevé de fond se refait toutes les 6 h (#7043, décision de Bertrand du
+/// 25/10/2026 ; c'était 24 h).
+pub const PERIODE_DE_RELEVE: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+/// À l'ouverture de l'écran « Annuaire », l'annuaire est relu si la dernière
+/// TENTATIVE (réussie ou non) a plus d'une heure : jamais plus d'un relevé par
+/// heure, quel que soit le nombre d'ouvertures et même réseau coupé (#7043).
+pub const DELAI_A_L_OUVERTURE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Mention de la source, décidée le 13/10 avec Rémi : radio-metadata.fr, et sa
 /// page de contribution, qui finance le serveur.
@@ -69,6 +74,11 @@ pub struct EtatAnnuaire {
     pub etag: Option<String>,
     #[serde(skip)]
     releve_en_cours: std::sync::Arc<AtomicBool>,
+    /// Date (secondes Unix) de la dernière TENTATIVE de relevé, réussie ou non ;
+    /// `0` : aucune. C'est elle, et non `releve_le`, qui borne la fréquence :
+    /// un site injoignable ne doit pas être réinterrogé à chaque ouverture.
+    #[serde(skip)]
+    derniere_tentative: std::sync::Arc<AtomicI64>,
 }
 
 /// Le fichier du cache : le corps v2 tel que reçu, plus son `ETag` et sa date.
@@ -197,6 +207,7 @@ pub async fn rafraichir_depuis(state: &AppState, url: &str, chemin: &CheminDisqu
     // Le cache d'abord : un serveur qui démarre hors ligne sert l'annuaire de
     // la veille au lieu de rien.
     charger_le_cache_si_vide(state, chemin);
+    noter_la_tentative(state);
 
     let etag = state.annuaire_etat.read().ok().and_then(|e| e.etag.clone());
     let mut requete = tune_core::http::client::shared()
@@ -268,35 +279,55 @@ pub async fn rafraichir(state: &AppState) -> Releve {
     rafraichir_depuis(state, ANNUAIRE_V2_URL, &chemin_du_cache()).await
 }
 
-/// Le relevé a-t-il plus d'un jour (ou n'a-t-il jamais eu lieu) ?
-fn releve_perime(etat: &EtatAnnuaire) -> bool {
-    let Some(date) = etat.releve_le.as_deref() else {
-        return true;
-    };
-    match chrono::DateTime::parse_from_rfc3339(date) {
-        Ok(d) => {
-            chrono::Utc::now().signed_duration_since(d)
-                > chrono::Duration::seconds(PERIODE_DE_RELEVE.as_secs() as i64)
-        }
-        Err(_) => true,
+fn maintenant_unix() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Note qu'un relevé est tenté maintenant.
+fn noter_la_tentative(state: &AppState) {
+    if let Ok(e) = state.annuaire_etat.read() {
+        e.derniere_tentative
+            .store(maintenant_unix(), Ordering::SeqCst);
     }
 }
 
-/// Relance un relevé en tâche de fond s'il est périmé, sans jamais en lancer
-/// deux à la fois. L'écran n'attend pas : il reçoit le relevé d'avant.
-fn relever_en_fond_si_perime(state: &AppState) {
-    let (perime, verrou) = match state.annuaire_etat.read() {
-        Ok(e) => (releve_perime(&e), e.releve_en_cours.clone()),
-        Err(_) => return,
+/// Une nouvelle tentative est-elle permise ? Oui s'il n'y en a jamais eu, ou si
+/// la dernière date d'au moins `delai`. Pure : se teste sans horloge.
+pub fn tentative_permise(derniere: i64, maintenant: i64, delai: std::time::Duration) -> bool {
+    derniere <= 0 || maintenant.saturating_sub(derniere) >= delai.as_secs() as i64
+}
+
+/// Relance un relevé en tâche de fond si la dernière tentative date de plus de
+/// `delai`, sans jamais en lancer deux à la fois. L'écran n'attend pas : il
+/// reçoit le relevé d'avant. Rend la tâche lancée, ou `None` si rien n'est dû.
+///
+/// Une seule passe, bornée : un relevé de l'annuaire (un GET conditionnel, 304
+/// quand rien n'a changé) puis le rapprochement local de « Mes radios ». Aucune
+/// boucle, aucune relance : la prochaine tentative attend `delai`.
+pub fn relever_a_l_ouverture(
+    state: &AppState,
+    url: &str,
+    chemin: &CheminDisque,
+    delai: std::time::Duration,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let (derniere, verrou) = match state.annuaire_etat.read() {
+        Ok(e) => (e.derniere_tentative.clone(), e.releve_en_cours.clone()),
+        Err(_) => return None,
     };
-    if !perime || verrou.swap(true, Ordering::SeqCst) {
-        return;
+    if !tentative_permise(derniere.load(Ordering::SeqCst), maintenant_unix(), delai)
+        || verrou.swap(true, Ordering::SeqCst)
+    {
+        return None;
     }
+    // La place est réservée AVANT de partir : deux ouvertures successives ne
+    // peuvent pas toutes deux passer entre le lancement et la première requête.
+    derniere.store(maintenant_unix(), Ordering::SeqCst);
     let state = state.clone();
-    tokio::spawn(async move {
-        let _ = super::radios::refresh_radio_logos(&state).await;
+    let (url, chemin) = (url.to_string(), chemin.to_path_buf());
+    Some(tokio::spawn(async move {
+        let _ = super::radios::refresh_radio_logos_depuis(&state, &url, &chemin).await;
         verrou.store(false, Ordering::SeqCst);
-    });
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -708,7 +739,12 @@ async fn lister(
 ) -> Json<Value> {
     // Premier affichage d'un serveur qui n'a pas encore relevé : le cache.
     charger_le_cache_si_vide(&state, &chemin_du_cache());
-    relever_en_fond_si_perime(&state);
+    relever_a_l_ouverture(
+        &state,
+        ANNUAIRE_V2_URL,
+        &chemin_du_cache(),
+        DELAI_A_L_OUVERTURE,
+    );
     let fiches = state
         .annuaire_radios
         .read()

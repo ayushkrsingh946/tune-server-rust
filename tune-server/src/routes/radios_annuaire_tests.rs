@@ -218,21 +218,6 @@ fn une_station_creee_depuis_l_annuaire_porte_son_flux_principal() {
 }
 
 #[test]
-fn un_releve_sans_date_ou_vieux_d_un_jour_est_perime() {
-    assert!(releve_perime(&EtatAnnuaire::default()));
-    let frais = EtatAnnuaire {
-        releve_le: Some(maintenant_rfc3339()),
-        ..Default::default()
-    };
-    assert!(!releve_perime(&frais));
-    let vieux = EtatAnnuaire {
-        releve_le: Some("2026-10-01T00:00:00Z".into()),
-        ..Default::default()
-    };
-    assert!(releve_perime(&vieux));
-}
-
-#[test]
 fn une_fiche_rapprochee_par_le_nom_seul_ne_prete_pas_son_logo() {
     // Fil du 19/10 : le logo d'une station ne vient que de la fiche qui lui
     // est liée (`external_id`) ou qui partage son adresse de flux.
