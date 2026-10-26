@@ -26,6 +26,7 @@ pub mod spotify_connect;
 pub mod spotify_lecture;
 pub mod tidal;
 pub mod titres_phares_ecoutes;
+pub mod titres_phares_lastfm;
 pub mod traits;
 /// La vignette d'un podcast mise en cache à l'abonnement (#5214).
 pub mod vignette_podcast;
