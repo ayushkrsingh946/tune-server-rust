@@ -12,7 +12,7 @@
     "sv": "Det här tillägget måste vara installerat och aktiverat.",
     "hu": "Ezt a bővítményt telepíteni és engedélyezni kell.",
     "vi": "Plugin này phải được cài đặt và bật.",
-    "nb": "Dette tillegget må være installert og aktivert.",
+    "nb": "Denne pluginen må være installert og aktivert.",
     "pl": "Ta wtyczka musi być zainstalowana i włączona.",
     "el": "Αυτό το πρόσθετο πρέπει να είναι εγκατεστημένο και ενεργοποιημένο."
   },
@@ -183,7 +183,7 @@
     "hu": "Roon-híd (Premium): közreműködők, előadóképek és borítók egy Roon Core-ból",
     "vi": "Cầu nối Roon (Premium): ghi công, ảnh nghệ sĩ và ảnh bìa lấy từ một Roon Core",
     "nb": "Roon-bro (Premium): medvirkende, artistbilder og omslag hentet fra en Roon Core",
-    "pl": "Most Roon (Premium): wykonawcy, zdjęcia artystów i okładki pobrane z Roon Core",
+    "pl": "Most Roon (Premium): autorzy, zdjęcia artystów i okładki pobrane z Roon Core",
     "el": "Γέφυρα Roon (Premium): συντελεστές, εικόνες καλλιτεχνών και εξώφυλλα που συλλέγονται από ένα Roon Core"
   },
   "plugin.description.dj": {
@@ -386,7 +386,7 @@
     "sv": "Spårnr",
     "hu": "Szám sorszáma",
     "vi": "Số bài",
-    "nb": "Sportnr.",
+    "nb": "Spornr.",
     "pl": "Nr utworu",
     "el": "Αρ. κομματιού"
   },
@@ -862,7 +862,7 @@
     "sv": "Samplingsfrekvens",
     "hu": "Mintavételi frekvencia",
     "vi": "Tần số lấy mẫu",
-    "nb": "Samplingsfrekvens",
+    "nb": "Samplingsrate",
     "pl": "Częstotliwość próbkowania",
     "el": "Συχνότητα δειγματοληψίας"
   },
@@ -1135,7 +1135,7 @@
     "hu": "Közreműködők",
     "vi": "Ghi công",
     "nb": "Medvirkende",
-    "pl": "Twórcy",
+    "pl": "Autorzy",
     "el": "Συντελεστές"
   },
   "metacat.Classification": {
@@ -1254,7 +1254,7 @@
     "hu": "Évek + közreműködők + borítók (kiadás-azonosítók).",
     "vi": "Năm + ghi công + ảnh bìa (ID phát hành).",
     "nb": "År + medvirkende + omslag (utgivelses-ID-er).",
-    "pl": "Lata + twórcy + okładki (ID wydań).",
+    "pl": "Lata + autorzy + okładki (ID wydań).",
     "el": "Έτη + συντελεστές + εξώφυλλα (αναγνωριστικά εκδόσεων)."
   },
   "svctok.musicbrainz.pricing": {
@@ -1305,7 +1305,7 @@
     "hu": "Évek + borítók + közreműködők ritka préselésekhez.",
     "vi": "Năm + ảnh bìa + ghi công cho các bản ép hiếm.",
     "nb": "År + omslag + medvirkende for obskure utgaver.",
-    "pl": "Lata + okładki + twórcy dla rzadkich tłoczeń.",
+    "pl": "Lata + okładki + autorzy dla rzadkich tłoczeń.",
     "el": "Έτη + εξώφυλλα + συντελεστές για σπάνιες εκδόσεις."
   },
   "svctok.discogs.pricing": {
@@ -3684,7 +3684,7 @@
     "sv": "Spotify-uppspelning är inte aktiverad: alternativet ”Spotify-uppspelning (experimentell)” finns under Inställningar › Åtkomst och tokens › Spotify Connect (nivå Avancerad).",
     "hu": "A Spotify-lejátszás nincs engedélyezve: a „Spotify-lejátszás (kísérleti)” beállítás a Beállítások › Hozzáférés és tokenek › Spotify Connect alatt található (Haladó szint).",
     "vi": "Chưa bật phát Spotify: tùy chọn “Phát Spotify (thử nghiệm)” nằm trong Cài đặt › Truy cập và token › Spotify Connect (cấp Nâng cao).",
-    "nb": "Spotify-avspilling er ikke aktivert: alternativet «Spotify-avspilling (eksperimentell)» finnes i Innstillinger › Tilgang og tokens › Spotify Connect (avansert nivå).",
+    "nb": "Spotify-avspilling er ikke aktivert: alternativet «Spotify-avspilling (eksperimentell)» finnes i Innstillinger › Tilgang og tokener › Spotify Connect (avansert nivå).",
     "pl": "Odtwarzanie Spotify nie jest włączone: opcja „Odtwarzanie Spotify (eksperymentalne)” znajduje się w Ustawienia › Dostęp i tokeny › Spotify Connect (poziom zaawansowany).",
     "el": "Η αναπαραγωγή Spotify δεν είναι ενεργοποιημένη: η επιλογή «Αναπαραγωγή Spotify (πειραματική)» βρίσκεται στις Ρυθμίσεις › Πρόσβαση και διακριτικά › Spotify Connect (προχωρημένο επίπεδο)."
   }

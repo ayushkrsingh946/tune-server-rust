@@ -44,12 +44,25 @@ fn table() -> &'static HashMap<String, HashMap<String, String>> {
 /// `en`, `zh-Hant-TW` → `zh`. C'est la forme sous laquelle les langues sont
 /// comparées partout côté serveur (`SUPPORTED`, blocs de notes de version…).
 pub fn base_tag(tag: &str) -> String {
-    tag.trim()
-        .split('-')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase()
+    alias_langue(
+        tag.trim()
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase(),
+    )
+}
+
+/// Le norvégien s'annonce `no` (ou `nn`, nynorsk, faute de mieux) : l'interface
+/// ne parle que le bokmål, `nb`. Point unique de cet alias côté serveur — le
+/// client web fait de même (`langueParDefaut.ts`). `base` est déjà en
+/// minuscules.
+pub fn alias_langue(base: String) -> String {
+    match base.as_str() {
+        "no" | "nn" => "nb".to_string(),
+        _ => base,
+    }
 }
 
 /// Langues d'un en-tête `Accept-Language`, dans l'ordre de préférence :
@@ -157,6 +170,24 @@ mod tests {
         assert_eq!(base_tag(" EN-gb "), "en");
         assert_eq!(base_tag("zh-Hant-TW"), "zh");
         assert_eq!(base_tag(""), "");
+    }
+
+    /// Un navigateur norvégien envoie `no`, `nb-NO` ou `nn-NO` : tous donnent
+    /// le bokmål. Passe par `base_tag`, donc par `langues_acceptees`,
+    /// `lang_from_header` et chaque appelant, sans les toucher.
+    ///
+    /// Contre-épreuve : retirer le bras `"no" | "nn"` de `alias_langue` fait
+    /// rougir ce test (les en-têtes `no` et `nn` retombent sur `"en"`).
+    #[test]
+    fn no_et_nn_donnent_nb() {
+        assert_eq!(base_tag("no"), "nb");
+        assert_eq!(base_tag("nn-NO"), "nb");
+        assert_eq!(base_tag("NO"), "nb");
+        assert_eq!(base_tag("nb-NO"), "nb");
+        assert_eq!(lang_from_header(&en_tetes("no,en;q=0.5")), "nb");
+        assert_eq!(lang_from_header(&en_tetes("nn-NO,nn;q=0.9,en;q=0.5")), "nb");
+        assert_eq!(langues_acceptees("no-NO,en;q=0.5"), vec!["nb", "en"]);
+        assert_eq!(base_tag("fr"), "fr");
     }
 
     #[test]
@@ -377,7 +408,7 @@ mod tests {
             ("sv", "Åtkomst och tokens"),
             ("hu", "Hozzáférés és tokenek"),
             ("vi", "Truy cập và token"),
-            ("nb", "Tilgang og tokens"),
+            ("nb", "Tilgang og tokener"),
             ("pl", "Dostęp i tokeny"),
             ("el", "Πρόσβαση και διακριτικά"),
         ];

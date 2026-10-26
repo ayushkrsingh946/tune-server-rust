@@ -14,7 +14,8 @@ pub struct LangueSignal {
 }
 
 fn reconnue(value: &str) -> Option<&'static str> {
-    let base = value.trim().split(['-', '_']).next()?.to_ascii_lowercase();
+    let base =
+        crate::i18n::alias_langue(value.trim().split(['-', '_']).next()?.to_ascii_lowercase());
     [
         "fr", "en", "de", "es", "it", "zh", "ja", "ko", "ro", "sv", "vi", "hu", "nb", "pl", "el",
     ]
@@ -144,6 +145,11 @@ mod tests {
         assert_eq!(langue_requete(Some("nb-NO"), &headers), "nb");
         assert_eq!(langue_requete(Some("pl"), &headers), "pl");
         assert_eq!(langue_requete(Some("el-GR"), &headers), "el");
+        assert_eq!(langue_requete(Some("no"), &headers), "nb");
+        assert_eq!(langue_requete(Some("nn-NO"), &headers), "nb");
+        headers.insert("accept-language", "no;q=0.9,fr;q=0.1".parse().unwrap());
+        assert_eq!(langue_requete(None, &headers), "nb");
+        headers.insert("accept-language", "fr-FR,en;q=0.8".parse().unwrap());
         headers.insert("accept-language", "fr;q=0,el;q=0.9,pl;q=1".parse().unwrap());
         assert_eq!(langue_requete(None, &headers), "pl");
         assert_eq!(texte("nb", "rule_zone"), "sone");

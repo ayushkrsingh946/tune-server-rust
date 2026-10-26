@@ -667,7 +667,7 @@
     "limiter_idle": "sikkerhetsbegrenser, har ikke grepet inn",
     "limiter_active": "sikkerhetsbegrenser, grep inn på {0} rammer ({1} %) siden oppstart, høyst {2} dB",
     "shadow": "hodeskygge {0} Hz, {1} dB/oktav",
-    "plugin_crossfeed": "{0} i strømmen (tillegg, venstre og høyre kanal blandet)",
+    "plugin_crossfeed": "{0} i strømmen (plugin, venstre og høyre kanal blandet)",
     "rg_refused": "ReplayGain ({0}, {1} dB avvist: ingen tagget topp, forhindring av klipping er slått på)",
     "file_tags": "filtagger",
     "analysis": "Tune-analyse",

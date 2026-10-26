@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::state::AppState;
 
 const SUPPORTED_LOCALES: &[&str] = &[
-    "en", "fr", "de", "es", "it", "zh", "ko", "ja", "hu", "vi", "nb", "pl", "el",
+    "en", "fr", "de", "es", "it", "zh", "ko", "ja", "ro", "sv", "hu", "vi", "nb", "pl", "el",
 ];
 
 pub fn router() -> Router<AppState> {
@@ -81,7 +81,7 @@ fn parse_accept_language(header: &str) -> String {
                 (part, 1.0)
             };
             // Normalize: "fr-FR" -> "fr"
-            let normalized = lang.split('-').next().unwrap_or(lang).to_lowercase();
+            let normalized = crate::i18n::base_tag(lang);
             if normalized.is_empty() {
                 None
             } else {
@@ -770,7 +770,7 @@ fn get_translations(locale: &str) -> Value {
                 "tracks": "Spor",
                 "genres": "Sjangre",
                 "playlists": "Spillelister",
-                "radios": "Radioer",
+                "radios": "Direkteradioer",
                 "queue": "Kø",
                 "favorites": "Favoritter",
                 "history": "Historikk",
@@ -778,18 +778,18 @@ fn get_translations(locale: &str) -> Value {
             },
             "settings": {
                 "title": "Innstillinger",
-                "musicDirs": "Musikkmapper",
+                "musicDirs": "Plasseringer",
                 "streaming": "Strømmetjenester",
                 "zones": "Soner",
                 "system": "System",
             },
             "onboarding": {
-                "welcome": "Velkommen til Tune!",
+                "welcome": "Velkommen til Tune Server",
                 "addMusic": "Legg til musikk",
                 "connectStreaming": "Koble til strømmetjenester",
                 "setupZones": "Sett opp soner",
                 "createProfile": "Opprett en profil",
-                "complete": "Oppsettet er ferdig!",
+                "complete": "Alt klart!",
                 "skip": "Hopp over",
                 "next": "Neste",
                 "finish": "Fullfør",
@@ -810,7 +810,7 @@ fn get_translations(locale: &str) -> Value {
                 "tracks": "Utwory",
                 "genres": "Gatunki",
                 "playlists": "Playlisty",
-                "radios": "Radia",
+                "radios": "Radia na żywo",
                 "queue": "Kolejka",
                 "favorites": "Ulubione",
                 "history": "Historia",
@@ -818,18 +818,18 @@ fn get_translations(locale: &str) -> Value {
             },
             "settings": {
                 "title": "Ustawienia",
-                "musicDirs": "Foldery z muzyką",
+                "musicDirs": "Lokalizacje",
                 "streaming": "Usługi streamingowe",
                 "zones": "Strefy",
                 "system": "System",
             },
             "onboarding": {
-                "welcome": "Witaj w Tune!",
+                "welcome": "Witamy w Tune Server",
                 "addMusic": "Dodaj muzykę",
                 "connectStreaming": "Połącz usługi streamingowe",
                 "setupZones": "Skonfiguruj strefy",
                 "createProfile": "Utwórz profil",
-                "complete": "Konfiguracja zakończona!",
+                "complete": "Gotowe!",
                 "skip": "Pomiń",
                 "next": "Dalej",
                 "finish": "Zakończ",
@@ -875,6 +875,86 @@ fn get_translations(locale: &str) -> Value {
                 "finish": "Τέλος",
             },
         }),
+        "ro" => json!({
+            "common": {
+                "play": "Redă",
+                "pause": "Pauză",
+                "stop": "Oprește",
+                "next": "Următorul",
+                "previous": "Anterior",
+                "search": "Căutare",
+                "settings": "Setări",
+                "library": "Bibliotecă",
+                "artists": "Artiști",
+                "albums": "Albume",
+                "tracks": "Piese",
+                "genres": "Genuri",
+                "playlists": "Playlisturi",
+                "radios": "Radiouri live",
+                "queue": "Coadă",
+                "favorites": "Favorite",
+                "history": "Istoric",
+                "volume": "Volum",
+            },
+            "settings": {
+                "title": "Setări",
+                "musicDirs": "Locații",
+                "streaming": "Servicii de streaming",
+                "zones": "Zone",
+                "system": "Sistem",
+            },
+            "onboarding": {
+                "welcome": "Bine ai venit la Tune Server",
+                "addMusic": "Adaugă muzică",
+                "connectStreaming": "Conectează serviciile de streaming",
+                "setupZones": "Configurează zonele",
+                "createProfile": "Creează un profil",
+                "complete": "Gata!",
+                "skip": "Omite",
+                "next": "Următorul",
+                "finish": "Finalizează configurarea",
+            },
+        }),
+        "sv" => json!({
+            "common": {
+                "play": "Spela",
+                "pause": "Pausa",
+                "stop": "Stoppa",
+                "next": "Nästa",
+                "previous": "Föregående",
+                "search": "Sök",
+                "settings": "Inställningar",
+                "library": "Bibliotek",
+                "artists": "Artister",
+                "albums": "Album",
+                "tracks": "Spår",
+                "genres": "Genrer",
+                "playlists": "Spellistor",
+                "radios": "Live-radio",
+                "queue": "Kö",
+                "favorites": "Favoriter",
+                "history": "Historik",
+                "volume": "Volym",
+            },
+            "settings": {
+                "title": "Inställningar",
+                "musicDirs": "Platser",
+                "streaming": "Streamingtjänster",
+                "zones": "Zoner",
+                "system": "System",
+            },
+            "onboarding": {
+                "welcome": "Välkommen till Tune Server",
+                "addMusic": "Lägg till musik",
+                "connectStreaming": "Anslut streamingtjänster",
+                "setupZones": "Konfigurera zoner",
+                "createProfile": "Skapa en profil",
+                "complete": "Klart!",
+                "skip": "Hoppa över",
+                "next": "Nästa",
+                "finish": "Slutför konfigurationen",
+            },
+        }),
         _ => json!({}),
     }
 }
@@ -907,6 +987,33 @@ mod tests {
         assert_eq!(parse_accept_language("vi-VN,vi;q=0.9,en;q=0.5"), "vi");
         assert_eq!(get_translations("vi")["settings"]["zones"], "Vùng phát");
         assert_eq!(parse_accept_language("pt-BR"), "en");
+    }
+
+    /// La liste que `/api/v1/i18n/locales` annonce est EXACTEMENT celle que le
+    /// serveur parle (`i18n::SUPPORTED`) : ni une langue servie mais non
+    /// annoncée (`sv`, `ro` l'étaient), ni une annoncée mais non servie.
+    ///
+    /// Contre-épreuve : retirer `"sv"` de `SUPPORTED_LOCALES` fait rougir ce
+    /// test en nommant `sv`.
+    #[test]
+    fn les_locales_annoncees_sont_celles_du_serveur() {
+        let mut annoncees: Vec<&str> = SUPPORTED_LOCALES.to_vec();
+        let mut servies: Vec<&str> = crate::i18n::SUPPORTED.to_vec();
+        annoncees.sort_unstable();
+        servies.sort_unstable();
+        assert_eq!(
+            annoncees, servies,
+            "/locales annonce autre chose que i18n::SUPPORTED"
+        );
+        assert_eq!(parse_accept_language("sv-SE,sv;q=0.9"), "sv");
+        assert_eq!(parse_accept_language("ro-RO,ro;q=0.9"), "ro");
+    }
+
+    /// Un navigateur norvégien (`no`, `nn-NO`) obtient le bokmål.
+    #[test]
+    fn no_et_nn_donnent_nb_aussi_sur_locales() {
+        assert_eq!(parse_accept_language("no,en;q=0.5"), "nb");
+        assert_eq!(parse_accept_language("nn-NO,nn;q=0.9"), "nb");
     }
 
     /// Le norvégien bokmål, le polonais et le grec sont des langues de
