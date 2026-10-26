@@ -702,18 +702,18 @@ mod voies_pilotees_6230 {
         assert!(!voies_pilotees_permises(0, Some(2)));
     }
 
-    /// #6230 (étape 2, ASIO et CoreAudio) — les ouvertures que fait
-    /// `ouvrir_sur_les_voies_pilotees` : `(voies, plafonnée)` dans l'ordre,
-    /// les refus annoncés, et ce qu'elle rend.
-    fn ouvertures(
-        grille: Option<u16>,
-        source: u16,
-        acceptees: &[u16],
-    ) -> (
+    /// Ce que rend [`ouvertures`] : les appels `(voies, plafonnée)` dans
+    /// l'ordre, les refus annoncés, et le résultat.
+    type Ouvertures = (
         Vec<(u16, bool)>,
         Vec<(u16, String)>,
         Result<(u16, Option<u16>), String>,
-    ) {
+    );
+
+    /// #6230 (étape 2, ASIO et CoreAudio) — les ouvertures que fait
+    /// `ouvrir_sur_les_voies_pilotees` pour une sortie qui accepte
+    /// `acceptees` voies.
+    fn ouvertures(grille: Option<u16>, source: u16, acceptees: &[u16]) -> Ouvertures {
         let mut appels = Vec::new();
         let mut refus = Vec::new();
         let rendu = super::ouvrir_sur_les_voies_pilotees(

@@ -767,8 +767,8 @@ pub(super) fn jouer_via_asio(entrees: EntreesAsio) {
         return;
     }
 
-    // #6230 — ce que l'ouverture a fait des voies demandées : noté pour les
-    // décisions de réouverture, et dit au journal.
+    // #6230 : ce que l'ouverture a fait des voies demandées, noté pour les
+    // décisions de réouverture et dit au journal.
     reaffectation.constater_l_ouverture(
         voies_de_la_matrice,
         backend.format_ouvert().canaux,
