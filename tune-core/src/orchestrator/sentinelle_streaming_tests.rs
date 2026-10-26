@@ -427,3 +427,16 @@ fn la_radio_par_defaut_et_sa_desactivation() {
     };
     assert_eq!(sans.radio_effective(), None);
 }
+
+/// À la main, sur une machine qui a Internet : la radio de référence RÉELLE
+/// passe par le lecteur radio jusqu'à sa première trame.
+///
+/// `cargo test -p tune-core --lib sentinelle_streaming::tests::radio_reelle -- --ignored`
+#[test]
+#[ignore = "réseau réel"]
+fn radio_reelle_de_reference() {
+    let (cadence, canaux) = super::super::radio::sonder_une_station_sans_sortie(RADIO_PAR_DEFAUT)
+        .expect("la radio de référence se décode");
+    assert!(cadence > 0 && canaux > 0);
+    eprintln!("radio de référence : {cadence} Hz, {canaux} canaux");
+}
