@@ -56,7 +56,8 @@
 //!
 //! Une page ou une image d'un site tiers n'est lue que sur un nom d'hôte
 //! public : jamais une adresse IP littérale, jamais `localhost` ni `.local`
-//! ([`hote_public`]), redirections comprises. Les images d'un site ne sont
+//! ([`hote_public`]), redirections comprises ; et chaque connexion ne vise
+//! qu'une adresse publique vérifiée à la résolution ([`ResolveurPublic`]). Les images d'un site ne sont
 //! lues qu'en HTTPS, plafonnées à `TAILLE_MAX_IMAGE`.
 
 use std::sync::{Arc, LazyLock, Mutex};
@@ -145,10 +146,76 @@ pub fn hote_public(url: &reqwest::Url) -> bool {
             .any(|s| d.ends_with(s))
 }
 
-/// Le client des sites officiels : il ne suit une redirection que vers un
-/// hôte public, cinq fois au plus.
-fn client_des_sites() -> reqwest::Client {
+/// Une adresse joignable sur Internet ? Ni privée, ni de bouclage, ni
+/// lien-local, ni ULA, ni non spécifiée, ni multicast, ni réservée.
+pub fn adresse_publique(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || a == 0
+                || a >= 240
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 198 && (18..20).contains(&b)))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return adresse_publique(IpAddr::V4(v4));
+            }
+            let s = v6.segments();
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00
+                || (s[0] & 0xffc0) == 0xfe80
+                || (s[0] & 0xffc0) == 0xfec0
+                || (s[0] == 0x2001 && s[1] == 0x0db8)
+                || (s[0] == 0x0064 && s[1] == 0xff9b)
+                || s[..6].iter().all(|x| *x == 0))
+        }
+    }
+}
+
+/// Le résolveur du client des sites : il résout le nom, ne garde QUE les
+/// adresses publiques ([`adresse_publique`]) et les rend au client, qui s'y
+/// connecte directement — sans seconde résolution. Un nom sans adresse
+/// publique est une erreur. Vaut pour chaque connexion, redirections
+/// comprises.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ResolveurPublic;
+
+impl reqwest::dns::Resolve for ResolveurPublic {
+    fn resolve(&self, nom: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let hote = nom.as_str().to_string();
+        Box::pin(async move {
+            let adresses: Vec<std::net::SocketAddr> = tokio::net::lookup_host((hote.as_str(), 0))
+                .await?
+                .filter(|a| adresse_publique(a.ip()))
+                .collect();
+            if adresses.is_empty() {
+                return Err(format!("{hote} : aucune adresse publique").into());
+            }
+            Ok(Box::new(adresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Le client des sites officiels : ses connexions ne visent que des adresses
+/// publiques vérifiées ([`ResolveurPublic`]), et il ne suit une redirection
+/// que vers un hôte public, cinq fois au plus. `None` s'il ne peut être
+/// construit : la source « site officiel » est alors coupée, jamais servie
+/// par un client sans ces gardes.
+fn client_des_sites() -> Option<reqwest::Client> {
     crate::http::client::builder()
+        .dns_resolver(std::sync::Arc::new(ResolveurPublic))
         .redirect(reqwest::redirect::Policy::custom(|essai| {
             if essai.previous().len() >= 5 {
                 essai.error("trop de redirections")
@@ -160,16 +227,18 @@ fn client_des_sites() -> reqwest::Client {
         }))
         .timeout(Duration::from_secs(15))
         .build()
-        .unwrap_or_default()
+        .map_err(|e| tracing::warn!(erreur = %e, "logo_label_client_des_sites_indisponible"))
+        .ok()
 }
 
 /// Où sont les services, et sous quels limiteurs. La production :
 /// [`Transport::production`] ; les essais : [`Transport::sous_base`].
 pub struct Transport {
     pub client: reqwest::Client,
-    /// Le client des pages et images des sites officiels (redirections
-    /// gardées).
-    pub client_sites: reqwest::Client,
+    /// Le client des pages et images des sites officiels : adresses
+    /// vérifiées à la résolution, redirections gardées. `None` : source
+    /// coupée.
+    pub client_sites: Option<reqwest::Client>,
     pub musicbrainz: String,
     pub wikidata: String,
     pub commons: String,
@@ -221,7 +290,7 @@ impl Transport {
     pub fn sous_base(client: reqwest::Client, base: &str) -> Self {
         let base = base.trim_end_matches('/');
         Self {
-            client_sites: client.clone(),
+            client_sites: Some(client.clone()),
             musicbrainz: format!("{base}/mb"),
             wikidata: format!("{base}/wikidata"),
             commons: format!("{base}/commons"),
@@ -1008,7 +1077,7 @@ impl CatalogueLogosWeb {
     /// bon.
     async fn par_le_site(&self, site: &str) -> Option<(String, Attribution)> {
         let hote = reqwest::Url::parse(site).ok()?.host_str()?.to_string();
-        let client = &self.transport.client_sites;
+        let client = self.transport.client_sites.as_ref()?;
         let (page, finale) = self
             .transport
             .octets(client, site, Limite::Site(&hote), TAILLE_MAX_PAGE, true)
@@ -1199,7 +1268,11 @@ impl CatalogueDeLabels for CatalogueLogosWeb {
             Limite::Site(&hote)
         };
         let client = match limite {
-            Limite::Site(_) => &self.transport.client_sites,
+            Limite::Site(_) => self
+                .transport
+                .client_sites
+                .as_ref()
+                .ok_or_else(|| String::from("client des sites indisponible"))?,
             _ => &self.transport.client,
         };
         self.transport
@@ -1347,6 +1420,74 @@ mod tests {
         ] {
             assert!(!public(interdit), "{interdit} devait être refusé");
         }
+    }
+
+    #[test]
+    fn seules_les_adresses_publiques_passent_la_resolution() {
+        let publique = |a: &str| adresse_publique(a.parse().unwrap());
+        for ok in [
+            "93.184.216.34",
+            "151.101.1.69",
+            "2606:4700::6810:84e5",
+            "2a00:1450:4007:80e::200e",
+        ] {
+            assert!(publique(ok), "{ok} est publique");
+        }
+        for interdite in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.18",
+            "169.254.169.254",
+            "0.0.0.0",
+            "100.64.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "198.18.0.1",
+            "192.0.0.8",
+            "240.0.0.1",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "fec0::1",
+            "ff02::1",
+            "::ffff:192.168.1.18",
+            "::ffff:127.0.0.1",
+            "64:ff9b::a00:1",
+            "2001:db8::1",
+            "::7f00:1",
+        ] {
+            assert!(!publique(interdite), "{interdite} devait être refusée");
+        }
+    }
+
+    /// Le client de PRODUCTION des sites refuse de se connecter à un nom
+    /// dont l'adresse n'est pas publique — ici `localhost`, qui résout en
+    /// 127.0.0.1 — alors qu'un client ordinaire y arrive.
+    #[tokio::test]
+    async fn le_client_des_sites_ne_se_connecte_qu_a_une_adresse_publique() {
+        let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = ecoute.local_addr().unwrap().port();
+        let app = Router::new().route("/", get(|| async { "page" }));
+        tokio::spawn(async move {
+            axum::serve(ecoute, app).await.unwrap();
+        });
+        let url = format!("http://localhost:{port}/");
+        assert!(
+            reqwest::Client::new().get(&url).send().await.is_ok(),
+            "le témoin : le faux site répond à un client ordinaire"
+        );
+        let client = client_des_sites().expect("client des sites");
+        let refus = client.get(&url).send().await;
+        assert!(
+            refus.is_err(),
+            "connexion acceptée vers une adresse de bouclage : {refus:?}"
+        );
+        let resolu =
+            reqwest::dns::Resolve::resolve(&ResolveurPublic, "localhost".parse().unwrap()).await;
+        assert!(resolu.is_err(), "localhost ne doit donner aucune adresse");
     }
 
     // ── Wikidata, Commons, Wikipédia ────────────────────────────────────────
