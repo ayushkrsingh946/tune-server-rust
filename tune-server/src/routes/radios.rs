@@ -3336,6 +3336,17 @@ fn alarm_days_mask(
     Ok(from_days)
 }
 
+/// Refus d'une source de réveil vide ou mal formée (#7047) : 400
+/// `invalid_source`, voir `tune_core::alarms::valider_source`.
+fn alarm_source_refusee(message: String) -> axum::response::Response {
+    tracing::info!(error = %message, "alarm_source_refused");
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": "invalid_source", "message": message })),
+    )
+        .into_response()
+}
+
 async fn create_alarm_global(
     State(state): State<AppState>,
     profile: crate::routes::active_profile::ActiveProfile,
@@ -3372,6 +3383,15 @@ async fn create_alarm_global(
     let days_of_week = match alarm_days_mask(body.days.as_deref(), body.days_of_week.as_deref()) {
         Ok(m) => m.unwrap_or_else(|| "1111111".into()),
         Err(resp) => return resp,
+    };
+    // #7047 — un réveil qui ne peut rien jouer est refusé maintenant, pas
+    // découvert à l'heure où il sonne.
+    let (source_type, source_id) = match tune_core::alarms::valider_source(
+        body.source_type.as_deref(),
+        body.source_id.as_deref(),
+    ) {
+        Ok(s) => s,
+        Err(message) => return alarm_source_refusee(message),
     };
     let multi_zone_ids = body.multi_zone_ids.clone().unwrap_or_default();
 
@@ -3413,7 +3433,7 @@ async fn create_alarm_global(
     let profile_id = profile.id();
     match state.backend.execute_returning_id(
         "INSERT INTO alarms (name, time, days, one_shot, skip_holidays, zone_id, source_type, source_id, source_name, volume, fade_duration_s, fade_in_seconds, enabled, days_of_week, multi_zone_ids, profile_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        &[&name as &dyn ToSqlValue, &body.time as &dyn ToSqlValue, &days as &dyn ToSqlValue, &one_shot_int as &dyn ToSqlValue, &skip_holidays_int as &dyn ToSqlValue, &body.zone_id as &dyn ToSqlValue, &body.source_type as &dyn ToSqlValue, &body.source_id as &dyn ToSqlValue, &body.source_name as &dyn ToSqlValue, &volume as &dyn ToSqlValue, &fade_duration_s as &dyn ToSqlValue, &fade_in_seconds as &dyn ToSqlValue, &enabled_int as &dyn ToSqlValue, &days_of_week as &dyn ToSqlValue, &multi_zone_ids_opt as &dyn ToSqlValue, &profile_id as &dyn ToSqlValue],
+        &[&name as &dyn ToSqlValue, &body.time as &dyn ToSqlValue, &days as &dyn ToSqlValue, &one_shot_int as &dyn ToSqlValue, &skip_holidays_int as &dyn ToSqlValue, &body.zone_id as &dyn ToSqlValue, &source_type as &dyn ToSqlValue, &source_id as &dyn ToSqlValue, &body.source_name as &dyn ToSqlValue, &volume as &dyn ToSqlValue, &fade_duration_s as &dyn ToSqlValue, &fade_in_seconds as &dyn ToSqlValue, &enabled_int as &dyn ToSqlValue, &days_of_week as &dyn ToSqlValue, &multi_zone_ids_opt as &dyn ToSqlValue, &profile_id as &dyn ToSqlValue],
     ) {
         Ok(id) => {
             (StatusCode::CREATED, Json(json!({ "id": id }))).into_response()
@@ -3478,6 +3498,44 @@ async fn update_alarm(
         }
     }
 
+    // #7047 — la source qui SERA enregistrée (champ envoyé, sinon celui en
+    // base) est contrôlée dès qu'elle change. Inchangée, elle passe : un
+    // client qui renvoie le réveil complet pour basculer `enabled` ne doit
+    // pas buter sur une source ancienne qu'il ne touche pas.
+    let mut source_type = body.source_type.clone();
+    let mut source_id = body.source_id.clone();
+    if source_type.is_some() || source_id.is_some() {
+        let en_base = state
+            .backend
+            .query_one(
+                "SELECT source_type, CAST(source_id AS TEXT) FROM alarms WHERE id = ?",
+                &[&id as &dyn ToSqlValue],
+            )
+            .map_err(AppError::internal)?;
+        if let Some(r) = en_base {
+            let ancienne = (
+                r.first().and_then(|v| v.as_string()),
+                r.get(1).and_then(|v| v.as_string()),
+            );
+            let nouvelle = (
+                source_type.clone().or_else(|| ancienne.0.clone()),
+                source_id.clone().or_else(|| ancienne.1.clone()),
+            );
+            if nouvelle != ancienne {
+                match tune_core::alarms::valider_source(
+                    nouvelle.0.as_deref(),
+                    nouvelle.1.as_deref(),
+                ) {
+                    Ok((t, i)) => {
+                        source_type = source_type.map(|_| t);
+                        source_id = source_id.map(|_| i);
+                    }
+                    Err(message) => return Ok(alarm_source_refusee(message)),
+                }
+            }
+        }
+    }
+
     // Build SET clause dynamically from provided fields
     let mut sets: Vec<String> = Vec::new();
     let mut values: Vec<SqlValue> = Vec::new();
@@ -3506,11 +3564,11 @@ async fn update_alarm(
         sets.push("zone_id = ?".into());
         values.push(zone_id.to_sql_value());
     }
-    if let Some(ref source_type) = body.source_type {
+    if let Some(ref source_type) = source_type {
         sets.push("source_type = ?".into());
         values.push(source_type.to_sql_value());
     }
-    if let Some(ref source_id) = body.source_id {
+    if let Some(ref source_id) = source_id {
         sets.push("source_id = ?".into());
         values.push(source_id.to_sql_value());
     }

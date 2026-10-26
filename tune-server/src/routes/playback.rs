@@ -6597,9 +6597,63 @@ struct CreateAlarm {
     time: String,
     days: Option<String>,
     source_type: Option<String>,
-    source_id: Option<i64>,
+    /// Texte (URL d'une radio, identifiant opaque) ou nombre.
+    source_id: Option<Value>,
+    /// Ce qu'envoient `api.setAlarm` (web) et `setAlarm` (Flutter).
+    album_id: Option<i64>,
+    playlist_id: Option<i64>,
     volume: Option<f64>,
     fade_in_seconds: Option<i32>,
+}
+
+/// La source d'un réveil posé depuis l'écran de lecture (#7047).
+///
+/// alec_eiffel (1.0.0-rc7) écoutait FIP et a posé un réveil à 21:31 depuis
+/// l'écran de lecture. Le client envoie `{"time": "21:31"}`, sans source : la
+/// route écrivait la nature `playlist` par défaut et un identifiant vide. Le
+/// réveil a sonné avec `source="playlist:"`, puis `unknown service: playlist`.
+///
+/// Désormais, dans l'ordre :
+/// 1. une source nommée (`source_type` / `source_id`) est contrôlée ;
+/// 2. sinon `album_id` ou `playlist_id` ;
+/// 3. sinon la radio que la zone joue : c'est elle que l'utilisateur
+///    regardait en posant son réveil ;
+/// 4. sinon le réveil est refusé (400) : rien ne dit ce qu'il jouerait.
+///
+/// Rend `(nature, identifiant, nom affiché)`.
+async fn source_du_reveil_de_zone(
+    state: &AppState,
+    zone_id: i64,
+    body: &CreateAlarm,
+) -> Result<(String, String, Option<String>), String> {
+    if body.source_type.is_some() || body.source_id.is_some() {
+        let id = match &body.source_id {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        };
+        let (nature, id) =
+            tune_core::alarms::valider_source(body.source_type.as_deref(), id.as_deref())?;
+        return Ok((nature, id, None));
+    }
+    if let Some(id) = body.album_id {
+        return Ok(("album".into(), id.to_string(), None));
+    }
+    if let Some(id) = body.playlist_id {
+        return Ok(("playlist".into(), id.to_string(), None));
+    }
+    let en_cours = state.playback.get_state(zone_id).await.now_playing;
+    match en_cours.filter(|np| np.source == "radio") {
+        Some(np) => {
+            let (nature, id) =
+                tune_core::alarms::valider_source(Some("radio"), np.source_id.as_deref())?;
+            Ok((nature, id, Some(np.title).filter(|t| !t.trim().is_empty())))
+        }
+        None => Err(
+            "no source: name source_type and source_id, or set the alarm while the zone plays a radio"
+                .into(),
+        ),
+    }
 }
 
 async fn create_alarm(
@@ -6609,18 +6663,31 @@ async fn create_alarm(
     Json(body): Json<CreateAlarm>,
 ) -> impl IntoResponse {
     use tune_core::db::backend::ToSqlValue;
+    let (source_type, source_id, source_name) =
+        match source_du_reveil_de_zone(&state, zone_id, &body).await {
+            Ok(s) => s,
+            Err(message) => {
+                info!(zone_id, error = %message, "alarm_source_refused");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "invalid_source", "message": message })),
+                )
+                    .into_response();
+            }
+        };
     let days = body.days.unwrap_or_else(|| "1,2,3,4,5,6,7".into());
-    let source_type = body.source_type.unwrap_or_else(|| "playlist".into());
     let volume = body.volume.unwrap_or(0.3);
     let fade_in_seconds = body.fade_in_seconds.unwrap_or(30);
     let profile_id = profile.id();
     match state.backend.execute_returning_id(
-        "INSERT INTO alarms (zone_id, time, days, source_type, source_id, volume, fade_in_seconds, profile_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        &[&zone_id as &dyn ToSqlValue, &body.time as &dyn ToSqlValue, &days as &dyn ToSqlValue, &source_type as &dyn ToSqlValue, &body.source_id as &dyn ToSqlValue, &volume as &dyn ToSqlValue, &fade_in_seconds as &dyn ToSqlValue, &profile_id as &dyn ToSqlValue],
+        "INSERT INTO alarms (zone_id, time, days, source_type, source_id, source_name, volume, fade_in_seconds, profile_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        &[&zone_id as &dyn ToSqlValue, &body.time as &dyn ToSqlValue, &days as &dyn ToSqlValue, &source_type as &dyn ToSqlValue, &source_id as &dyn ToSqlValue, &source_name as &dyn ToSqlValue, &volume as &dyn ToSqlValue, &fade_in_seconds as &dyn ToSqlValue, &profile_id as &dyn ToSqlValue],
     ) {
-        Ok(id) => {
-            (StatusCode::CREATED, Json(json!({ "id": id }))).into_response()
-        }
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(json!({ "id": id, "source_type": source_type, "source_id": source_id })),
+        )
+            .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }
