@@ -49,7 +49,7 @@ use super::chaine_native::{FinDeChaine, ReserveHttp};
 use super::chaine_par_la_boucle::{
     ContratDuSignal, EtageNatifAsio, poursuivre_la_chaine_par_la_boucle,
 };
-use super::etage_natif::{EtageNatif, PuitsAnneauNatif, spec_du_puits_natif};
+use super::etage_natif::{EtageNatif, PuitsAnneauNatif, spec_du_puits_natif_vers};
 use super::*;
 use super::{
     BoucleProducteur, CompteursDePiste, Etage, EtageDeConversion, FinDeBoucle, LocalPcmKind,
@@ -139,6 +139,9 @@ pub(super) struct EntreesAsio {
 struct BackendAsio<'a> {
     sortie: AsioExclusiveOutput,
     spec: AudioSpec,
+    /// #6230 (étape 2) — les voies de la grille sur lesquelles le pilote a
+    /// été ouvert ; `None` : ouvert au format de la source, comme avant.
+    voies_pilotees: Option<u16>,
     device_name: String,
     stop_rx: &'a std::sync::mpsc::Receiver<()>,
     paused: &'a AtomicBool,
@@ -163,6 +166,15 @@ impl BackendAsio<'_> {
     fn transport_natif(&self) -> bool {
         self.sortie.uses_native_transport()
     }
+
+    /// #6230 — les voies des blocs que l'étage livre au puits : celles de la
+    /// grille quand elles ont été ouvertes, sinon les canaux de la source.
+    /// Une ouverture au format source à moins de voies (5.1 sur un DAC
+    /// stéréo, `channels.min(…)`) garde des blocs aux canaux de la source,
+    /// comme avant.
+    fn voies_de_l_etage(&self) -> u16 {
+        self.voies_pilotees.unwrap_or(self.spec.canaux())
+    }
 }
 
 impl<'a> BackendAsio<'a> {
@@ -172,15 +184,48 @@ impl<'a> BackendAsio<'a> {
         canaux_de_carte: Option<&crate::outputs::canaux_de_carte_6171::CanauxDeCarte>,
     ) -> Result<Self, RefusDOuverture> {
         let spec = demande.spec;
-        let sortie = AsioExclusiveOutput::new(
-            demande.device_name,
-            spec.cadence(),
-            u32::from(spec.profondeur().bits_declares()),
-            u32::from(spec.canaux()),
-            demande.starvation.clone(),
-            demande.volume.clone(),
-            demande.paused.clone(),
-            canaux_de_carte,
+        // #6230 (étape 2) — une grille qui pilote les voies (6 → 2) est
+        // demandée d'abord, plafonnée aux sorties que le pilote déclare
+        // (`new_sur_voies_pilotees`). Un refus rouvre une fois au format de
+        // la source : c'est l'ouverture d'avant, et le chemin du signal dit
+        // pourquoi la règle ne s'applique pas (#6595).
+        let (sortie, voies_pilotees) = super::reaffectation::ouvrir_sur_les_voies_pilotees(
+            demande.voies_de_la_matrice,
+            spec.canaux(),
+            |canaux, pilotees| {
+                if pilotees {
+                    AsioExclusiveOutput::new_sur_voies_pilotees(
+                        demande.device_name,
+                        spec.cadence(),
+                        u32::from(spec.profondeur().bits_declares()),
+                        u32::from(canaux),
+                        demande.starvation.clone(),
+                        demande.volume.clone(),
+                        demande.paused.clone(),
+                        canaux_de_carte,
+                    )
+                } else {
+                    AsioExclusiveOutput::new(
+                        demande.device_name,
+                        spec.cadence(),
+                        u32::from(spec.profondeur().bits_declares()),
+                        u32::from(canaux),
+                        demande.starvation.clone(),
+                        demande.volume.clone(),
+                        demande.paused.clone(),
+                        canaux_de_carte,
+                    )
+                }
+            },
+            |voies, erreur| {
+                info!(
+                    device = %demande.device_name,
+                    voies,
+                    canaux_source = spec.canaux(),
+                    erreur = %erreur,
+                    "asio_exclusive_voies_de_la_grille_refusees_reouverture_au_format_source"
+                );
+            },
         )
         .map_err(|erreur| RefusDOuverture::OuvertureExclusiveRefusee {
             backend: "ASIO",
@@ -189,6 +234,7 @@ impl<'a> BackendAsio<'a> {
         Ok(Self {
             sortie,
             spec,
+            voies_pilotees,
             device_name: demande.device_name.to_string(),
             stop_rx: demande.stop_rx,
             paused: demande.paused.as_ref(),
@@ -208,7 +254,8 @@ impl<'a> BackendLocal<'a> for BackendAsio<'a> {
     }
 
     /// Le format négocié par `find_exclusive_config` : la cadence source et
-    /// `channels.min(config.channels())`.
+    /// `channels.min(config.channels())` — `channels` étant les voies de la
+    /// grille quand elle les pilote (#6230).
     fn format_ouvert(&self) -> FormatOuvert {
         FormatOuvert::new(
             self.sortie.opened_sample_rate(),
@@ -222,7 +269,9 @@ impl<'a> BackendLocal<'a> for BackendAsio<'a> {
         if self.transport_natif() {
             Puits::Natif(Box::new(PuitsAnneauNatif::sur(
                 self.sortie.native_ring().clone(),
-                spec_du_puits_natif(self.spec),
+                // #6230 — le puits porte les voies de l'étage : M quand la
+                // grille pilote l'ouverture, les canaux de la source sinon.
+                spec_du_puits_natif_vers(self.spec, self.voies_de_l_etage()),
                 self.stop_rx,
                 self.paused,
                 self.force_silent,
@@ -278,7 +327,8 @@ impl<'a> BackendLocal<'a> for BackendAsio<'a> {
         let force_silent = self.force_silent;
         let position_ms = self.position_ms;
         let sample_rate = self.spec.cadence();
-        let channels = self.spec.canaux();
+        // #6230 — l'anneau tient des trames aux voies de l'étage.
+        let channels = self.voies_de_l_etage();
 
         let fed_position_ms = position_ms.load(Ordering::Relaxed);
         let mut drained_naturally = false;
@@ -653,10 +703,20 @@ pub(super) fn jouer_via_asio(entrees: EntreesAsio) {
         pure_bypass.clone(),
         true,
     );
+    // #6230 (étape 2) — les voies que la grille pilote pour cette piste, par
+    // la MÊME décision que la frontière gapless de l'étage natif
+    // (`voies_a_ouvrir_en_exclusif`) : jamais en PURE ni sur un porteur DoP,
+    // jamais sur une amorce 24 bits trop courte pour écarter le DoP.
+    let voies_de_la_matrice = Some(reaffectation.voies_a_ouvrir_en_exclusif(
+        spec,
+        header_buf.get(data_offset..).unwrap_or_default(),
+        pure_bypass.load(Ordering::Relaxed),
+        false,
+    ))
+    .filter(|&voies| voies != spec.canaux());
     let demande = DemandeDOuverture {
         spec,
-        // #6230 — un transport exclusif ouvre au format de la source.
-        voies_de_la_matrice: None,
+        voies_de_la_matrice,
         device_name: &device_name,
         endpoint_id: None,
         origin_host: None,
@@ -707,6 +767,15 @@ pub(super) fn jouer_via_asio(entrees: EntreesAsio) {
         return;
     }
 
+    // #6230 : ce que l'ouverture a fait des voies demandées, noté pour les
+    // décisions de réouverture et dit au journal.
+    reaffectation.constater_l_ouverture(
+        voies_de_la_matrice,
+        backend.format_ouvert().canaux,
+        &device_name,
+    );
+    let voies_de_l_etage = backend.voies_de_l_etage();
+
     let transport_natif = backend.transport_natif();
     let contrat = || ContratDuSignal {
         signal_path_status: &signal_path_status,
@@ -726,18 +795,17 @@ pub(super) fn jouer_via_asio(entrees: EntreesAsio) {
     let mut route = match backend.puits() {
         Puits::Natif(puits) => Route::Native {
             etage: EtageNatifAsio {
-                // #6230 (relecture rc7) — l'étage natif porte désormais les
-                // voies de `sortie`. Le puits, lui, reste étiqueté aux canaux
-                // de la source (`spec_du_puits_natif(self.spec)`) : tant que
-                // l'ouverture ASIO n'est pas pilotée (étape 2), l'étage est
-                // monté aux canaux de la SOURCE, comme la route flottante
+                // #6230 — l'étage natif porte les voies de `sortie`, et le
+                // puits est étiqueté aux mêmes (`voies_de_l_etage`) : celles
+                // de la grille quand l'ouverture est pilotée (étape 2), sinon
+                // les canaux de la SOURCE, comme la route flottante
                 // ci-dessous. Une ouverture de repli à moins de voies (5.1 sur
                 // un DAC stéréo) ne fait donc pas livrer 2 voies à un puits de
                 // 6 (`windows_native_sink_spec_mismatch`, lecture arrêtée) :
-                // les mots restent ceux d'avant cette PR.
+                // hors pilotage, les mots restent ceux d'avant.
                 etage: EtageNatif::monter(
                     spec,
-                    FormatOuvert::new(backend.format_ouvert().cadence, spec.canaux()),
+                    FormatOuvert::new(backend.format_ouvert().cadence, voies_de_l_etage),
                     &volume,
                     &eq,
                     &convolver,
@@ -758,6 +826,8 @@ pub(super) fn jouer_via_asio(entrees: EntreesAsio) {
             // d'avant poussait les mots source tels quels dans l'anneau
             // flottant, `sortie` est donc le format SOURCE, pas le format
             // négocié (`channels.min(…)` ne changeait pas l'entrelacement).
+            // #6230 — sauf quand la grille pilote l'ouverture : `sortie` porte
+            // alors ses voies, et l'étage y applique la matrice.
             etage: EtageDeConversion {
                 pcm: LocalPcmProcessor {
                     eq: &eq,
@@ -777,7 +847,7 @@ pub(super) fn jouer_via_asio(entrees: EntreesAsio) {
                 resample_leftover: Vec::new(),
                 pcm_kind: LocalPcmKind::for_bit_depth(bit_depth),
                 spec,
-                sortie: FormatOuvert::new(sample_rate, channels),
+                sortie: FormatOuvert::new(sample_rate, voies_de_l_etage),
                 needs_resample: false,
             },
             puits,
@@ -1107,8 +1177,10 @@ pub(super) fn jouer_via_asio(entrees: EntreesAsio) {
     // `drainer` bounds it two ways: a hard wall-clock deadline of ~2× the
     // ring's time-capacity (computed here, as before), and a stall detector
     // that bails if `available()` has not decreased for ~1.5s.
-    let ring_capacity_ms = if sample_rate > 0 && channels > 0 {
-        (backend.observer().capacite as u64 * 1000) / (sample_rate as u64 * channels as u64)
+    // #6230 — l'anneau a été dimensionné aux voies ouvertes pour l'étage.
+    let ring_capacity_ms = if sample_rate > 0 && voies_de_l_etage > 0 {
+        (backend.observer().capacite as u64 * 1000)
+            / (sample_rate as u64 * u64::from(voies_de_l_etage))
     } else {
         0
     };

@@ -487,7 +487,7 @@ pub(crate) type CreneauDisposition =
 pub(crate) static SANS_DISPOSITION: CreneauDisposition = std::sync::Mutex::new(None);
 use periode::{avec_periode, config_de_flux, garde_de_prechargement};
 pub(crate) use reaffectation::CreneauReaffectation;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(crate) use reaffectation::voies_pilotees_permises;
 
 // ---------------------------------------------------------------------------
