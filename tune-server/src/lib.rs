@@ -32,6 +32,7 @@ pub mod chemin_inaccessible;
 /// #5513 — les chemins de données retenus au démarrage.
 pub mod chemins_de_donnees;
 pub mod config;
+pub mod conteneur;
 pub mod discovery_setup;
 /// Dossiers de données inscriptibles, contrôlés avant la base (`EX_CONFIG`).
 pub mod dossiers_inscriptibles;
