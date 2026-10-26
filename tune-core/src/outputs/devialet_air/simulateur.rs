@@ -178,7 +178,8 @@ impl Simulateur {
                         let mut e = verrou(&etat);
                         avancer(&mut e);
                         let df = retour_a_envoyer(&e);
-                        let da = (n % 2 == 0)
+                        let da = n
+                            .is_multiple_of(2)
                             .then(|| e.annonce.as_ref().map(protocole::annonce))
                             .flatten();
                         (df, da)

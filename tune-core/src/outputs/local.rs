@@ -3377,6 +3377,7 @@ impl FormatDeSortie {
 ///
 /// La cadence source n'est ajoutée que si elle diffère : inutile de tenter
 /// deux fois exactement la même ouverture.
+#[cfg(test)]
 pub(crate) fn cascade_de_formats(
     principal: &cpal::StreamConfig,
     source: &cpal::StreamConfig,
@@ -3714,29 +3715,28 @@ fn apply_local_dsp(
     if dop || pure_bypass.load(Ordering::Relaxed) {
         return;
     }
-    if let Ok(mut e) = eq.lock() {
-        if let Some(ref mut p) = *e {
-            p.process_interleaved(samples);
-            // #5215 — l'égaliseur coupé a fini son fondu et ne garde aucun
-            // préampli : on le retire, la chaîne redevient celle d'un EQ absent.
-            if p.est_neutre_au_repos() {
-                *e = None;
-            }
+    if let Ok(mut e) = eq.lock()
+        && let Some(ref mut p) = *e
+    {
+        p.process_interleaved(samples);
+        // #5215 — l'égaliseur coupé a fini son fondu et ne garde aucun
+        // préampli : on le retire, la chaîne redevient celle d'un EQ absent.
+        if p.est_neutre_au_repos() {
+            *e = None;
         }
     }
-    if let Ok(mut conv) = convolver.lock() {
-        if let Some(ref mut c) = *conv {
-            c.process_interleaved(samples);
-        }
+    if let Ok(mut conv) = convolver.lock()
+        && let Some(ref mut c) = *conv
+    {
+        c.process_interleaved(samples);
     }
     // Crossfeed is a headphone (local DAC) effect and only makes sense on a
     // stereo stream — the difference-based algorithm needs L/R pairs.
-    if channels == 2 {
-        if let Ok(mut cf) = crossfeed.lock() {
-            if let Some(ref mut c) = *cf {
-                c.process_interleaved(samples);
-            }
-        }
+    if channels == 2
+        && let Ok(mut cf) = crossfeed.lock()
+        && let Some(ref mut c) = *cf
+    {
+        c.process_interleaved(samples);
     }
     // Repli mono EN DERNIER (#2362) : les trois traitements ci-dessus ont tous
     // besoin de leur contexte stéréo — le crossfeed travaille sur la
@@ -3760,19 +3760,25 @@ fn pcm_bytes_to_f32(bytes: &[u8], bit_depth: u16) -> Vec<f32> {
         0 => {
             // IEEE Float 32-bit — reinterpret bytes as f32 directly
             bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect()
         }
         16 => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| {
                 let sample = i16::from_le_bytes([c[0], c[1]]);
                 sample as f32 / 32768.0
             })
             .collect(),
         24 => bytes
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| {
                 let sample =
                     ((c[0] as i32) | ((c[1] as i32) << 8) | ((c[2] as i32) << 16)) << 8 >> 8; // sign-extend
@@ -3780,7 +3786,9 @@ fn pcm_bytes_to_f32(bytes: &[u8], bit_depth: u16) -> Vec<f32> {
             })
             .collect(),
         32 => bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| {
                 let sample = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                 sample as f32 / 2147483648.0
@@ -3789,7 +3797,9 @@ fn pcm_bytes_to_f32(bytes: &[u8], bit_depth: u16) -> Vec<f32> {
         _ => {
             // Fall back to 16-bit
             bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| {
                     let sample = i16::from_le_bytes([c[0], c[1]]);
                     sample as f32 / 32768.0
@@ -3806,18 +3816,24 @@ fn pcm_bytes_to_f32(bytes: &[u8], bit_depth: u16) -> Vec<f32> {
 pub(crate) fn pcm_bytes_to_native_i32(bytes: &[u8], bit_depth: u16) -> Vec<i32> {
     match bit_depth {
         16 => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i32::from(i16::from_le_bytes([c[0], c[1]])) << 16)
             .collect(),
         24 => bytes
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| {
                 let word = ((c[0] as i32) | ((c[1] as i32) << 8) | ((c[2] as i32) << 16)) << 8 >> 8;
                 word << 8
             })
             .collect(),
         32 => bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect(),
         _ => Vec::new(),
@@ -7114,11 +7130,6 @@ impl OutputTarget for LocalOutput {
                 );
             }
 
-            // Tracks whether the HTTP read loop exited because the source
-            // reached EOF (true) vs. a stop signal or read error (false).
-            // Only when http_eof=true do we signal track_ended_naturally.
-            let mut http_eof = false;
-
             // ── La boucle producteur, une seule pour les deux pistes ───────
             //
             // Elle ne sait rien de cpal : elle lit un `Read`, décode par
@@ -7182,8 +7193,10 @@ impl OutputTarget for LocalOutput {
             );
             total_bytes_read = compteurs.total_bytes_read;
             total_frames_fed = compteurs.total_frames_fed;
-            match fin {
-                FinDeBoucle::FinDeFlux => http_eof = true,
+            // Only a clean EOF reaches the continuation below; every other
+            // producer outcome returns before signalling a natural end.
+            let mut http_eof = match fin {
+                FinDeBoucle::FinDeFlux => true,
                 FinDeBoucle::Interrompue => {
                     // Un Stop / puits mort n'est pas une piste courte a
                     // demarrer une derniere fois, ni un flux vide (#4220).
@@ -7204,7 +7217,7 @@ impl OutputTarget for LocalOutput {
                     return;
                 }
                 FinDeBoucle::Abandon => return,
-            }
+            };
 
             if http_eof {
                 report_incomplete_local_pcm_probe(etage.pcm_kind, etage.en_attente.len());
@@ -7607,17 +7620,17 @@ impl OutputTarget for LocalOutput {
             // Hand the poller something to say when the device disappeared
             // mid-playback (#1626) — same channel as the open-failure path, so
             // the zone shows a clear message instead of silently stopping.
-            if device_gone.load(Ordering::Relaxed) {
-                if let Ok(mut slot) = open_failure.lock() {
-                    // Ne pas écraser un constat déjà posé : le blocage de
-                    // l'anneau (#3108) dit la même panne AVEC la position où
-                    // l'écran s'est figé, et il est arrivé le premier.
-                    if slot.is_none() {
-                        *slot = Some(format!(
-                            "Sortie « {device_name} » : {}.",
-                            OpenFailure::DeviceGone.user_message()
-                        ));
-                    }
+            if device_gone.load(Ordering::Relaxed)
+                && let Ok(mut slot) = open_failure.lock()
+            {
+                // Ne pas écraser un constat déjà posé : le blocage de
+                // l'anneau (#3108) dit la même panne AVEC la position où
+                // l'écran s'est figé, et il est arrivé le premier.
+                if slot.is_none() {
+                    *slot = Some(format!(
+                        "Sortie « {device_name} » : {}.",
+                        OpenFailure::DeviceGone.user_message()
+                    ));
                 }
             }
 
@@ -8199,7 +8212,7 @@ fn feed_ring_abortable_with_stall_timeout(
         if stop_rx.try_recv().is_ok() {
             return true;
         }
-        if abort.map_or(false, |a| a.load(Ordering::Relaxed)) {
+        if abort.is_some_and(|a| a.load(Ordering::Relaxed)) {
             return true;
         }
         // If paused, wait without feeding
@@ -8207,7 +8220,7 @@ fn feed_ring_abortable_with_stall_timeout(
             if stop_rx.try_recv().is_ok() {
                 return true;
             }
-            if abort.map_or(false, |a| a.load(Ordering::Relaxed)) {
+            if abort.is_some_and(|a| a.load(Ordering::Relaxed)) {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));

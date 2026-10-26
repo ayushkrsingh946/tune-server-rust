@@ -504,6 +504,7 @@ pub(super) fn find_device_with_fallback(
 ///    doesn't (PipeWire handles it at the session-manager level).
 /// 2. If that also fails, assume conservative defaults: stereo, 44100+48000 Hz.
 ///    PipeWire will accept these and resample internally.
+///
 /// Probe a device's capabilities when `supported_output_configs()` is
 /// unavailable. Returns `(max_channels, sample_rates, caps_reliable)`.
 ///

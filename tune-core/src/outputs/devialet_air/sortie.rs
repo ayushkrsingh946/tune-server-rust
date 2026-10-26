@@ -616,7 +616,9 @@ async fn ouvrir_la_source(
             reste.extend_from_slice(&bloc);
             let complets = reste.len() / 6 * 6;
             let lot: Vec<[i32; 2]> = reste[..complets]
-                .chunks_exact(6)
+                .as_chunks::<6>()
+                .0
+                .iter()
                 .map(|t| [lire_24_le(&t[0..3]), lire_24_le(&t[3..6])])
                 .collect();
             reste.drain(..complets);
