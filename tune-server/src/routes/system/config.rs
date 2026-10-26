@@ -1274,6 +1274,47 @@ fn normaliser_vitesse_des_analyses(
     Ok(())
 }
 
+/// Longueur maximale du nom du serveur, en caractères (#7044).
+pub(crate) const NOM_DU_SERVEUR_LONGUEUR_MAX: usize = 64;
+
+/// #7044 — le nom que l'utilisateur donne à son serveur (« Alec-server »).
+///
+/// Il est relu tel quel par d'autres programmes : l'interface, les autres
+/// serveurs Tune du réseau et la page publique des radios de mozaiklabs.fr
+/// (« Connecté à … »), qui le lit dans `GET /system/health` → `server_name`.
+/// Un nom qui sort de là doit donc être un texte court et affichable : espaces
+/// de tête et de queue retirés, 64 caractères au plus, aucun caractère de
+/// contrôle (retour à la ligne, tabulation, NUL). Vide ou `null` : on efface le
+/// réglage et le nom d'hôte reprend sa place. Un nom refusé est REFUSÉ (400),
+/// jamais tronqué en silence.
+fn normaliser_nom_du_serveur(values: &mut serde_json::Map<String, Value>) -> Result<(), AppError> {
+    let Some(brut) = values.get("server_name") else {
+        return Ok(());
+    };
+    let nom = match brut {
+        Value::Null => "",
+        Value::String(s) => s.trim(),
+        autre => {
+            return Err(AppError::bad_request(format!(
+                "server_name : un texte est attendu, pas {autre}"
+            )));
+        }
+    };
+    if nom.chars().count() > NOM_DU_SERVEUR_LONGUEUR_MAX {
+        return Err(AppError::bad_request(format!(
+            "server_name : {NOM_DU_SERVEUR_LONGUEUR_MAX} caractères au plus"
+        )));
+    }
+    if nom.chars().any(char::is_control) {
+        return Err(AppError::bad_request(
+            "server_name : aucun caractère de contrôle (retour à la ligne, tabulation…)",
+        ));
+    }
+    let nom = nom.to_string();
+    values.insert("server_name".to_string(), Value::String(nom));
+    Ok(())
+}
+
 /// #6713 — « lever le bridage sans température lisible » : un booléen (ou
 /// `"true"`/`"false"`), sinon 400. Une autre valeur, gardée telle quelle,
 /// se relirait « non » sans un mot.
@@ -1643,6 +1684,7 @@ pub(super) async fn update_config(
     normaliser_plafond_aleatoire(&mut values)?;
     normaliser_pays_tendances_youtube(&mut values)?;
     normaliser_vitesse_des_analyses(&mut values)?;
+    normaliser_nom_du_serveur(&mut values)?;
     normaliser_levee_du_bridage(&mut values)?;
     normaliser_mesures_communautaires(&mut values)?;
     let politique_de_lecture = normaliser_politique_de_lecture(&mut values)?;
