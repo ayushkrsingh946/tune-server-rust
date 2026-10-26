@@ -799,7 +799,8 @@ pub mod sql {
     pub fn labels_de_la_bibliotheque<D: SqlDialect>(d: &D) -> String {
         format!(
             "SELECT TRIM(a.label) AS nom, COUNT(*) AS n, \
-             MAX(CASE WHEN a.source = 'qobuz' THEN a.source_id END) AS qobuz \
+             MAX(CASE WHEN a.source = 'qobuz' THEN a.source_id END) AS qobuz, \
+             MAX(CASE WHEN a.musicbrainz_release_id <> '' THEN a.musicbrainz_release_id END) AS release_mb \
              FROM albums a \
              WHERE a.label IS NOT NULL AND TRIM(a.label) <> '' AND {} AND {} \
              GROUP BY TRIM(a.label) ORDER BY TRIM(a.label)",
@@ -843,6 +844,9 @@ pub struct LabelDeBibliotheque {
     pub album_count: i64,
     /// L'identifiant Qobuz d'un album Qobuz de la bibliothèque qui le porte.
     pub album_qobuz: Option<String>,
+    /// Le MBID de release d'un album de la bibliothèque qui le porte (#7089) :
+    /// sa `label-info` rapproche le label sans ambiguïté.
+    pub release_mb: Option<String>,
 }
 
 /// Une tranche de Dynamic Range, bornes **incluses** (#2144).
@@ -4733,6 +4737,10 @@ impl AlbumRepo {
                     album_count: r.get(1).and_then(|v| v.as_i64()).unwrap_or(0),
                     album_qobuz: r
                         .get(2)
+                        .and_then(|v| v.as_string())
+                        .filter(|s| !s.trim().is_empty()),
+                    release_mb: r
+                        .get(3)
                         .and_then(|v| v.as_string())
                         .filter(|s| !s.trim().is_empty()),
                 })
