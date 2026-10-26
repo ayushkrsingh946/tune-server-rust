@@ -176,16 +176,22 @@ impl<'a> EtageNatif<'a> {
     }
 
     /// La décision DoP est-elle verrouillée ?
+    // #6734 — le bras natif S32 de Linux ne s'en sert pas.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(super) fn dop_verrouille(&self) -> bool {
         self.dop_latched
     }
 
     /// La première fenêtre 24 bits attend-elle encore d'être classée ?
+    // #6734 — le bras natif S32 de Linux ne s'en sert pas.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(super) fn quarantaine_24_bits_ouverte(&self) -> bool {
         self.must_classify_24_bit
     }
 
     /// Octets reçus et pas encore poussés.
+    // #6734 — le bras natif S32 de Linux ne s'en sert pas.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(super) fn en_attente(&self) -> &[u8] {
         &self.en_attente
     }

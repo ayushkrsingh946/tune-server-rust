@@ -105,12 +105,43 @@ impl ErreurAppel {
             Self::NonConfigure | Self::CleIllisible | Self::TarifInconnu => StatusCode::BAD_REQUEST,
             Self::PlafondAtteint => StatusCode::CONFLICT,
             Self::Fournisseur(ErreurFournisseur::CleRefusee) => StatusCode::BAD_REQUEST,
+            Self::Fournisseur(ErreurFournisseur::CleSansEspaceDeTravail) => StatusCode::BAD_REQUEST,
             Self::Fournisseur(_) => StatusCode::BAD_GATEWAY,
         }
     }
 
     pub fn corps(&self) -> Value {
-        json!({ "ok": false, "error": self.code(), "message": self.message() })
+        let mut corps = json!({ "ok": false, "error": self.code(), "message": self.message() });
+        // #6730 — le motif du fournisseur, à part : l'écran le montre sous son
+        // message traduit. Absent quand le fournisseur n'en a pas donné.
+        if let Self::Fournisseur(e) = self
+            && let Some(m) = e.motif()
+        {
+            corps["motif"] = json!(m);
+        }
+        corps
+    }
+}
+
+/// Quel modèle pour un appel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choix {
+    /// Le modèle habituel (Haiku 5.5 par défaut chez Anthropic).
+    Defaut,
+    /// Le modèle « classique » s'il est choisi, sinon l'habituel.
+    Classique,
+    /// Le second avis demandé par l'utilisateur : Sonnet 5.5 chez Anthropic
+    /// ([`Reglages::modele_fort`]).
+    Fort,
+}
+
+impl Choix {
+    pub fn depuis_classique(classique: bool) -> Self {
+        if classique {
+            Self::Classique
+        } else {
+            Self::Defaut
+        }
     }
 }
 
@@ -160,9 +191,34 @@ pub async fn appeler_avec(
     entree_cache: Option<&str>,
     json: bool,
 ) -> Result<Resultat, ErreurAppel> {
+    appeler_choix(
+        m,
+        usage,
+        Choix::depuis_classique(classique),
+        systeme,
+        message,
+        max_jetons,
+        entree_cache,
+        json,
+    )
+    .await
+}
+
+/// [`appeler_avec`], avec le modèle désigné par un [`Choix`].
+#[allow(clippy::too_many_arguments)]
+pub async fn appeler_choix(
+    m: &Moyens<'_>,
+    usage: &str,
+    choix: Choix,
+    systeme: &str,
+    message: &str,
+    max_jetons: u32,
+    entree_cache: Option<&str>,
+    json: bool,
+) -> Result<Resultat, ErreurAppel> {
     let r = Reglages::charger(m.backend);
     let famille = r.famille.ok_or(ErreurAppel::NonConfigure)?;
-    let modele = r.modele_effectif(classique);
+    let modele = r.modele_choisi(choix);
     if modele.is_empty() {
         return Err(ErreurAppel::NonConfigure);
     }
@@ -204,6 +260,8 @@ pub async fn appeler_avec(
         message: message.to_string(),
         max_jetons,
         json,
+        // Décision du 23/10/2026 : `effort: low` pour les usages courts.
+        effort: couts::usage_court(usage).then_some(couts::EFFORT_COURT),
     };
     let rep = fournisseur
         .completer(&demande)
@@ -353,8 +411,27 @@ mod tests {
             ErreurAppel::PlafondAtteint,
             ErreurAppel::Fournisseur(ErreurFournisseur::CleRefusee),
             ErreurAppel::Fournisseur(ErreurFournisseur::Quota),
+            ErreurAppel::Fournisseur(ErreurFournisseur::CleSansEspaceDeTravail),
         ] {
             assert_ne!(e.statut(), StatusCode::UNAUTHORIZED, "{e:?}");
         }
+    }
+
+    /// #6730 — l'écran reçoit le motif du fournisseur à part, et le message.
+    #[test]
+    fn le_corps_d_erreur_porte_le_motif_du_fournisseur_6730() {
+        let e = ErreurAppel::Fournisseur(crate::fournisseur::erreur_de_statut(
+            crate::fournisseur::Famille::CompatibleOpenai,
+            400,
+            r#"{"error":{"message":"Invalid model parameter"}}"#,
+        ));
+        let c = e.corps();
+        assert_eq!(c["error"], "erreur_fournisseur");
+        assert_eq!(
+            c["motif"], "Invalid model parameter",
+            "#6730 : le corps rendu à l'écran perd le motif du fournisseur : {c}"
+        );
+        let sans = ErreurAppel::Fournisseur(ErreurFournisseur::Quota).corps();
+        assert!(sans.get("motif").is_none(), "{sans}");
     }
 }

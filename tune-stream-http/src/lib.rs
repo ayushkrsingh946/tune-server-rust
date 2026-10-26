@@ -743,6 +743,45 @@ pub async fn handle_stream(
         }
     }
 
+    // ── #6990 — la reprise `bytes=N-` d'un flux chunké, à l'octet ──
+    //
+    // TIDAL AAC 320 → WAV vers un Wattson Emerson Digital : crépitements,
+    // quand TIDAL FLAC → WAV (un FICHIER, `Range` honoré) joue juste. Le
+    // canal AAC (`produire_le_canal_aac`) n'a pas de durée, donc pas de
+    // `wav_length`, et la reprise depuis la retenue ci-dessus ne le voyait
+    // pas : un renderer qui ferme après N octets puis revient avec
+    // `bytes=N-` recevait la suite du TUYAU — tout ce que la connexion
+    // précédente avait tiré sans que le renderer le lise était sauté, soit un
+    // saut dans le signal à chaque reprise. La retenue est tenue sur ce flux
+    // comme sur l'autre : une reprise qui y tombe est servie à l'octet. Rien
+    // d'autre ne change : pas de longueur annoncée, toujours un 200 chunké.
+    if wav_length.is_none()
+        && retenue_possible
+        && reprise_exacte.is_none()
+        && let Some(n) = reprise_candidate.filter(|n| *n >= seuil_de_reprise)
+    {
+        let (retenue_debut, retenue_fin) = session.etendue_retenue();
+        if n >= retenue_debut && n < retenue_fin {
+            reprise_exacte = Some(n);
+            info!(
+                stream_id,
+                reprise = n,
+                retenue_debut,
+                retenue_fin,
+                "reprise_rejouee_depuis_la_retenue — flux chunké : la reprise tombe dans ce que \
+                 le tuyau a déjà rendu ; servie à l'octet (#6990)"
+            );
+        } else if n < retenue_fin {
+            warn!(
+                stream_id,
+                reprise = n,
+                retenue_debut,
+                retenue_fin,
+                "reprise_hors_retenue — flux chunké : la reprise précède la retenue, la suite \
+                 du tuyau part sous l'offset demandé (#6990)"
+            );
+        }
+    }
     let finite_range_start = range_demande.filter(|s| longueur.is_none_or(|len| *s < len));
     let use_partial = finite_range_start.is_some() && longueur.is_some();
     // ── La borne de fin d'un `Range: bytes=N-M` ──
@@ -5118,6 +5157,82 @@ mod tests {
     /// tire, et c'est le serveur HTTP qui le tire en vrai. Sans ce drainage,
     /// la première connexion resterait garée dans `recv_chunk()` en tenant le
     /// verrou du canal, et l'essai attendrait pour de mauvaises raisons.
+    /// #6130 — le vrai corps radio, servi à l'agent du DMP-A8 : quand le
+    /// serveur congédie le consommateur (`congedier_les_consommateurs`, appelé
+    /// à la sortie de radio DLNA), le corps se TERMINE et `active_consumers`
+    /// retombe à 0, sans que le renderer ait rien fermé. Le direct continue
+    /// d'être semé : seule la décision du serveur peut finir ce corps.
+    #[tokio::test]
+    async fn le_serveur_ferme_le_direct_d_un_renderer_qui_ne_lache_pas_6130() {
+        use axum::extract::{Path, State};
+        use futures_util::StreamExt;
+        use std::sync::atomic::Ordering::SeqCst;
+        use tune_core::http::streamer::SharedSessions;
+
+        let sid = "i6130-conge";
+        let info = StreamInfo {
+            format: "wav".into(),
+            mime_type: "audio/wav".into(),
+            sample_rate: 48000,
+            bit_depth: 16,
+            channels: 2,
+            ..StreamInfo::default()
+        };
+        let mut session = StreamSession::new(sid.to_string(), info, false, 64);
+        session.is_radio = true;
+        let session = std::sync::Arc::new(session);
+        session.publish_detected_output_format(48000, 2);
+        let tx = session.tx.lock().await.clone().expect("tx");
+        let sessions: SharedSessions = std::sync::Arc::new(tokio::sync::Mutex::new(
+            [(sid.to_string(), session.clone())].into_iter().collect(),
+        ));
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("User-Agent", "Lavf/58.45.100".parse().unwrap());
+        let reponse =
+            super::handle_stream(Path(format!("{sid}.wav")), State(sessions.clone()), h).await;
+        assert_eq!(reponse.status(), axum::http::StatusCode::OK);
+        let mut corps = reponse.into_body().into_data_stream();
+        // Le direct coule : en-tête puis PCM.
+        tx.send(vec![0x33; 4096]).await.expect("pcm");
+        let mut recu = 0usize;
+        while recu < 44 + 4096 {
+            recu += tokio::time::timeout(std::time::Duration::from_secs(10), corps.next())
+                .await
+                .expect("le direct doit couler")
+                .expect("flux ouvert")
+                .expect("bloc lisible")
+                .len();
+        }
+        assert_eq!(session.active_consumers.load(SeqCst), 1);
+
+        session.congedier_les_consommateurs();
+        // Le direct continue d'arriver : rien d'autre que le congé ne finit le corps.
+        let semeur = tokio::spawn(async move {
+            for _ in 0..200 {
+                if tx.send(vec![0x44; 4096]).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        let fin = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            while let Some(Ok(_)) = corps.next().await {}
+        })
+        .await;
+        assert!(
+            fin.is_ok(),
+            "le corps radio reste ouvert après le congé du serveur : un renderer qui \
+             ne lâche pas la radio la garde jusqu'au Play suivant (#6130)"
+        );
+        drop(corps);
+        assert_eq!(
+            session.active_consumers.load(SeqCst),
+            0,
+            "le consommateur doit être compté parti"
+        );
+        semeur.abort();
+    }
+
     #[tokio::test]
     async fn une_reconnexion_par_range_ne_coupe_pas_le_son() {
         use axum::extract::{Path, State};
@@ -7008,3 +7123,6 @@ mod safari_radio_5975_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod reprise_chunkee_aac_6990;

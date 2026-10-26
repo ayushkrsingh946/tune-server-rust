@@ -115,9 +115,40 @@ fn sans_racine_aucun_jeu_de_cles_n_est_accepte() {
         JeuDeCles::depuis_publication(&publication(), "").unwrap_err(),
         Refus::RacineAbsente
     );
+    // La racine embarquée n'a pas signé le jeu de test : il est refusé.
     assert_eq!(
         JeuDeCles::depuis_publication(&publication(), RACINE_EMBARQUEE).unwrap_err(),
-        Refus::RacineAbsente
+        Refus::JeuDeClesSignature
+    );
+}
+
+/// Le jeu de clés réellement publié le 22/10/2026, signé par la racine de
+/// production, passe avec `RACINE_EMBARQUEE` et avec la copie de `racine.pub`.
+#[test]
+fn le_jeu_publie_le_22_10_passe_avec_la_racine_embarquee() {
+    let jeu = include_str!("../vecteurs/jeu-publie-20261022/jeu.json");
+    let minisig = include_str!("../vecteurs/jeu-publie-20261022/jeu.json.minisig");
+    let pub_fichier = include_str!("../vecteurs/jeu-publie-20261022/racine.pub");
+    assert_eq!(
+        pub_fichier.lines().nth(1).map(str::trim),
+        Some(RACINE_EMBARQUEE),
+        "RACINE_EMBARQUEE doit être la 2e ligne de racine.pub"
+    );
+    let p = Publication {
+        jeu: jeu.to_string(),
+        minisig: minisig.to_string(),
+    };
+    let jeu = JeuDeCles::depuis_publication(&p, RACINE_EMBARQUEE)
+        .expect("le jeu publié doit passer avec la racine embarquée");
+    assert_eq!(jeu.version(), 1);
+    // Un octet changé dans le document publié : refusé.
+    let retouche = Publication {
+        jeu: p.jeu.replacen("\"version\":1", "\"version\":2", 1),
+        minisig: p.minisig.clone(),
+    };
+    assert_eq!(
+        JeuDeCles::depuis_publication(&retouche, RACINE_EMBARQUEE).unwrap_err(),
+        Refus::JeuDeClesSignature
     );
 }
 
@@ -239,4 +270,77 @@ fn les_codes_de_refus_sont_stables_et_distincts() {
     codes.sort();
     codes.dedup();
     assert_eq!(codes.len(), tous.len());
+}
+
+/// #6785 : le défi d'une session directe a son propre domaine. Une signature
+/// faite pour le relais ne vaut pas en direct, et l'inverse.
+#[test]
+fn le_defi_direct_a_son_propre_domaine() {
+    let a = appareil();
+    let jeton = site().signer(&normal());
+    let lp = jeu().verifier(&jeton, &ctx(T)).expect("valide");
+    let direct = a.signer(&message_defi_direct(SID, "d1"));
+    assert_eq!(lp.verifier_defi_direct(SID, "d1", &direct), Ok(()));
+    assert_eq!(
+        lp.verifier_defi_direct(SID, "d2", &direct),
+        Err(Refus::Defi)
+    );
+    assert_eq!(
+        lp.verifier_defi_direct("autre", "d1", &direct),
+        Err(Refus::Defi)
+    );
+    // La signature du relais (domaine session) ne passe pas en direct...
+    let relais = a.signer_defi(SID, "d1");
+    assert_eq!(
+        lp.verifier_defi_direct(SID, "d1", &relais),
+        Err(Refus::Defi)
+    );
+    // ... ni celle du direct au relais.
+    assert_eq!(lp.verifier_defi(SID, "d1", &direct), Err(Refus::Defi));
+}
+
+/// #6785 : une requête signée du serveur au site lie méthode, chemin,
+/// serveur, horodatage, nonce et corps.
+#[test]
+fn une_requete_signee_du_serveur_lie_chaque_champ() {
+    let cle = CleServeur::depuis_graine(&GRAINE_SERVEUR).unwrap();
+    let pk = cle.cle_publique();
+    let corps = br#"{"sessions":[]}"#;
+    let chemin = "/api/v1/remote/servers/s1/heartbeat";
+    let sig = cle.signer(&message_requete_serveur(
+        "POST", chemin, "s1", 100, "n1", corps,
+    ));
+    assert_eq!(
+        verifier_requete_serveur(&pk, "POST", chemin, "s1", 100, "n1", corps, &sig),
+        Ok(())
+    );
+    for (m, c, s, h, n, b) in [
+        ("GET", chemin, "s1", 100, "n1", &corps[..]),
+        (
+            "POST",
+            "/api/v1/remote/servers/s1/sessions",
+            "s1",
+            100,
+            "n1",
+            &corps[..],
+        ),
+        ("POST", chemin, "s2", 100, "n1", &corps[..]),
+        ("POST", chemin, "s1", 101, "n1", &corps[..]),
+        ("POST", chemin, "s1", 100, "n2", &corps[..]),
+        ("POST", chemin, "s1", 100, "n1", &br#"{"sessions":[1]}"#[..]),
+    ] {
+        assert_eq!(
+            verifier_requete_serveur(&pk, m, c, s, h, n, b, &sig),
+            Err(Refus::Defi),
+            "{m} {c} {s} {h} {n}"
+        );
+    }
+}
+
+/// La copie embarquée du jeu de clés est celle que la racine embarquée signe.
+#[test]
+fn la_publication_embarquee_passe_avec_la_racine_embarquee() {
+    let jeu = JeuDeCles::depuis_publication(&publication_embarquee(), RACINE_EMBARQUEE)
+        .expect("jeu embarqué");
+    assert!(jeu.connait("mozaiklabs-2026-10"));
 }

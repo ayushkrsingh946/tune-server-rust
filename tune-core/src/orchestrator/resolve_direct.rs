@@ -62,14 +62,19 @@ impl PlaybackOrchestrator {
         };
         let caps = {
             let locked = output.lock().await;
-            let Some(dlna) = locked
-                .as_any()
-                .downcast_ref::<crate::outputs::dlna::DlnaOutput>()
-            else {
+            let sortie = locked.as_any();
+            if let Some(dlna) = sortie.downcast_ref::<crate::outputs::dlna::DlnaOutput>() {
+                dlna.probe_capabilities().await
+            } else if let Some(oh) =
+                sortie.downcast_ref::<crate::outputs::openhome::OpenHomeOutput>()
+            {
+                // #6718 — un renderer OpenHome annonce ce qu'il lit
+                // (`Playlist:1 ProtocolInfo`) : on le lit, comme un Sink.
+                oh.probe_capabilities().await
+            } else {
                 let t = locked.output_type();
                 return super::capacite_lpcm_par_sortie::repli_sans_sonde(Some(t), hi_res);
-            };
-            dlna.probe_capabilities().await
+            }
         };
         if !caps.probed {
             return false;
@@ -104,28 +109,53 @@ impl PlaybackOrchestrator {
         if device_id.is_empty() {
             return None;
         }
-        if let Some(connu) = self.dlna_canaux_max.lock().await.get(device_id) {
-            return *connu;
+        // #6599 — chaque issue de cette fonction laisse sa ligne au journal.
+        // Le rapport de l'Eversolo A6 montrait trois réductions à deux canaux
+        // sans AUCUNE ligne de sonde pour l'A6 : la réponse venait du cache,
+        // muet, d'une sonde faite avant la fenêtre du rapport. On ne pouvait
+        // plus dire d'où venait le 2.
+        let en_cache = self.dlna_canaux_max.lock().await.get(device_id).copied();
+        if let Some(connu) = en_cache {
+            tracing::info!(
+                device_id,
+                canaux_max = ?connu,
+                origine = "cache",
+                "dlna_canaux_annonces_en_cache"
+            );
+            return connu;
         }
         let arc = { self.outputs.lock().await.get(device_id) };
-        let output = arc?;
+        let Some(output) = arc else {
+            tracing::info!(device_id, "dlna_canaux_sortie_absente_du_registre");
+            return None;
+        };
         let caps = {
             let locked = output.lock().await;
-            let dlna = locked
+            let Some(dlna) = locked
                 .as_any()
-                .downcast_ref::<crate::outputs::dlna::DlnaOutput>()?;
+                .downcast_ref::<crate::outputs::dlna::DlnaOutput>()
+            else {
+                tracing::info!(device_id, "dlna_canaux_sortie_sans_sink_upnp");
+                return None;
+            };
             dlna.probe_capabilities().await
         };
         if !caps.probed {
             // Inconcluante : surtout ne pas mémoriser. Un renderer injoignable
             // une fois ne doit pas être réputé muet sur ses canaux pour la
             // session entière.
+            tracing::info!(
+                device_id,
+                raison = caps.reason.unwrap_or("inconnue"),
+                "dlna_canaux_sonde_inconcluante"
+            );
             return None;
         }
         let canaux = caps.canaux_max;
         tracing::info!(
             device_id,
             canaux_max = ?canaux,
+            origine = "sonde",
             "dlna_canaux_annonces_sondes"
         );
         self.dlna_canaux_max
@@ -1120,14 +1150,13 @@ impl PlaybackOrchestrator {
                 Ok(Err(e)) => {
                     warn!(error = %e, "radio_local_decode_failed");
                     emit_radio_playback_error(&err_bus, err_zone, &err_station, &e);
-                    // Verdict DÉFINITIF ou simple panne ? Les deux préfixes
-                    // ci-dessous portent déjà, chacun dans son commentaire, la
+                    // Verdict DÉFINITIF ou simple panne ? Les préfixes que
+                    // reconnaît `echec_radio_definitif` portent, chacun dans son commentaire, la
                     // phrase « ne guérira pas en réessayant » — mais personne
                     // ne la lisait hors de la boucle de reconnexion interne.
                     // Une coupure réseau, elle, n'entre pas ici : la reprise
                     // légitime d'un flux qui tombe continue de marcher.
-                    let definitif = e.starts_with(super::radio::RADIO_NOT_AUDIO)
-                        || e.starts_with(super::radio::RADIO_HLS_UNSUPPORTED);
+                    let definitif = super::radio::echec_radio_definitif(&e);
                     if let (true, Some(sid)) = (definitif, refus_source_id.as_deref()) {
                         warn!(
                             zone_id = err_zone,
@@ -1554,11 +1583,13 @@ impl PlaybackOrchestrator {
         let strict = crate::audio::bitperfect_strict::zone_enabled(&self.db, req.zone_id);
         let resultat = self
             .anticiper_le_dop(
+                req.zone_id,
                 &track,
                 fichier.clone(),
                 zone_max_sample_rate,
                 false,
                 strict,
+                None,
                 None,
             )
             .await;
@@ -1944,8 +1975,7 @@ impl PlaybackOrchestrator {
                     Ok(Err(e)) => {
                         warn!(error = %e, "radio_dlna_decode_failed");
                         emit_radio_playback_error(&err_bus, err_zone, &err_station, &e);
-                        let definitif = e.starts_with(super::radio::RADIO_NOT_AUDIO)
-                            || e.starts_with(super::radio::RADIO_HLS_UNSUPPORTED);
+                        let definitif = super::radio::echec_radio_definitif(&e);
                         if let (true, Some(sid)) = (definitif, refus_source_id.as_deref()) {
                             warn!(
                                 zone_id = err_zone,

@@ -43,6 +43,11 @@ struct UpdateVolume {
     /// `volume`. Ce champ ne connaît PAS l'ambiguïté 0..1 / 0..100 : un dB est
     /// un dB (#1274).
     volume_db: Option<f64>,
+    /// #6721 — l'utilisateur CONFIRME une hausse de plus de 10 dB perçus en
+    /// une fois (`audio::garde_de_hausse`). Absent ou `false` : une telle
+    /// hausse est plafonnée au seuil. Jamais persisté.
+    #[serde(default)]
+    confirm_increase: bool,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +107,11 @@ struct PatchZone {
     /// à la requête et n'est jamais persisté avec la zone.
     #[serde(default)]
     confirm_full_volume: bool,
+    /// #6721 — l'utilisateur CONFIRME une hausse de plus de 10 dB perçus en
+    /// une fois (`audio::garde_de_hausse`). Absent ou `false` : une telle
+    /// hausse est plafonnée au seuil. Jamais persisté.
+    #[serde(default)]
+    confirm_increase: bool,
     /// When enabled, automatically generates and queues similar tracks when the queue ends.
     ///
     /// #2271 — conserve pour les clients existants. `true` vaut
@@ -620,6 +630,9 @@ mod presence;
 mod rattacher_asio_6120;
 // #6541 — boutons + / − et limites de volume d'une zone.
 mod limites_de_volume_6541;
+// #6721 — la garde contre les montées brusques, par le routeur public.
+#[cfg(test)]
+mod garde_de_hausse_6721_tests;
 
 // #5353 — le backend nommé par le chemin du signal est celui de LA sortie.
 mod backend_de_la_sortie_5353;
@@ -1612,6 +1625,9 @@ pub(crate) use preconfiguration::preconfigurer_zone as preconfigurer_zone_decouv
 mod groupes;
 pub use groupes::*;
 
+// #6155 — les suiveuses d'un groupe jouent ce que joue la meneuse.
+pub mod relais_de_groupe_6155;
+
 #[cfg(test)]
 mod signal_path_tests;
 
@@ -1685,6 +1701,10 @@ mod patch_zone_error_guard;
 /// ne traversait par la route (réseau DLNA, UPnP), écrites AVANT la découpe.
 #[cfg(test)]
 mod persister_le_patch_tests;
+
+/// #6774 — changer l'appareil d'une zone remet son trim à 0 dB.
+#[cfg(test)]
+mod reglages_suivent_l_appareil_6774_tests;
 
 /// Garde-fou #2092 : les charges utiles d'une zone ne doivent plus diverger.
 ///

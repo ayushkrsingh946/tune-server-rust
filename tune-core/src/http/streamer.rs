@@ -68,6 +68,18 @@ pub struct RadioSourceInfo {
     pub format: Option<&'static str>,
     pub sample_rate: Option<u32>,
     pub bit_depth: Option<u16>,
+    /// #6357 — le protocole de la station quand ce n'est pas un flux continu :
+    /// `Some("hls")` pour une liste `.m3u8`. `None` : Icecast/HTTP.
+    pub transport: Option<&'static str>,
+    /// #6357 — le profil AAC réellement décodé (`AAC-LC`, `HE-AAC`,
+    /// `HE-AACv2`), quand le décodeur le sait. `None` : inconnu.
+    pub profil: Option<&'static str>,
+    /// #6357 — le débit du codec, mesuré sur les trames (kbit/s).
+    pub debit_kbps: Option<u32>,
+    /// #6821 — le débit que la station ANNONCE dans son en-tête `icy-br`
+    /// (kbit/s), lu à la connexion. `None` : en-tête absent ou illisible —
+    /// rien n'est déduit du conteneur ni de la fréquence.
+    pub bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -834,6 +846,19 @@ impl StreamSession {
         // Wake any older consumer currently parked so it re-checks its epoch.
         self.consumer_supersede.notify_waiters();
         epoch
+    }
+
+    /// #6130 — le SERVEUR congédie la connexion qui tient le canal : l'époque
+    /// avance sans nouveau propriétaire, la boucle du consommateur la voit
+    /// (même mécanisme sans réveil perdu que [`Self::claim_channel_consumer`])
+    /// et termine son corps HTTP sans tirer un morceau de plus. Le renderer
+    /// voit la fin du flux ; `active_consumers` retombe quand le corps tombe.
+    ///
+    /// Sert à quitter une radio sur un renderer qui ne lâche pas sa connexion
+    /// sur `Stop` (Eversolo DMP-A8 : 12 sorties de radio sur 12 au journal du
+    /// .18 du 22 au 25/10, `delai_depasse=true consommateurs_restants=1`).
+    pub fn congedier_les_consommateurs(&self) -> u64 {
+        self.claim_channel_consumer()
     }
 
     /// True while `epoch` (from `claim_channel_consumer`) is still the current

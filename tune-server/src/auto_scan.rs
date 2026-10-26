@@ -292,11 +292,19 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
             .collect();
 
         if music_dirs.is_empty() {
-            info!("auto_scan_skipped_no_dirs");
+            // #6175 — le partage monté à chaque démarrage sans être déclaré
+            // est nommé, au journal comme au registre des exécutions.
+            let partages = crate::partages_sans_racine::releve(&db, &music_dirs);
+            info!(
+                partages_sans_racine = ?partages.iter().map(|p| &p.point).collect::<Vec<_>>(),
+                "auto_scan_skipped_no_dirs"
+            );
             // Rien à reprendre sans dossier : le repère de #5531 n'a plus
             // d'objet, il ne doit pas relancer ce scan à chaque démarrage.
             crate::routes::system::scan::effacer_reprise_du_scan(&db);
-            suivi.rien_a_faire(Some("aucun dossier de musique configure"));
+            let detail = crate::partages_sans_racine::explication(&music_dirs, &partages)
+                .unwrap_or_else(|| "aucun dossier de musique configure".to_string());
+            suivi.rien_a_faire(Some(&detail));
             // Mark the scan "done" even on this early exit: the file watcher
             // waits on this flag before it starts watching.
             scan_done_clone.store(true, Ordering::Release);
@@ -313,6 +321,7 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
             scan_done_clone.store(true, Ordering::Release);
             return;
         };
+        scan_lease.annoncer(crate::routes::system::scan::ORIGINE_DEMARRAGE, None);
         let _scan_lease = scan_lease;
 
         // Make the startup scan first-class, exactly like the manual one:
@@ -3850,6 +3859,10 @@ mod champs_tenus_scan_tests;
 #[cfg(test)]
 #[path = "arret_du_scan_de_demarrage_tests_5552.rs"]
 mod arret_du_scan_de_demarrage_tests_5552;
+
+#[cfg(test)]
+#[path = "arret_puis_scan_cible_tests_6729.rs"]
+mod arret_puis_scan_cible_tests_6729;
 
 #[cfg(test)]
 #[path = "mise_a_jour_pendant_un_scan_tests_5531.rs"]
