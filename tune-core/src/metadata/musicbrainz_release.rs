@@ -488,10 +488,10 @@ pub fn parse_release_detail(data: &Value) -> Option<MBReleaseDetail> {
                 // Le crédit de la PISTE d'abord ; celui de l'enregistrement à
                 // défaut, que certaines réponses sont seules à porter.
                 let mut artist_credits = credits_d_artiste(track);
-                if artist_credits.is_empty() {
-                    if let Some(r) = recording {
-                        artist_credits = credits_d_artiste(r);
-                    }
+                if artist_credits.is_empty()
+                    && let Some(r) = recording
+                {
+                    artist_credits = credits_d_artiste(r);
                 }
 
                 tracks.push(MBTrack {
