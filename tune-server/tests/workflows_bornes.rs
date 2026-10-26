@@ -2223,7 +2223,12 @@ fn le_controleur_exige_le_vert_de_la_sentinelle_avant_les_tags() {
         porte < tags,
         "la porte de la sentinelle doit preceder la pose des tags"
     );
-    let etape = &controleur[porte..tags];
+    // L'etape seule : jusqu'a la suivante, pas jusqu'aux tags.
+    let fin = controleur[porte + 1..]
+        .find("\n      - name: ")
+        .map(|i| porte + 1 + i)
+        .unwrap_or(tags);
+    let etape = &controleur[porte..fin];
     assert!(
         etape.contains(
             r#"bash scripts/porte-sentinelle-streaming.sh renesenses/tune-server-rust "$GITHUB_SHA" "$SENTINELLE_SHA""#
