@@ -1103,7 +1103,7 @@ impl PostgresBackend {
                 result.push_str(&idx.to_string());
             } else if c == '\'' {
                 result.push(c);
-                while let Some(sc) = chars.next() {
+                for sc in chars.by_ref() {
                     result.push(sc);
                     if sc == '\'' {
                         break;

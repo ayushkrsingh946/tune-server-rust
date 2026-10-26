@@ -662,10 +662,10 @@ impl PlayQueueRepo {
         let params: [&dyn ToSqlValue; 1] = [&zone_id];
         let rows = self.db.query_many(&sql, &params)?;
         if !rows.is_empty() {
-            return Ok(rows.iter().map(row_to_queue_item).collect());
+            return Ok(rows.iter().map(|cols| row_to_queue_item(cols)).collect());
         }
         let strong = self.db.query_many_strong(&sql, &params)?;
-        Ok(strong.iter().map(row_to_queue_item).collect())
+        Ok(strong.iter().map(|cols| row_to_queue_item(cols)).collect())
     }
 
     pub fn get_current(&self, zone_id: i64) -> Result<Option<QueueItem>, String> {
@@ -675,7 +675,7 @@ impl PlayQueueRepo {
             .db
             .query_one(&sql, &params)?
             .as_ref()
-            .map(row_to_queue_item))
+            .map(|cols| row_to_queue_item(cols)))
     }
 
     /// Le sous-ensemble de `ids` qui possède encore une ligne dans `tracks`,
@@ -1061,10 +1061,10 @@ impl PlayQueueRepo {
         let params: [&dyn ToSqlValue; 1] = [&zone_id];
         let rows = self.db.query_many(&sql, &params)?;
         if !rows.is_empty() {
-            return Ok(rows.iter().map(row_to_queue_entry).collect());
+            return Ok(rows.iter().map(|cols| row_to_queue_entry(cols)).collect());
         }
         let strong = self.db.query_many_strong(&sql, &params)?;
-        Ok(strong.iter().map(row_to_queue_entry).collect())
+        Ok(strong.iter().map(|cols| row_to_queue_entry(cols)).collect())
     }
 
     /// #6399 — `limit` lignes de la file à partir du rang `offset`, dans
@@ -1080,10 +1080,10 @@ impl PlayQueueRepo {
         let params: [&dyn ToSqlValue; 3] = [&zone_id, &limit, &offset];
         let rows = self.db.query_many(&sql, &params)?;
         if !rows.is_empty() || offset > 0 {
-            return Ok(rows.iter().map(row_to_queue_entry).collect());
+            return Ok(rows.iter().map(|cols| row_to_queue_entry(cols)).collect());
         }
         let strong = self.db.query_many_strong(&sql, &params)?;
-        Ok(strong.iter().map(row_to_queue_entry).collect())
+        Ok(strong.iter().map(|cols| row_to_queue_entry(cols)).collect())
     }
 
     /// #6399 — `(rang de la ligne en cours, longueur)` de la file, sans lire
@@ -1110,7 +1110,7 @@ impl PlayQueueRepo {
             .db
             .query_one(&sql, &params)?
             .as_ref()
-            .map(row_to_queue_entry))
+            .map(|cols| row_to_queue_entry(cols)))
     }
 
     /// Insert items at `position` (or append when None) in the unified space,
@@ -1386,7 +1386,7 @@ impl PlayQueueRepo {
         let sql = self.dialect_sql(sql::get_ordered, sql::get_ordered);
         let params: [&dyn ToSqlValue; 1] = [&zone_id];
         let rows = self.db.query_many_strong(&sql, &params)?;
-        Ok(rows.iter().map(row_to_queue_entry).collect())
+        Ok(rows.iter().map(|cols| row_to_queue_entry(cols)).collect())
     }
 
     /// Réécrit l'ORDRE de la file selon `ids`, identifiants de ligne
@@ -1683,7 +1683,7 @@ impl PlayQueueRepo {
     }
 }
 
-fn row_to_queue_item(cols: &Vec<SqlValue>) -> QueueItem {
+fn row_to_queue_item(cols: &[SqlValue]) -> QueueItem {
     QueueItem {
         id: cols.first().and_then(|v| v.as_i64()).unwrap_or(0),
         zone_id: cols.get(1).and_then(|v| v.as_i64()).unwrap_or(0),
@@ -1703,7 +1703,7 @@ fn row_to_queue_item(cols: &Vec<SqlValue>) -> QueueItem {
 }
 
 /// Maps a row from `sql::unified_select_base()` (22 columns) to a QueueEntry.
-fn row_to_queue_entry(cols: &Vec<SqlValue>) -> QueueEntry {
+fn row_to_queue_entry(cols: &[SqlValue]) -> QueueEntry {
     QueueEntry {
         id: cols.first().and_then(|v| v.as_i64()).unwrap_or(0),
         zone_id: cols.get(1).and_then(|v| v.as_i64()).unwrap_or(0),
