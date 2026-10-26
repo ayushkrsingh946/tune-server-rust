@@ -575,6 +575,13 @@ path = "tests/dossier_cue_4625.rs"
 name = "pg_group_by_strict_historique"
 path = "tests/pg_group_by_strict_historique.rs"
 
+# #7128 — étiqueter tout le résultat d'un filtre d'Oxygen : SQLite dans la
+# suite ordinaire, PostgreSQL sous `TUNE_TEST_PG_URL` (test-postgres.yml).
+# `autotests = false` en tête de ce manifeste : sans cette cible, jamais compilé.
+[[test]]
+name = "etiquetage_par_filtre_7128"
+path = "tests/etiquetage_par_filtre_7128.rs"
+
 # Depuis #3039, la fenetre des ajouts recents est un parametre borne.
 [[test]]
 name = "ajouts_recents_fenetre"
