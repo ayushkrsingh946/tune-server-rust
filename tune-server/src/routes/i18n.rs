@@ -6,7 +6,9 @@ use serde_json::{Value, json};
 
 use crate::state::AppState;
 
-const SUPPORTED_LOCALES: &[&str] = &["en", "fr", "de", "es", "it", "zh", "ko", "ja", "hu", "vi"];
+const SUPPORTED_LOCALES: &[&str] = &[
+    "en", "fr", "de", "es", "it", "zh", "ko", "ja", "hu", "vi", "nb", "pl", "el",
+];
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -753,6 +755,126 @@ fn get_translations(locale: &str) -> Value {
                 "finish": "Hoàn tất",
             },
         }),
+        "nb" => json!({
+            "common": {
+                "play": "Spill av",
+                "pause": "Pause",
+                "stop": "Stopp",
+                "next": "Neste",
+                "previous": "Forrige",
+                "search": "Søk",
+                "settings": "Innstillinger",
+                "library": "Bibliotek",
+                "artists": "Artister",
+                "albums": "Album",
+                "tracks": "Spor",
+                "genres": "Sjangre",
+                "playlists": "Spillelister",
+                "radios": "Radioer",
+                "queue": "Kø",
+                "favorites": "Favoritter",
+                "history": "Historikk",
+                "volume": "Volum",
+            },
+            "settings": {
+                "title": "Innstillinger",
+                "musicDirs": "Musikkmapper",
+                "streaming": "Strømmetjenester",
+                "zones": "Soner",
+                "system": "System",
+            },
+            "onboarding": {
+                "welcome": "Velkommen til Tune!",
+                "addMusic": "Legg til musikk",
+                "connectStreaming": "Koble til strømmetjenester",
+                "setupZones": "Sett opp soner",
+                "createProfile": "Opprett en profil",
+                "complete": "Oppsettet er ferdig!",
+                "skip": "Hopp over",
+                "next": "Neste",
+                "finish": "Fullfør",
+            },
+        }),
+        "pl" => json!({
+            "common": {
+                "play": "Odtwórz",
+                "pause": "Pauza",
+                "stop": "Zatrzymaj",
+                "next": "Następny",
+                "previous": "Poprzedni",
+                "search": "Szukaj",
+                "settings": "Ustawienia",
+                "library": "Biblioteka",
+                "artists": "Wykonawcy",
+                "albums": "Albumy",
+                "tracks": "Utwory",
+                "genres": "Gatunki",
+                "playlists": "Playlisty",
+                "radios": "Radia",
+                "queue": "Kolejka",
+                "favorites": "Ulubione",
+                "history": "Historia",
+                "volume": "Głośność",
+            },
+            "settings": {
+                "title": "Ustawienia",
+                "musicDirs": "Foldery z muzyką",
+                "streaming": "Usługi streamingowe",
+                "zones": "Strefy",
+                "system": "System",
+            },
+            "onboarding": {
+                "welcome": "Witaj w Tune!",
+                "addMusic": "Dodaj muzykę",
+                "connectStreaming": "Połącz usługi streamingowe",
+                "setupZones": "Skonfiguruj strefy",
+                "createProfile": "Utwórz profil",
+                "complete": "Konfiguracja zakończona!",
+                "skip": "Pomiń",
+                "next": "Dalej",
+                "finish": "Zakończ",
+            },
+        }),
+        "el" => json!({
+            "common": {
+                "play": "Αναπαραγωγή",
+                "pause": "Παύση",
+                "stop": "Διακοπή",
+                "next": "Επόμενο",
+                "previous": "Προηγούμενο",
+                "search": "Αναζήτηση",
+                "settings": "Ρυθμίσεις",
+                "library": "Βιβλιοθήκη",
+                "artists": "Καλλιτέχνες",
+                "albums": "Άλμπουμ",
+                "tracks": "Κομμάτια",
+                "genres": "Είδη",
+                "playlists": "Λίστες αναπαραγωγής",
+                "radios": "Ραδιόφωνα",
+                "queue": "Ουρά",
+                "favorites": "Αγαπημένα",
+                "history": "Ιστορικό",
+                "volume": "Ένταση",
+            },
+            "settings": {
+                "title": "Ρυθμίσεις",
+                "musicDirs": "Φάκελοι μουσικής",
+                "streaming": "Υπηρεσίες streaming",
+                "zones": "Ζώνες",
+                "system": "Σύστημα",
+            },
+            "onboarding": {
+                "welcome": "Καλώς ήρθατε στο Tune!",
+                "addMusic": "Προσθήκη μουσικής",
+                "connectStreaming": "Σύνδεση υπηρεσιών streaming",
+                "setupZones": "Ρύθμιση ζωνών",
+                "createProfile": "Δημιουργία προφίλ",
+                "complete": "Η ρύθμιση ολοκληρώθηκε!",
+                "skip": "Παράλειψη",
+                "next": "Επόμενο",
+                "finish": "Τέλος",
+            },
+        }),
         _ => json!({}),
     }
 }
@@ -785,5 +907,20 @@ mod tests {
         assert_eq!(parse_accept_language("vi-VN,vi;q=0.9,en;q=0.5"), "vi");
         assert_eq!(get_translations("vi")["settings"]["zones"], "Vùng phát");
         assert_eq!(parse_accept_language("pt-BR"), "en");
+    }
+
+    /// Le norvégien bokmål, le polonais et le grec sont des langues de
+    /// l'interface : un `Accept-Language` qui les demande les obtient.
+    ///
+    /// Contre-épreuve : retirer `"nb"`, `"pl"` et `"el"` de `SUPPORTED_LOCALES`
+    /// fait rougir ce test (les trois en-têtes retombent sur `"en"`).
+    #[test]
+    fn le_norvegien_le_polonais_et_le_grec_sont_detectes() {
+        assert_eq!(parse_accept_language("nb-NO,nb;q=0.9,en;q=0.5"), "nb");
+        assert_eq!(parse_accept_language("pl-PL,pl;q=0.9,en;q=0.5"), "pl");
+        assert_eq!(parse_accept_language("el-GR,el;q=0.9,en;q=0.5"), "el");
+        assert_eq!(get_translations("nb")["settings"]["zones"], "Soner");
+        assert_eq!(get_translations("pl")["settings"]["zones"], "Strefy");
+        assert_eq!(get_translations("el")["settings"]["zones"], "Ζώνες");
     }
 }

@@ -20,12 +20,12 @@ use axum::http::HeaderMap;
 /// `Accept-Language` parse so an unsupported browser locale falls back to
 /// [`FALLBACK`].
 ///
-/// Douze langues depuis le hongrois et le vietnamien (rc7) — les mêmes que
+/// Quinze langues depuis le norvégien bokmål, le polonais et le grec (rc9) — les mêmes que
 /// l'interface web (`tune-web-client/src/lib/locales/`). Chaque clé de
 /// `i18n_server.json` doit porter chacune d'elles : le test
 /// `chaque_cle_porte_chaque_langue` le garde.
 pub const SUPPORTED: &[&str] = &[
-    "fr", "en", "de", "es", "it", "zh", "ja", "ko", "ro", "sv", "hu", "vi",
+    "fr", "en", "de", "es", "it", "zh", "ja", "ko", "ro", "sv", "hu", "vi", "nb", "pl", "el",
 ];
 
 /// Langue de repli du serveur : l'anglais, comme le client web. Ni un en-tête
@@ -257,6 +257,26 @@ mod tests {
         assert_eq!(t("pt", "metafield.composer"), t("en", "metafield.composer"));
     }
 
+    /// Le norvégien bokmål, le polonais et le grec sont des langues de
+    /// l'interface : un `Accept-Language` qui les demande doit les obtenir.
+    ///
+    /// Contre-épreuve : retirer `"nb"`, `"pl"` et `"el"` de `SUPPORTED` fait
+    /// rougir ce test (les trois en-têtes retombent sur `"en"`).
+    #[test]
+    fn le_norvegien_le_polonais_et_le_grec_sont_servis() {
+        assert_eq!(lang_from_header(&en_tetes("nb-NO,nb;q=0.9,en;q=0.8")), "nb");
+        assert_eq!(lang_from_header(&en_tetes("pl-PL,pl;q=0.9,en;q=0.8")), "pl");
+        assert_eq!(lang_from_header(&en_tetes("el-GR,el;q=0.9,en;q=0.8")), "el");
+        assert_eq!(t("nb", "metafield.composer"), "Komponist");
+        assert_eq!(t("pl", "metafield.composer"), "Kompozytor");
+        assert_eq!(t("el", "metafield.composer"), "Συνθέτης");
+        assert_eq!(
+            t("el", "ai.zonesAvailable"),
+            "Διαθέσιμες ζώνες: {zones}",
+            "« zone » se dit « ζώνη », comme dans l'interface web"
+        );
+    }
+
     /// Les jetons `{…}` d'un texte : `{title}`, `{n}`…
     fn jetons(texte: &str) -> Vec<String> {
         let mut vus: Vec<String> = Vec::new();
@@ -357,6 +377,9 @@ mod tests {
             ("sv", "Åtkomst och tokens"),
             ("hu", "Hozzáférés és tokenek"),
             ("vi", "Truy cập và token"),
+            ("nb", "Tilgang og tokens"),
+            ("pl", "Dostęp i tokeny"),
+            ("el", "Πρόσβαση και διακριτικά"),
         ];
         assert_eq!(onglet.len(), super::SUPPORTED.len());
         for (lang, libelle) in onglet {
