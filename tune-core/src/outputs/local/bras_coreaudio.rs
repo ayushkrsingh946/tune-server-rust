@@ -541,8 +541,8 @@ pub(super) fn jouer_via_coreaudio(entrees: EntreesCoreAudio) {
     // vérifié), donc ni adaptation de canaux ni rééchantillonnage — `convertir`
     // rend ses mots tels quels. #6230 — sauf quand la grille pilote
     // l'ouverture : `sortie` porte alors ses voies, et l'étage y applique la
-    // matrice, comme sur le chemin partagé. Le DoP n'est pas refusé sur ce bras : il
-    // traverse en f32 jusqu'à l'AudioUnit, comme avant (D1).
+    // matrice, comme sur le chemin partagé. Le DoP n'est pas refusé sur ce
+    // bras : il traverse en f32 jusqu'à l'AudioUnit, comme avant (D1).
     let mut etage = EtageDeConversion {
         pcm: LocalPcmProcessor {
             eq: &eq,
