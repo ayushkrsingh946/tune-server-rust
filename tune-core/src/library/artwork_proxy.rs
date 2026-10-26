@@ -119,10 +119,10 @@ const REDIRECTIONS_MAX: usize = 5;
 /// change invalide toutes les URL que les points de contrôle ont mémorisées.
 pub fn secret(backend: &Arc<dyn DbBackend>) -> String {
     let settings = SettingsRepo::with_backend(backend.clone());
-    if let Ok(Some(s)) = settings.get(CLE_SECRET) {
-        if !s.trim().is_empty() {
-            return s;
-        }
+    if let Ok(Some(s)) = settings.get(CLE_SECRET)
+        && !s.trim().is_empty()
+    {
+        return s;
     }
     let mut octets = [0u8; 32];
     getrandom::getrandom(&mut octets).expect("OS RNG unavailable");
