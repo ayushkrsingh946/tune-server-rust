@@ -15,6 +15,12 @@
 //! CONTACTS, et les cercles leurs classements privés par le propriétaire.
 //! Purement additif ; `GET /` y gagne la clé `circles`, relayée telle quelle.
 //!
+//! #7124 (décision du 26/10/2026) : `GET /` gagne aussi `member_of` — les cercles
+//! des AUTRES où je suis rangé (`[{ owner_id, owner_name, circle_name }]`, liens
+//! actifs seulement, clé absente si je ne suis rangé nulle part), relayée telle
+//! quelle comme `circles`. Un membre peut aussi partager une playlist dans un
+//! cercle où il est rangé : `POST /playlists` part inchangé, le cloud juge.
+//!
 //! | Tune (`/api/v1/ext/circle`)                  | mozaiklabs (`/api/v1/circle`)          |
 //! |----------------------------------------------|----------------------------------------|
 //! | `POST /invitations` `{ "email", "circle_id"? }` | `POST /invitations`                 |
