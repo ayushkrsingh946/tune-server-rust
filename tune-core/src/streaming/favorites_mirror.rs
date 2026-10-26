@@ -74,7 +74,7 @@ use super::favorites_import::{Entree, lire_les_favoris};
 use super::traits::StreamingService;
 use crate::db::backend::{DbBackend, SqlValue};
 use crate::db::engine::{Engine, PostgresDialect, SqlDialect, SqliteDialect};
-use crate::db::streaming_favorites_repo::StreamingFavoritesRepo;
+use crate::db::streaming_favorites_repo::{AnneeQualite, StreamingFavoritesRepo};
 use crate::streaming::favorites_identity::identite_de_favori;
 
 /// Le service a confirmé ce favori.
@@ -138,6 +138,8 @@ pub struct FavoriMiroir {
     pub isrc: Option<String>,
     /// Date de mise en favori chez le service, quand elle est connue.
     pub created_at: Option<String>,
+    /// Année et qualité d'un favori album, quand le service les donne (#6482).
+    pub annee_qualite: AnneeQualite,
 }
 
 impl From<Entree> for FavoriMiroir {
@@ -152,6 +154,7 @@ impl From<Entree> for FavoriMiroir {
             ai_generated: e.ai_generated,
             isrc: e.isrc,
             created_at: e.created_at,
+            annee_qualite: e.annee_qualite,
         }
     }
 }
@@ -443,6 +446,18 @@ fn ecrire_partout(
         )?;
         if let Some(ia) = fav.ai_generated {
             let _ = repo.poser_ia(pid, &fav.item_type, service, &fav.service_id, ia);
+        }
+        // #6482 — l'année et la qualité d'un album, que les collections
+        // intelligentes lisent. Une absence ne touche à rien ; un échec est
+        // journalisé comme à la reprise, sans faire tomber le favori.
+        if let Err(e) = repo.poser_annee_et_qualite(
+            pid,
+            &fav.item_type,
+            service,
+            &fav.service_id,
+            &fav.annee_qualite,
+        ) {
+            warn!(service = %service, erreur = %e, "favori_miroir_annee_qualite_impossible");
         }
     }
     poser_etat(
@@ -807,6 +822,7 @@ fn trier_les_playlists(
                 created_at: None,
                 ai_generated: None,
                 isrc: None,
+                annee_qualite: AnneeQualite::default(),
             }),
             Some(true) => {
                 reserves

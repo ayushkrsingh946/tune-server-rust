@@ -62,6 +62,27 @@ pub struct StreamingFavorite {
     pub miroir_erreur: Option<String>,
 }
 
+/// L'année de sortie et la qualité d'un album de service, telles que le
+/// service les annonce avec le favori (#6482). Rangées dans
+/// `streaming_favorites.year`, `.sample_rate` et `.bit_depth`, elles laissent
+/// une collection intelligente classer les albums favoris d'un service par
+/// année et par qualité, comme les albums locaux. `None` : le service ne dit
+/// rien, et rien n'est inventé.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AnneeQualite {
+    pub year: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u32>,
+}
+
+impl AnneeQualite {
+    pub fn est_vide(&self) -> bool {
+        [self.year, self.sample_rate, self.bit_depth]
+            .iter()
+            .all(|v| v.is_none_or(|n| n == 0))
+    }
+}
+
 /// Engine-agnostic SQL builders.
 pub mod sql {
     use super::SqlDialect;
@@ -213,6 +234,23 @@ pub mod sql {
             d.placeholder(3),
             d.placeholder(4),
             d.placeholder(5),
+        )
+    }
+
+    /// Pose l'année et la qualité d'UN favori album (#6482). `COALESCE` : une
+    /// réponse du service qui ne les répète pas n'efface pas ce qui est connu.
+    pub fn poser_annee_et_qualite<D: SqlDialect>(d: &D) -> String {
+        format!(
+            "UPDATE streaming_favorites SET year = COALESCE({}, year), \
+               sample_rate = COALESCE({}, sample_rate), bit_depth = COALESCE({}, bit_depth) \
+             WHERE {} AND item_type = {} AND service = {} AND service_id = {}",
+            d.placeholder(1),
+            d.placeholder(2),
+            d.placeholder(3),
+            profil_egal(d, "profile_id", 4),
+            d.placeholder(5),
+            d.placeholder(6),
+            d.placeholder(7),
         )
     }
 
@@ -462,6 +500,43 @@ impl StreamingFavoritesRepo {
         let valeur = marquage_ia_ecrit(ia);
         let params: [&dyn ToSqlValue; 5] =
             [&valeur, &profile_id, &item_type, &service, &service_id];
+        self.db.execute(&sql, &params).map(|_| ())
+    }
+
+    /// Pose l'année de sortie et la qualité (fréquence, résolution) d'un
+    /// favori album, telles que le service les annonce (#6482) : ce que lisent
+    /// les règles « Année », « Fréquence » et « Résolution » d'une collection
+    /// intelligente. Un champ absent ne touche à rien. Sans effet si le favori
+    /// n'existe pas, ou si le service ne dit rien.
+    pub fn poser_annee_et_qualite(
+        &self,
+        profile_id: i64,
+        item_type: &str,
+        service: &str,
+        service_id: &str,
+        annee_qualite: &AnneeQualite,
+    ) -> Result<(), String> {
+        if annee_qualite.est_vide() {
+            return Ok(());
+        }
+        let sql = self.dialect_sql(sql::poser_annee_et_qualite, sql::poser_annee_et_qualite);
+        let cle = identite_de_favori(service_id);
+        let service_id: &str = cle.as_ref();
+        let texte = |n: Option<u32>| n.filter(|v| *v > 0).map(|v| v.to_string());
+        let (year, sample_rate, bit_depth) = (
+            texte(annee_qualite.year),
+            texte(annee_qualite.sample_rate),
+            texte(annee_qualite.bit_depth),
+        );
+        let params: [&dyn ToSqlValue; 7] = [
+            &year,
+            &sample_rate,
+            &bit_depth,
+            &profile_id,
+            &item_type,
+            &service,
+            &service_id,
+        ];
         self.db.execute(&sql, &params).map(|_| ())
     }
 

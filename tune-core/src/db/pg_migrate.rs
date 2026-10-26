@@ -827,6 +827,11 @@ ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS ai_generated TEXT;
 ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS miroir_etat TEXT;
 ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS miroir_erreur TEXT;
 ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS isrc TEXT;
+-- Année et qualité d'un album favori de service (#6482). Sans numéro de
+-- migration, comme côté SQLite (`favoris_annee_et_qualite_colonnes`).
+ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS year TEXT;
+ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS sample_rate TEXT;
+ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS bit_depth TEXT;
 -- Référence d'album d'une piste de service (fil 2121, PG 078 / SQLite 114) :
 -- l'adresse de la page Bandcamp qui permet de resigner une URL de flux
 -- expirée. En ALTER pour la même raison que juste au-dessus : les trois tables

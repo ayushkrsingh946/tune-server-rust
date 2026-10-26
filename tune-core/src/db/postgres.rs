@@ -83,6 +83,12 @@ pub(crate) const ENSURE_TABLES: &[&str] = &[
     "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS miroir_etat TEXT",
     "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS miroir_erreur TEXT",
     "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS isrc TEXT",
+    // #6482 — année et qualité d'un album favori de service, lues par les
+    // règles d'une collection intelligente. Sans numéro de migration (voir
+    // `favoris_annee_et_qualite_colonnes` côté SQLite).
+    "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS year TEXT",
+    "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS sample_rate TEXT",
+    "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS bit_depth TEXT",
     // Only re-attach the TEXT default while the column IS still text.
     // On a database healed by migration 012 the column is BIGINT and
     // already defaults to `nextval('streaming_favorites_id_seq')`, so
@@ -353,6 +359,12 @@ pub(crate) const ENSURE_COLUMNS: &[&str] = &[
     "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS miroir_etat TEXT",
     "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS miroir_erreur TEXT",
     "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS isrc TEXT",
+    // #6482 — année et qualité d'un album favori de service, lues par les
+    // règles d'une collection intelligente. Sans numéro de migration (voir
+    // `favoris_annee_et_qualite_colonnes` côté SQLite).
+    "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS year TEXT",
+    "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS sample_rate TEXT",
+    "ALTER TABLE streaming_favorites ADD COLUMN IF NOT EXISTS bit_depth TEXT",
     // #5402 — date de création d'un fichier (PG 084). Ici AUSSI : une base
     // de bascule ne rejoue pas la 084, et le scan comme le tri « par
     // création » nomment la colonne. DOUBLE PRECISION comme `first_seen_at`.

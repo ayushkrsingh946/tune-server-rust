@@ -192,7 +192,11 @@ impl StreamingService for ServiceSimule {
                         .take(coupe)
                         .map(|(id, (t, a, al, isrc))| match fav_type {
                             "artists" => json!({"id": id, "name": t}),
-                            "albums" => json!({"source_id": id, "title": t, "artist_name": a}),
+                            // #6482 — l'année et la qualité, comme la
+                            // projection `StreamAlbum` d'un vrai connecteur.
+                            "albums" => json!({"source_id": id, "title": t, "artist_name": a,
+                                               "year": 1959, "quality": {"codec": "FLAC",
+                                               "sample_rate": 192000, "bit_depth": 24}}),
                             _ => json!({"source_id": id, "title": t, "artist_name": a,
                                         "album_title": al, "isrc": isrc}),
                         })
@@ -1128,4 +1132,36 @@ async fn qobuz_favoris_tronques_aucun_favori_synchro_ne_disparait_5997() {
     // L'écran du service, lui, garde la coupe : rien n'y devient une erreur.
     let affichage = arc.read().await.get_user_tracks().await.expect("affichage");
     assert_eq!(affichage.len(), 1);
+}
+
+/// #6482 — le rafraîchissement du miroir (le chemin de Qobuz) range l'année et
+/// la qualité d'un album favori, pour chaque profil : une collection
+/// intelligente les lit pour classer les albums favoris comme les locaux.
+#[tokio::test]
+async fn le_miroir_range_l_annee_et_la_qualite_des_albums_6482() {
+    let (backend, profils, _dir) = base(2);
+    let (arc, compte) = ServiceSimule::nouveau("miroir-6482");
+    poser_chez_le_service(&compte, "albums", "9");
+    rafraichir(&arc, &backend, profils[0]).await;
+    let lignes: Vec<(i64, String, String, String)> = backend
+        .query_many(
+            "SELECT profile_id, year, sample_rate, bit_depth FROM streaming_favorites \
+             WHERE service = 'miroir-6482' AND service_id = '9' ORDER BY profile_id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let t = |i: usize| r.get(i).and_then(|v| v.as_string()).unwrap_or_default();
+            (r[0].as_i64().unwrap_or(0), t(1), t(2), t(3))
+        })
+        .collect();
+    let attendu: Vec<(i64, String, String, String)> = profils
+        .iter()
+        .map(|&p| (p, "1959".into(), "192000".into(), "24".into()))
+        .collect();
+    assert_eq!(
+        lignes, attendu,
+        "l'année et la qualité de l'album favori doivent être rangées pour chaque profil"
+    );
 }
