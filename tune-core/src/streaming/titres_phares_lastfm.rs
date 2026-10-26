@@ -317,7 +317,7 @@ pub async fn completer<F, Fut>(
             break;
         }
         let cle = cle_titre(titre);
-        let cle_resolu = format!("{service}|{}|{cle}", alphanum(&artiste));
+        let cle_resolu = format!("{}|{service}|{}|{cle}", cfg.base, alphanum(&artiste));
         let en_cache = RESOLUS.lock().ok().and_then(|c| c.get(&cle_resolu));
         let piste = match en_cache {
             Some(p) => p,
