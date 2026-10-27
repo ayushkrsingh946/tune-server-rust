@@ -416,9 +416,10 @@ fn ajouter_les_mac(backend: &Arc<dyn DbBackend>, zones: &mut [Value]) {
     }
 }
 
-fn export_settings(
-    backend: &Arc<dyn DbBackend>,
-) -> Result<(Vec<(String, String)>, Vec<Value>, Vec<Value>), String> {
+/// Réglages généraux (clé, valeur), préréglages d'égaliseur et profils de pièce.
+type ReglagesExportes = (Vec<(String, String)>, Vec<Value>, Vec<Value>);
+
+fn export_settings(backend: &Arc<dyn DbBackend>) -> Result<ReglagesExportes, String> {
     let settings = SettingsRepo::with_backend(backend.clone());
     let all = settings.all()?;
 

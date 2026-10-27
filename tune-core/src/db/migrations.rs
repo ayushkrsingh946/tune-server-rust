@@ -3087,15 +3087,6 @@ fn add_column_if_missing(db: &SqliteDb, table: &str, column: &str, col_type: &st
     }
 }
 
-/// La table porte-t-elle cette colonne ?
-///
-/// Meme lecture que `add_column_if_missing`, mais pour GARDER un UPDATE.
-/// Indispensable : une base assez ancienne n'a pas encore toutes les colonnes
-/// que les migrations suivantes ajouteront, et un UPDATE sur une colonne
-/// absente fait echouer le batch — donc TOUT le runner, donc le demarrage
-/// (vecu par le test `une_base_ancienne_gagne_le_drapeau_compilation`, qui
-/// part d'une table `albums` reduite a `title` et `folder_path`).
-
 /// SQL de la migration 80 — voir son entree dans `MIGRATIONS`.
 const SQL_FORMAT_LOWERCASE: &str = "UPDATE albums SET format = LOWER(TRIM(format)) \
              WHERE format IS NOT NULL AND format != LOWER(TRIM(format)); \
@@ -3122,6 +3113,14 @@ const SQL_FORMAT_CONTENEUR: &str = "UPDATE tracks SET format = 'dsf' \
                AND EXISTS (SELECT 1 FROM tracks t \
                            WHERE t.album_id = albums.id AND t.format = 'dff');";
 
+/// La table porte-t-elle cette colonne ?
+///
+/// Meme lecture que `add_column_if_missing`, mais pour GARDER un UPDATE.
+/// Indispensable : une base assez ancienne n'a pas encore toutes les colonnes
+/// que les migrations suivantes ajouteront, et un UPDATE sur une colonne
+/// absente fait echouer le batch — donc TOUT le runner, donc le demarrage
+/// (vecu par le test `une_base_ancienne_gagne_le_drapeau_compilation`, qui
+/// part d'une table `albums` reduite a `title` et `folder_path`).
 fn has_column(db: &SqliteDb, table: &str, column: &str) -> bool {
     let conn = db.connection().lock().unwrap();
     conn.prepare(&format!("PRAGMA table_info({table})"))
@@ -3228,10 +3227,9 @@ fn merge_scattered_compilations(db: &SqliteDb) {
             let mut nums = Vec::new();
             if let Ok(mut ts) = conn.prepare(
                 "SELECT track_number FROM tracks WHERE album_id = ? AND track_number IS NOT NULL",
-            ) {
-                if let Ok(r) = ts.query_map([id], |row| row.get::<_, i64>(0)) {
-                    nums = r.filter_map(Result::ok).map(|n| n as i32).collect();
-                }
+            ) && let Ok(r) = ts.query_map([id], |row| row.get::<_, i64>(0))
+            {
+                nums = r.filter_map(Result::ok).map(|n| n as i32).collect();
             }
             by_title
                 .entry(title.trim().to_lowercase())

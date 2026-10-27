@@ -519,6 +519,11 @@ impl QueueEntry {
 }
 
 /// An item to enqueue, source-agnostic. Used by the unified `insert_at`/`append`.
+// `Streaming` est construit par champs nommés dans une trentaine de fichiers de
+// quatre caisses (dont orchestrator/tests.rs, en PR ouverte) : le mettre en
+// `Box` les réécrirait tous. Une valeur ne vit que le temps d'un ajout à la
+// file, jamais en masse : la taille de l'enum ne coûte rien de mesurable.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum QueueInput {
     Local {
