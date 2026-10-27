@@ -125,44 +125,68 @@ pub fn reexprimer(avant: BornesDb, apres: BornesDb, volume: f64) -> f64 {
     apres.db_vers_volume(avant.db_exacts(volume))
 }
 
+/// #6918 — un changement de course VÉRIFIÉ, pas encore écrit : la nouvelle
+/// course et, pour chaque zone Devialet AIR, son volume et ses limites #6541
+/// réécrits au même niveau en dB. Rendu par [`preparer_le_changement_de_course`],
+/// écrit par [`ChangementDeCourse::appliquer`].
+#[derive(Debug, Clone)]
+pub struct ChangementDeCourse {
+    apres: BornesDb,
+    zones: Vec<ZoneReexprimee>,
+}
+
+/// Une zone Devialet AIR sur la nouvelle course.
+#[derive(Debug, Clone)]
+struct ZoneReexprimee {
+    id: i64,
+    /// Le volume enregistré, en %.
+    volume: f64,
+    /// `(clé de limite #6541, fraction)`.
+    limites: Vec<(String, f64)>,
+}
+
 /// #6918 — une course changée ne déplace AUCUN niveau enregistré : sans
 /// cela, le même pourcentage enverrait d'autres dB, et une course dont le
 /// bas remonte ferait jouer le geste suivant jusqu'à des dizaines de dB plus
 /// fort. Pour chaque zone Devialet AIR, le volume enregistré
-/// (`zones.volume`) et les limites #6541 sont réécrits sur la nouvelle
+/// (`zones.volume`) et les limites #6541 sont recalculés sur la nouvelle
 /// course AU MÊME NIVEAU en dB.
 ///
-/// Refus, sans rien écrire, si une limite tomberait sous le bas de la
-/// nouvelle course : la garder exigerait de la REMONTER. Rend les zones
-/// réécrites, pour que l'appelant recale leur état de lecture avec
-/// [`reexprimer`]. Rien n'est envoyé à l'appareil.
-pub fn reexprimer_les_zones(
+/// Ne fait que VÉRIFIER et calculer : rien n'est écrit, ni en base ni vers
+/// l'appareil. Refus si une limite tomberait sous le bas de la nouvelle
+/// course : la garder exigerait de la REMONTER. L'appelant vérifie ainsi
+/// tout le reste de sa requête avant la première écriture.
+pub fn preparer_le_changement_de_course(
     db: &Arc<dyn DbBackend>,
     avant: BornesDb,
     apres: BornesDb,
-) -> Result<Vec<i64>, String> {
+) -> Result<ChangementDeCourse, String> {
     use super::volume_limites::{LIMITE_MINIMALE, cle_confort, cle_securite, lire};
+    let mut changement = ChangementDeCourse {
+        apres,
+        zones: Vec::new(),
+    };
     if avant == apres {
-        return Ok(Vec::new());
+        return Ok(changement);
     }
-    let repo = crate::db::zone_repo::ZoneRepo::with_backend(db.clone());
-    let zones: Vec<_> = repo
+    let zones = crate::db::zone_repo::ZoneRepo::with_backend(db.clone())
         .list()?
         .into_iter()
         .filter(|z| z.output_type.as_deref() == Some(crate::outputs::devialet_air::TYPE_DE_SORTIE))
-        .filter_map(|z| z.id.map(|id| (id, z.volume)))
-        .collect();
-    // Tout est vérifié avant la première écriture.
-    let mut a_ecrire = Vec::new();
-    for (id, volume) in &zones {
-        let limites = lire(db, *id);
+        .filter_map(|z| z.id.map(|id| (id, z.volume)));
+    for (id, volume) in zones {
+        let limites = lire(db, id);
         let mut seuils = Vec::new();
         for (cle, seuil) in [
-            (cle_securite(*id), limites.securite),
-            (cle_confort(*id), limites.confort),
+            (cle_securite(id), limites.securite),
+            (cle_confort(id), limites.confort),
         ] {
             if let Some(f) = seuil {
                 let db_seuil = avant.db_exacts(f);
+                // Une limite sous LIMITE_MINIMALE n'est plus lue comme limite
+                // (`volume_limites::lire` l'ignore) : elle disparaîtrait, ou
+                // devrait remonter à ce minimum. Le seuil en dB est donc la
+                // position LIMITE_MINIMALE de la nouvelle course, pas son bas.
                 if db_seuil < apres.min_db() + LIMITE_MINIMALE * (apres.max_db() - apres.min_db()) {
                     return Err(format!(
                         "zone {id} : une limite de volume à {db_seuil:.1} dB tomberait sous le bas de la course ({} dB)",
@@ -172,20 +196,67 @@ pub fn reexprimer_les_zones(
                 seuils.push((cle, reexprimer(avant, apres, f)));
             }
         }
-        a_ecrire.push((
-            *id,
-            reexprimer(avant, apres, volume / 100.0) * 100.0,
-            seuils,
-        ));
+        changement.zones.push(ZoneReexprimee {
+            id,
+            volume: reexprimer(avant, apres, volume / 100.0) * 100.0,
+            limites: seuils,
+        });
     }
-    let settings = crate::db::settings_repo::SettingsRepo::with_backend(db.clone());
-    for (id, volume, seuils) in &a_ecrire {
-        repo.update_volume(*id, *volume)?;
-        for (cle, f) in seuils {
-            settings.set(cle, &format!("{f}"))?;
+    Ok(changement)
+}
+
+impl ChangementDeCourse {
+    /// Écrit la course ET les niveaux réécrits dans UNE transaction : une
+    /// erreur de base ne laisse jamais des zones exprimées sur une course
+    /// qui n'est pas celle enregistrée (ni l'inverse). Rend les zones
+    /// réécrites, pour que l'appelant recale leur état de lecture avec
+    /// [`reexprimer`]. Rien n'est envoyé à l'appareil.
+    pub fn appliquer(&self, db: &Arc<dyn DbBackend>) -> Result<Vec<i64>, String> {
+        use crate::db::backend::ToSqlValue;
+        use crate::db::engine::{Engine, PostgresDialect, SqliteDialect};
+        use crate::db::{settings_repo, zone_repo};
+        use crate::outputs::devialet_air::reglages::{CLE_VOLUME_MAX_DB, CLE_VOLUME_MIN_DB};
+        let (upsert, maj_volume) = match db.engine() {
+            Engine::Sqlite => (
+                settings_repo::sql::upsert(&SqliteDialect),
+                zone_repo::sql::update_field(&SqliteDialect, "volume"),
+            ),
+            Engine::Postgres => (
+                settings_repo::sql::upsert(&PostgresDialect),
+                zone_repo::sql::update_field(&PostgresDialect, "volume"),
+            ),
+        };
+        let maintenant = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let mut reglages = vec![
+            (
+                CLE_VOLUME_MIN_DB.to_string(),
+                self.apres.min_db().to_string(),
+            ),
+            (
+                CLE_VOLUME_MAX_DB.to_string(),
+                self.apres.max_db().to_string(),
+            ),
+        ];
+        for zone in &self.zones {
+            reglages.extend(
+                zone.limites
+                    .iter()
+                    .map(|(cle, f)| (cle.clone(), format!("{f}"))),
+            );
         }
+        db.write_tx(&mut |tx| {
+            for (cle, valeur) in &reglages {
+                let params: [&dyn ToSqlValue; 3] = [cle, valeur, &maintenant];
+                tx.execute(&upsert, &params)?;
+            }
+            for ZoneReexprimee { id, volume, .. } in &self.zones {
+                let params: [&dyn ToSqlValue; 2] = [volume, id];
+                tx.execute(&maj_volume, &params)?;
+            }
+            Ok(())
+        })?;
+        Ok(self.zones.iter().map(|z| z.id).collect())
     }
-    Ok(zones.into_iter().map(|(id, _)| id).collect())
 }
 
 #[cfg(test)]
@@ -273,8 +344,16 @@ mod tests {
             .set(&super::super::volume_limites::cle_confort(id), "0.5")
             .unwrap();
         let apres = BornesDb::nouvelles(-60.0, -20.0).unwrap();
-        let zones = reexprimer_les_zones(&db, BornesDb::PAR_DEFAUT, apres).unwrap();
+        let zones = preparer_le_changement_de_course(&db, BornesDb::PAR_DEFAUT, apres)
+            .unwrap()
+            .appliquer(&db)
+            .unwrap();
         assert_eq!(zones, vec![id]);
+        assert_eq!(
+            BornesDb::lues(&db),
+            apres,
+            "la course est écrite avec les zones"
+        );
         let zone = crate::db::zone_repo::ZoneRepo::with_backend(db.clone())
             .get(id)
             .unwrap()
@@ -302,7 +381,7 @@ mod tests {
             .set(&super::super::volume_limites::cle_securite(id), "0.2")
             .unwrap();
         let apres = BornesDb::nouvelles(-50.0, -10.0).unwrap();
-        assert!(reexprimer_les_zones(&db, BornesDb::PAR_DEFAUT, apres).is_err());
+        assert!(preparer_le_changement_de_course(&db, BornesDb::PAR_DEFAUT, apres).is_err());
         let zone = crate::db::zone_repo::ZoneRepo::with_backend(db.clone())
             .get(id)
             .unwrap()
