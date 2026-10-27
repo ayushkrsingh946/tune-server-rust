@@ -6,8 +6,14 @@
 //! (`https://mozaiklabs.fr/storage/radio-logos/radio-metadata/S…webp`), son
 //! flux est un Ogg FLAC dont les titres passent par les commentaires du flux,
 //! sans pochette ; et la station n'est PAS dans « Mes radios ».
+//!
+//! ⚠ La mémoire des logos de lancement est GLOBALE au processus, et les tests
+//! tournent en parallèle : chaque test prend une adresse de flux à lui.
 
-use super::logo_de_lancement::{logo_de_la_station, retenir_le_logo_de_lancement};
+use super::logo_de_lancement::{
+    Logos, STATIONS_RETENUES_AU_PLUS, logo_de_la_station, retenir_dans,
+    retenir_le_logo_de_lancement,
+};
 use super::{station_du_now_playing, vignette_du_pas_radio};
 use crate::db::migrations;
 use crate::db::radio_repo::RadioRepo;
@@ -125,5 +131,31 @@ fn le_sondeur_prend_le_logo_par_logo_de_la_station() {
                 .contains("logo_de_lancement::logo_de_la_station(station.as_ref(), &stream_url)"),
         "le sondeur doit prendre le logo par logo_de_la_station, sinon une station \
          hors de « Mes radios » perd son logo au premier titre (#7051)"
+    );
+}
+
+/// Revue de #7051 : la mémoire pleine ne se vide plus d'un coup. Seul le
+/// lancement le plus ancien est oublié ; la station lancée en dernier, celle
+/// qui joue, garde son logo. Sur une mémoire locale, pas la globale.
+#[test]
+fn la_memoire_pleine_n_oublie_que_le_plus_ancien_lancement() {
+    let mut logos = Logos::new();
+    for i in 0..STATIONS_RETENUES_AU_PLUS as u64 {
+        retenir_dans(&mut logos, format!("flux-{i}"), LOGO_FICHE, i + 1);
+    }
+    let rang = STATIONS_RETENUES_AU_PLUS as u64 + 1;
+    retenir_dans(&mut logos, "flux-qui-joue".into(), LOGO_FICHE, rang);
+    assert_eq!(logos.len(), STATIONS_RETENUES_AU_PLUS);
+    assert!(
+        logos.contains_key("flux-qui-joue"),
+        "la station lancée en dernier doit garder son logo"
+    );
+    assert!(
+        !logos.contains_key("flux-0"),
+        "le lancement le plus ancien est celui qu'on oublie"
+    );
+    assert!(
+        logos.contains_key("flux-1"),
+        "mémoire pleine : un seul lancement est oublié, pas toute la mémoire"
     );
 }

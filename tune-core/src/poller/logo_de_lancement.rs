@@ -20,12 +20,16 @@ use std::sync::{LazyLock, Mutex};
 use crate::db::radio_repo::RadioStation;
 use crate::radio_metadata_relais::flux_normalise;
 
-/// Au-delà, la mémoire repart de zéro : quelques stations jouent à la fois,
-/// et une station relancée se retient de nouveau à son lancement.
-const STATIONS_RETENUES_AU_PLUS: usize = 256;
+/// Au-delà, le lancement le plus ANCIEN est oublié, et lui seul : une station
+/// qui joue a été lancée récemment et garde son logo (revue de #7051).
+pub(crate) const STATIONS_RETENUES_AU_PLUS: usize = 256;
 
-static LOGOS: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Logo retenu par flux normalisé, avec son rang de lancement.
+pub(crate) type Logos = HashMap<String, (u64, String)>;
+
+/// Mémoire du processus, partagée : les tests qui s'en servent prennent chacun
+/// une adresse de flux à eux.
+static LOGOS: LazyLock<Mutex<(Logos, u64)>> = LazyLock::new(|| Mutex::new((HashMap::new(), 0)));
 
 fn renseigne(v: Option<&str>) -> Option<&str> {
     v.map(str::trim).filter(|s| !s.is_empty())
@@ -38,15 +42,14 @@ pub fn retenir_le_logo_de_lancement(url_flux: &str, logo: Option<&str>) {
     if cle.is_empty() {
         return;
     }
-    let Ok(mut logos) = LOGOS.lock() else {
+    let Ok(mut memoire) = LOGOS.lock() else {
         return;
     };
+    let (logos, rang) = &mut *memoire;
     match renseigne(logo) {
         Some(logo) => {
-            if logos.len() >= STATIONS_RETENUES_AU_PLUS && !logos.contains_key(&cle) {
-                logos.clear();
-            }
-            logos.insert(cle, logo.to_string());
+            *rang += 1;
+            retenir_dans(logos, cle, logo, *rang);
         }
         None => {
             logos.remove(&cle);
@@ -54,9 +57,29 @@ pub fn retenir_le_logo_de_lancement(url_flux: &str, logo: Option<&str>) {
     }
 }
 
+/// Retient `logo` pour `cle` au rang `rang` ; plein, oublie d'abord le seul
+/// lancement le plus ancien.
+pub(crate) fn retenir_dans(logos: &mut Logos, cle: String, logo: &str, rang: u64) {
+    if logos.len() >= STATIONS_RETENUES_AU_PLUS
+        && !logos.contains_key(&cle)
+        && let Some(ancien) = logos
+            .iter()
+            .min_by_key(|(_, (r, _))| *r)
+            .map(|(c, _)| c.clone())
+    {
+        logos.remove(&ancien);
+    }
+    logos.insert(cle, (rang, logo.to_string()));
+}
+
 /// Le logo retenu au lancement du flux `url_flux`, s'il y en a un.
 pub(crate) fn logo_de_lancement(url_flux: &str) -> Option<String> {
-    LOGOS.lock().ok()?.get(&flux_normalise(url_flux)).cloned()
+    LOGOS
+        .lock()
+        .ok()?
+        .0
+        .get(&flux_normalise(url_flux))
+        .map(|(_, logo)| logo.clone())
 }
 
 /// Le logo de la station qui joue : celui de « Mes radios » quand elle y est
