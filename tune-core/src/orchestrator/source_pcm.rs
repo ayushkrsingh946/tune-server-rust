@@ -356,16 +356,16 @@ impl PlaybackOrchestrator {
             let fin = tokio::task::spawn_blocking(move || {
                 let mut premier = true;
                 pomper_sans_fin(&mut *lecteur, |t| {
-                    if let Some(n) = &niveaux {
-                        if !crate::audio::tap::send_windowed_pcm(
+                    if let Some(n) = &niveaux
+                        && !crate::audio::tap::send_windowed_pcm(
                             n,
                             &t,
                             format.bits,
                             format.canaux,
                             format.frequence,
-                        ) {
-                            niveaux = None;
-                        }
+                        )
+                    {
+                        niveaux = None;
                     }
                     let ok = rt.block_on(tx.send(t)).is_ok();
                     if premier {
