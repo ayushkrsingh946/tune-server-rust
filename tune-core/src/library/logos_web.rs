@@ -1476,7 +1476,13 @@ mod tests {
         });
         let url = format!("http://localhost:{port}/");
         assert!(
-            reqwest::Client::new().get(&url).send().await.is_ok(),
+            crate::http::client::builder()
+                .build()
+                .expect("client HTTP partagé")
+                .get(&url)
+                .send()
+                .await
+                .is_ok(),
             "le témoin : le faux site répond à un client ordinaire"
         );
         let client = client_des_sites().expect("client des sites");
@@ -1955,7 +1961,12 @@ mod tests {
 
     fn catalogue(racine: &str, limiteur_mb: &'static RateLimiter) -> CatalogueLogosWeb {
         let rapide: &'static RateLimiter = Box::leak(Box::new(RateLimiter::per_second(1000.0)));
-        let mut t = Transport::sous_base(reqwest::Client::new(), racine);
+        let mut t = Transport::sous_base(
+            crate::http::client::builder()
+                .build()
+                .expect("client HTTP partagé"),
+            racine,
+        );
         t.limiteur_mb = limiteur_mb;
         t.cle_mb = "mb-essai";
         t.limiteur_wikimedia = rapide;
@@ -2168,7 +2179,11 @@ mod tests {
 
     #[test]
     fn la_production_a_un_limiteur_par_source() {
-        let t = Transport::production(reqwest::Client::new());
+        let t = Transport::production(
+            crate::http::client::builder()
+                .build()
+                .expect("client HTTP partagé"),
+        );
         assert!(std::ptr::eq(
             t.limiteur_mb,
             &*crate::http::fetch::MUSICBRAINZ
