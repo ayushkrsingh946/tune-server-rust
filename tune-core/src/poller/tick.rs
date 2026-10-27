@@ -3424,11 +3424,16 @@ impl PositionPoller {
                     } else {
                         track_duration_ms
                     };
-                    let past_end = decisions::past_end_reached(
-                        effective_end_duration_ms,
-                        played_enough,
-                        status.position_ms,
-                    );
+                    // #6994 — une position périmée pendant la recréation du
+                    // flux ne prouve pas une fin de piste. Même grâce que les
+                    // autres détecteurs ci-dessous, avec remise à zéro du
+                    // compteur par leur branche commune.
+                    let past_end = !in_seek_grace
+                        && decisions::past_end_reached(
+                            effective_end_duration_ms,
+                            played_enough,
+                            status.position_ms,
+                        );
                     // Exclusive local outputs (ASIO / WASAPI exclusive) cap the
                     // reported position at exactly the track duration and keep
                     // reporting Playing — their blocking HTTP read never sees a
