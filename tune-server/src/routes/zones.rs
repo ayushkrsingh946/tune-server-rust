@@ -43,6 +43,10 @@ struct UpdateVolume {
     /// `volume`. Ce champ ne connaît PAS l'ambiguïté 0..1 / 0..100 : un dB est
     /// un dB (#1274).
     volume_db: Option<f64>,
+    /// #6918 — dB de l'APPAREIL, sur la course d'une sortie qui règle son
+    /// volume en décibels (Devialet AIR). Exclusif avec `volume` et
+    /// `volume_db` ; hors de la course, refusé.
+    device_volume_db: Option<f64>,
     /// #6721 — l'utilisateur CONFIRME une hausse de plus de 10 dB perçus en
     /// une fois (`audio::garde_de_hausse`). Absent ou `false` : une telle
     /// hausse est plafonnée au seuil. Jamais persisté.

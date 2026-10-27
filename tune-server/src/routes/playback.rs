@@ -1787,6 +1787,14 @@ async fn zone_status(State(state): State<AppState>, Path(zone_id): Path<i64>) ->
             obj,
             tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(output_type.as_deref()),
         );
+        // #6918 — les dB de l'appareil, pour une sortie à course en dB.
+        tune_core::audio::volume_appareil_db::publier(
+            obj,
+            &state.backend,
+            zone_id,
+            output_type.as_deref(),
+            zone_state.volume,
+        );
     }
     Json(v)
 }
