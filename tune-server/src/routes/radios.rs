@@ -653,8 +653,16 @@ pub struct StationAnnuaire {
     pub logo_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
+    /// Le genre v1 de la fiche : celui de sa PREMIÈRE catégorie.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub genre: Option<String>,
+    /// #7215 — TOUS les genres de la fiche (un par catégorie, dans l'ordre,
+    /// sans doublon), servis par l'annuaire v2 depuis le 27/10/2026 : « OuiFM
+    /// Blues & Rock » est blues ET rock. Un site plus ancien ne les sert pas :
+    /// la lecture se replie alors sur `[genre]` ([`annuaire_depuis_json`]).
+    /// Lire de préférence [`StationAnnuaire::genres_ou_genre`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quality: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -711,6 +719,16 @@ pub struct FluxAnnuaire {
 }
 
 impl StationAnnuaire {
+    /// #7215 — les genres de la fiche : `genres`, sinon le seul `genre` (une
+    /// fiche construite sans `genres`, ou relevée sur un site plus ancien).
+    pub fn genres_ou_genre(&self) -> Vec<&str> {
+        if self.genres.is_empty() {
+            self.genre.as_deref().into_iter().collect()
+        } else {
+            self.genres.iter().map(String::as_str).collect()
+        }
+    }
+
     /// #7177 — les flux que l'on peut choisir pour cette fiche : chacune de
     /// ses adresses publiées (`stream_urls`, la principale d'abord), avec le
     /// format et le débit que la v2 en donne. Une adresse sans détail (une
@@ -812,6 +830,26 @@ pub fn annuaire_depuis_json(brut: &[Value]) -> Vec<StationAnnuaire> {
                 .and_then(Value::as_array)
                 .map(|c| c.iter().filter_map(|c| texte(c, "slug")).collect())
                 .unwrap_or_default();
+            let genre = texte(item, "genre");
+            // #7215 — `genres` (site du 27/10/2026), sans vide ni doublon ;
+            // un site plus ancien n'a que `genre` : repli sur `[genre]`.
+            let mut genres: Vec<String> = Vec::new();
+            for g in item
+                .get("genres")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|g| !g.is_empty())
+            {
+                if !genres.iter().any(|x| x.eq_ignore_ascii_case(g)) {
+                    genres.push(g.to_string());
+                }
+            }
+            if genres.is_empty() {
+                genres.extend(genre.clone());
+            }
             let keywords = item
                 .get("keywords")
                 .and_then(Value::as_array)
@@ -845,7 +883,8 @@ pub fn annuaire_depuis_json(brut: &[Value]) -> Vec<StationAnnuaire> {
                 name,
                 logo_url: texte(item, "logo_url").map(absolue),
                 country: texte(item, "country"),
-                genre: texte(item, "genre"),
+                genre,
+                genres,
                 quality: texte(item, "quality"),
                 website_url: texte(item, "website_url"),
                 // #7011 : une station proposée sur le portail n'a pas de
@@ -904,6 +943,8 @@ pub(crate) fn annuaire_correspond(station: &StationAnnuaire, requete: &str) -> b
     ]
     .into_iter()
     .flatten()
+    // #7215 — tous les genres de la fiche, pas seulement le premier.
+    .chain(station.genres.iter().map(String::as_str))
     .chain(station.keywords.iter().map(String::as_str))
     .any(|champ| repli(champ).contains(&motif))
 }
