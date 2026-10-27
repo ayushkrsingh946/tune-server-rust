@@ -423,16 +423,16 @@ async fn handle_event(
                             enrichi = enrichir_appareil_airplay(d, &device);
                         }
                         debug!(id = %dev_id, name = %device.name, host = %device.host, service = service_type, "mdns_dup_skipped");
-                        if enrichi {
-                            if let Some(d) = st.devices.values().find(|d| {
+                        if enrichi
+                            && let Some(d) = st.devices.values().find(|d| {
                                 d.device_type == OutputType::Airplay
                                     && meme_appareil_airplay(d, &device)
-                            }) {
-                                let d_clone = d.clone();
-                                drop(st);
-                                let _ = event_tx.send(MdnsEvent::DeviceUpdated(d_clone)).await;
-                                return;
-                            }
+                            })
+                        {
+                            let d_clone = d.clone();
+                            drop(st);
+                            let _ = event_tx.send(MdnsEvent::DeviceUpdated(d_clone)).await;
+                            return;
                         }
                         drop(st);
                         return;

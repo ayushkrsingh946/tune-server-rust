@@ -31,7 +31,9 @@ pub(crate) fn bibliotheque() -> Arc<dyn DbBackend> {
         )
         .unwrap();
     }
-    let pistes: &[(i64, i64, Option<(&str, Option<&str>)>)] = &[
+    // (piste, album, mesure : verdict et raison)
+    type Piste<'a> = (i64, i64, Option<(&'a str, Option<&'a str>)>);
+    let pistes: &[Piste] = &[
         (11, 1, Some(("verifie", None))),
         (12, 1, Some(("verifie", None))),
         (21, 2, Some(("verifie", None))),

@@ -237,7 +237,7 @@ pub fn reset_envelope(
 const OBFUSCATION_KEY: &[u8; 32] = b"TuneConfigBackup2026-obfuscate!!";
 
 fn deobfuscate(encoded: &str) -> Result<Vec<u8>, String> {
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         return Err("odd-length hex string".into());
     }
     let xored: Vec<u8> = (0..encoded.len())
@@ -416,9 +416,10 @@ fn ajouter_les_mac(backend: &Arc<dyn DbBackend>, zones: &mut [Value]) {
     }
 }
 
-fn export_settings(
-    backend: &Arc<dyn DbBackend>,
-) -> Result<(Vec<(String, String)>, Vec<Value>, Vec<Value>), String> {
+/// Réglages généraux (clé, valeur), préréglages d'égaliseur et profils de pièce.
+type ReglagesExportes = (Vec<(String, String)>, Vec<Value>, Vec<Value>);
+
+fn export_settings(backend: &Arc<dyn DbBackend>) -> Result<ReglagesExportes, String> {
     let settings = SettingsRepo::with_backend(backend.clone());
     let all = settings.all()?;
 
