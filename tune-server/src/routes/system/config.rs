@@ -331,6 +331,8 @@ pub(super) async fn get_config(
         ("tidal_enabled", json!(true)),
         ("qobuz_enabled", json!(true)),
         ("youtube_enabled", json!(true)),
+        // #7152 — pays de la recherche de podcasts ; vide = automatique.
+        (crate::routes::podcasts::CLE_PAYS_PODCASTS, json!("")),
         // #5247 — pays des tendances YouTube Music ; vide = automatique.
         (
             tune_core::streaming::youtube_decouverte::CLE_PAYS_TENDANCES,
@@ -1484,6 +1486,31 @@ fn normaliser_pays_tendances_youtube(
     Ok(())
 }
 
+/// #7152 — le pays de la recherche de podcasts : deux lettres, ou vide
+/// (« auto » compris) pour automatique. Refusé sinon, en le disant.
+fn normaliser_pays_podcasts(values: &mut serde_json::Map<String, Value>) -> Result<(), AppError> {
+    let cle = crate::routes::podcasts::CLE_PAYS_PODCASTS;
+    let Some(brut) = values.get(cle) else {
+        return Ok(());
+    };
+    let texte = match brut {
+        Value::Null => String::new(),
+        Value::String(s) => s.trim().to_string(),
+        autre => autre.to_string(),
+    };
+    let normalise = if texte.is_empty() || texte.eq_ignore_ascii_case("auto") {
+        String::new()
+    } else if texte.len() == 2 && texte.bytes().all(|b| b.is_ascii_alphabetic()) {
+        texte.to_ascii_lowercase()
+    } else {
+        return Err(AppError::bad_request(format!(
+            "{cle} : code pays à deux lettres attendu (fr, de…) ou vide pour automatique, reçu {texte:?}"
+        )));
+    };
+    values.insert(cle.to_string(), Value::String(normalise));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests_pays_tendances_youtube_5247 {
     use super::*;
@@ -1683,6 +1710,7 @@ pub(super) async fn update_config(
     // lieu d'être acceptée puis ramenée en silence à la lecture.
     normaliser_plafond_aleatoire(&mut values)?;
     normaliser_pays_tendances_youtube(&mut values)?;
+    normaliser_pays_podcasts(&mut values)?;
     normaliser_vitesse_des_analyses(&mut values)?;
     normaliser_nom_du_serveur(&mut values)?;
     normaliser_levee_du_bridage(&mut values)?;
