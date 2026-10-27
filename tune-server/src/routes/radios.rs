@@ -654,6 +654,58 @@ pub struct StationAnnuaire {
     pub codec: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<i32>,
+    /// #7177 (web#2443) — le détail des flux publiés de la fiche v2 (format,
+    /// débit), pour que l'écran propose de choisir son flux préféré. Vide pour
+    /// une entrée v1. [`StationAnnuaire::flux_proposes`] en fait la liste
+    /// rendue par l'API.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flux: Vec<FluxAnnuaire>,
+}
+
+/// #7177 — un flux publié d'une fiche de l'annuaire, tel que l'API le rend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct FluxAnnuaire {
+    pub url: String,
+    /// `AAC`, `MP3`, `FLAC`… tel que l'annuaire l'écrit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<i32>,
+    /// Flux HLS (`.m3u8`).
+    pub hls: bool,
+    /// Le flux principal de la fiche (son `stream_url`).
+    pub primary: bool,
+}
+
+impl StationAnnuaire {
+    /// #7177 — les flux que l'on peut choisir pour cette fiche : chacune de
+    /// ses adresses publiées (`stream_urls`, la principale d'abord), avec le
+    /// format et le débit que la v2 en donne. Une adresse sans détail (une
+    /// entrée v1) est rendue quand même, sans format.
+    pub fn flux_proposes(&self) -> Vec<FluxAnnuaire> {
+        let mut adresses: Vec<&str> = vec![self.stream_url.as_str()];
+        for u in &self.stream_urls {
+            if !adresses.contains(&u.as_str()) {
+                adresses.push(u);
+            }
+        }
+        adresses
+            .into_iter()
+            .map(|url| {
+                let detail = self.flux.iter().find(|f| f.url == url);
+                FluxAnnuaire {
+                    url: url.to_string(),
+                    codec: detail.and_then(|f| f.codec.clone()),
+                    bitrate: detail.and_then(|f| f.bitrate),
+                    sample_rate: detail.and_then(|f| f.sample_rate),
+                    hls: detail.is_some_and(|f| f.hls),
+                    primary: url == self.stream_url,
+                }
+            })
+            .collect()
+    }
 }
 
 /// Racine des adresses relatives de l'annuaire (les `logo_url` en `/storage/…`).
@@ -741,6 +793,23 @@ pub fn annuaire_depuis_json(brut: &[Value]) -> Vec<StationAnnuaire> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let entier = |v: Option<&Value>| {
+                v.and_then(Value::as_i64)
+                    .and_then(|b| i32::try_from(b).ok())
+            };
+            let flux = flux_publies
+                .iter()
+                .filter_map(|s| {
+                    Some(FluxAnnuaire {
+                        url: texte(s, "url")?,
+                        codec: texte(s, "format"),
+                        bitrate: entier(s.get("bitrate")),
+                        sample_rate: entier(s.get("sample_rate")),
+                        hls: s.get("is_hls").and_then(Value::as_bool) == Some(true),
+                        primary: false,
+                    })
+                })
+                .collect();
             Some(StationAnnuaire {
                 name,
                 logo_url: texte(item, "logo_url").map(absolue),
@@ -760,6 +829,7 @@ pub fn annuaire_depuis_json(brut: &[Value]) -> Vec<StationAnnuaire> {
                     .and_then(|b| i32::try_from(b).ok()),
                 stream_urls,
                 stream_url,
+                flux,
             })
         })
         .collect()

@@ -542,3 +542,119 @@ async fn l_ouverture_relit_l_annuaire_quand_l_heure_est_passee() {
         assert_eq!(total.load(Ordering::SeqCst), attendu);
     }
 }
+
+// ── #7177 (web#2443) — la fiche « Voir » : flux disponibles, flux préféré ───
+
+const FIP_MIDFI: &str = "https://icecast.radiofrance.fr/fip-midfi.mp3?id=radiofrance";
+
+#[tokio::test]
+async fn l_annuaire_et_mes_radios_rendent_les_flux_de_la_fiche_et_ses_categories() {
+    let (_state, app, _d) = etat_avec_annuaire().await;
+    let (_, ann) = requete(&app, "GET", "/api/v1/radios/directory?q=fip", None).await;
+    let item = ann["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["external_id"] == "S000973")
+        .unwrap();
+    let flux = item["streams"].as_array().expect("streams");
+    assert_eq!(flux.len(), 4, "{item}");
+    assert_eq!(flux[0]["url"], item["stream_url"]);
+    assert_eq!(flux[0]["primary"], true);
+    assert!(
+        flux.iter()
+            .any(|f| f["url"] == FIP_MIDFI && f["codec"] == "MP3" && f["bitrate"] == 128),
+        "{item}"
+    );
+
+    let (s, fip) = requete(&app, "POST", "/api/v1/radios/directory/S000973/add", None).await;
+    assert!(s.is_success(), "{fip}");
+    assert_eq!(fip["annuaire"]["streams"].as_array().unwrap().len(), 4);
+    assert_eq!(fip["annuaire"]["categories"], json!(["eclectic"]));
+    assert_eq!(fip["annuaire"]["radio_metadata_key"], "fip");
+}
+
+#[tokio::test]
+async fn le_flux_prefere_se_choisit_parmi_ceux_de_la_fiche_et_tient() {
+    let (state, app, _d) = etat_avec_annuaire().await;
+    let repo = RadioRepo::with_backend(state.backend.clone());
+    let (_, fip) = requete(&app, "POST", "/api/v1/radios/directory/S000973/add", None).await;
+    let id = fip["id"].as_i64().unwrap();
+
+    let (s, maj) = requete(
+        &app,
+        "POST",
+        &format!("/api/v1/radios/directory/preferred-stream/{id}"),
+        Some(json!({"stream_url": FIP_MIDFI})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{maj}");
+    assert_eq!(maj["stream_url"], FIP_MIDFI);
+    assert_eq!(maj["codec"], "mp3");
+    assert_eq!(maj["bitrate"], 128);
+    // Un flux secondaire de la fiche n'est pas un flux périmé.
+    assert_eq!(maj["annuaire"]["flux_change"], false);
+    assert_eq!(repo.get(id).unwrap().unwrap().url, FIP_MIDFI);
+    // La liste de « Mes radios » le rend tel quel, toujours liée à sa fiche.
+    let (_, radios) = requete(&app, "GET", "/api/v1/radios", None).await;
+    let st = radios
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap();
+    assert_eq!(st["stream_url"], FIP_MIDFI);
+    assert_eq!(st["annuaire"]["rapproche_par"], "id");
+    assert_eq!(st["annuaire"]["flux_change"], false);
+}
+
+#[tokio::test]
+async fn contre_epreuve_flux_hors_fiche_refuse_et_station_sans_fiche_refusee() {
+    let (state, app, _d) = etat_avec_annuaire().await;
+    let repo = RadioRepo::with_backend(state.backend.clone());
+    let (_, fip) = requete(&app, "POST", "/api/v1/radios/directory/S000973/add", None).await;
+    let id = fip["id"].as_i64().unwrap();
+    let avant = repo.get(id).unwrap().unwrap().url;
+
+    let (s, r) = requete(
+        &app,
+        "POST",
+        &format!("/api/v1/radios/directory/preferred-stream/{id}"),
+        Some(json!({"stream_url": "https://ailleurs.example/fip.mp3"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{r}");
+    assert_eq!(r["error"], "flux_hors_fiche");
+    assert_eq!(repo.get(id).unwrap().unwrap().url, avant);
+
+    // Une station saisie à la main n'a pas de fiche : elle garde « Modifier ».
+    let main = repo
+        .create(&RadioStation {
+            id: None,
+            name: "Ma radio".into(),
+            url: "https://perso.example/flux.mp3".into(),
+            homepage: None,
+            logo_url: None,
+            country: None,
+            language: None,
+            genre: None,
+            codec: None,
+            bitrate: None,
+            is_favorite: false,
+            last_played: None,
+            play_count: 0,
+        })
+        .unwrap();
+    let (s, r) = requete(
+        &app,
+        "POST",
+        &format!("/api/v1/radios/directory/preferred-stream/{main}"),
+        Some(json!({"stream_url": FIP_MIDFI})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{r}");
+    assert_eq!(
+        repo.get(main).unwrap().unwrap().url,
+        "https://perso.example/flux.mp3"
+    );
+}
