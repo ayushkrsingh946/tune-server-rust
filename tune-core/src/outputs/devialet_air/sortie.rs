@@ -542,14 +542,13 @@ struct SourceOuverte {
     cadence_envoyee: u32,
 }
 
-fn ouvrir_decodeur(
-    chemin: &str,
-    cadence: Option<u32>,
-    depuis_s: f64,
-) -> (
+/// Les octets PCM du décodeur, et la tâche qui les produit (profondeur, débit).
+type DecodeurOuvert = (
     mpsc::Receiver<Vec<u8>>,
     JoinHandle<Result<(u16, u32), String>>,
-) {
+);
+
+fn ouvrir_decodeur(chemin: &str, cadence: Option<u32>, depuis_s: f64) -> DecodeurOuvert {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(8);
     let (niveaux, niveaux_rx) = mpsc::unbounded_channel();
     drop(niveaux_rx);
