@@ -561,6 +561,21 @@ impl std::fmt::Display for RefusMusicBrainz {
     }
 }
 
+/// MusicBrainz n'a pas répondu, sans autre détail : l'erreur des transports
+/// injectés (albums manquants, arbre des genres, liens externes). Leurs
+/// appelants ne concluent rien d'une panne et n'en lisent pas la cause.
+/// #7154 : remplace l'erreur `()` de ces signatures (`clippy::result_unit_err`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SansReponse;
+
+impl std::fmt::Display for SansReponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("musicbrainz_sans_reponse")
+    }
+}
+
+impl std::error::Error for SansReponse {}
+
 async fn mb_get(path: &str, params: &[(&str, String)]) -> Result<Value, RefusMusicBrainz> {
     let client = crate::http::client::shared();
     let resp = client
