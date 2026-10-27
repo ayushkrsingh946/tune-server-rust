@@ -104,3 +104,26 @@ fn un_lancement_sans_logo_efface_le_precedent() {
     retenir_le_logo_de_lancement(flux, Some("  "));
     assert_eq!(logo_de_la_station(None, flux), None);
 }
+
+/// Le sondeur prend bien le logo par [`logo_de_la_station`] : relire
+/// `station.logo_url` seul remettrait le fond gris sans qu'aucun témoin
+/// ci-dessus ne le voie. La fonction est définie ailleurs : sa présence dans
+/// `radio.rs` ne peut venir que de l'appel.
+#[test]
+fn le_sondeur_prend_le_logo_par_logo_de_la_station() {
+    let sondeur = include_str!("radio.rs");
+    let debut = sondeur
+        .find("let station = station_du_now_playing(")
+        .expect("le sondeur cherche la station en base");
+    let pochette = sondeur
+        .find("vignette_du_pas_radio(meta.cover_url.as_deref(), logo_station.as_deref())")
+        .expect("le sondeur choisit la vignette du pas");
+    let entre = &sondeur[debut..pochette];
+    assert!(
+        entre.contains("let logo_station =")
+            && entre
+                .contains("logo_de_lancement::logo_de_la_station(station.as_ref(), &stream_url)"),
+        "le sondeur doit prendre le logo par logo_de_la_station, sinon une station \
+         hors de « Mes radios » perd son logo au premier titre (#7051)"
+    );
+}
