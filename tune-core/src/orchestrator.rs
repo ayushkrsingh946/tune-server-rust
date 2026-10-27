@@ -2363,3 +2363,6 @@ mod refus_asio_bloque_4556;
 /// ont ete rejoues sur la requete qui l'a pris.
 #[cfg(test)]
 mod refus_amont_4366;
+
+#[cfg(test)]
+mod deplacement_qobuz_6982_tests;
