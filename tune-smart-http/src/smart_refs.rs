@@ -556,6 +556,19 @@ pub(crate) fn track_ref_condition(field: &str, op: &str, value: &str, ctx: &RefC
 /// jeu de règles.
 fn referenced_smart_refs(rules_json: &str) -> Vec<(RefKind, i64)> {
     let rules: Vec<Value> = serde_json::from_str(rules_json).unwrap_or_default();
+    // #6287, étape 4 — une requête imbriquée enregistrée cite ses références
+    // dans son texte : ses feuilles comptent comme des règles.
+    let rules: Vec<Value> = rules
+        .into_iter()
+        .flat_map(|rule| {
+            if rule.get("field").and_then(|v| v.as_str()) == Some(crate::requete_enregistree::CHAMP)
+            {
+                crate::requete_enregistree::feuilles(&rule)
+            } else {
+                vec![rule]
+            }
+        })
+        .collect();
     rules
         .iter()
         .filter_map(|rule| {
