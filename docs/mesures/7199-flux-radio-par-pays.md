@@ -61,6 +61,72 @@ Ils ne sont pas présentés comme couverts par les doublures locales.
 
 ## Contre-épreuve exécutée
 
+### Reproduction indépendante
+
+La reproduction exige un espace autorisant les écritures temporaires : source,
+sauvegardes et sorties de compilation. Un clone strictement en lecture ne
+permet pas cette opération. Une nouvelle exécution par le développeur ne
+remplace pas celle du testeur ; l'autorisation de son espace doit être réglée
+avant l'essai. Aucun changement de droits n'est effectué par cette procédure.
+
+Depuis la racine d'un clone propre du candidat, exécuter le bloc suivant avec
+Bash. Il conserve le test intact, remplace seulement le prédicat de production,
+exige l'échec de l'assertion attendue après compilation, puis restaure le fichier
+par copie et rejoue le même test. Les journaux et sauvegardes restent dans le
+répertoire indiqué à la fin. Ne faire ni commit ni poussée pendant cet essai.
+
+```bash
+set -euo pipefail
+test -z "$(git status --porcelain)"
+proof_dir=$(mktemp -d "$(git rev-parse --git-dir)/contre-epreuve-7199.XXXXXX")
+source_file=tune-server/src/routes/radios_geofencing_7199.rs
+test_file=tune-server/src/routes/radios_geofencing_7199_tests.rs
+cp "$source_file" "$proof_dir/source.rs"
+cp "$test_file" "$proof_dir/tests.rs"
+trap 'cp "$proof_dir/source.rs" "$source_file"' EXIT
+
+run_witness() {
+    CARGO_BUILD_JOBS=4 cargo test -p tune-server --no-default-features --lib \
+        country_filter_rejects_the_foreign_primary_7199 -- \
+        --exact routes::radios::geofencing::tests::country_filter_rejects_the_foreign_primary_7199
+}
+
+run_witness > "$proof_dir/avant.log" 2>&1
+python3 - <<'PY'
+from pathlib import Path
+
+path = Path("tune-server/src/routes/radios_geofencing_7199.rs")
+source = path.read_text()
+start = source.index("        .filter(|f| {")
+end = source.index("        .max_by_key(|f| {", start)
+assert source.count("        .filter(|f| {") == 1
+path.write_text(source[:start] + "        .filter(|_| true)\n" + source[end:])
+PY
+cmp "$test_file" "$proof_dir/tests.rs"
+red_status=0
+run_witness > "$proof_dir/rouge.log" 2>&1 || red_status=$?
+test "$red_status" -eq 101
+rg -F 'test result: FAILED. 0 passed; 1 failed;' "$proof_dir/rouge.log"
+rg -F 'le flux principal réservé au Royaume-Uni doit être écarté en France' "$proof_dir/rouge.log"
+rg -F 'left: "https://radio.example/gb.m3u8"' "$proof_dir/rouge.log"
+rg -F 'right: "https://radio.example/fr.aac"' "$proof_dir/rouge.log"
+
+cp "$proof_dir/source.rs" "$source_file"
+cmp "$source_file" "$proof_dir/source.rs"
+cmp "$test_file" "$proof_dir/tests.rs"
+run_witness > "$proof_dir/apres.log" 2>&1
+rg -F 'test result: ok. 1 passed; 0 failed;' "$proof_dir/apres.log"
+test -z "$(git status --porcelain)"
+trap - EXIT
+printf 'Journaux et sauvegardes : %s\n' "$proof_dir"
+```
+
+Le test `empty_unpublished_or_malformed_v2_never_reopens_legacy_7199`
+couvre déjà explicitement `streams: []` ; aucun nouveau témoin ni changement
+de sélection n'est nécessaire pour ce cas.
+
+### Exécution initiale du développeur
+
 Après un premier passage vert des 70 tests radio ciblés (dont les 11 nouveaux),
 le prédicat de sélection des flux a été forcé à `true`, dans le code de
 production seulement. Aucun témoin n’a été modifié.
