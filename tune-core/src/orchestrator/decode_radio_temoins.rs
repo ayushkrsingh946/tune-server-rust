@@ -758,7 +758,9 @@ async fn une_station_hls_he_aac_est_decodee_jusqu_au_pcm_a_48_khz() {
         octets.extend(morceau);
     }
     let gauche: Vec<f32> = octets
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|t| f32::from(i16::from_le_bytes([t[0], t[1]])) / 32768.0)
         .collect();
     let part = part_au_dessus_de_12_khz(&gauche[8192..], 48_000);
