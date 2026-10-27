@@ -2675,6 +2675,16 @@ pub(super) async fn get_env(State(state): State<AppState>) -> Json<Value> {
         "spotify_redirect_uri": spotify_redirect_uri,
         "spotify_redirect_uri_refus": spotify_redirect_uri_refus,
         "spotify_client_id_configure": spotify_client_id_configure,
+        // renesenses/tune-server-rust#7074 — Tune tourne-t-il dans un conteneur ?
+        // « Redémarrer » relance le binaire en place (`execv`, PID 1 dans
+        // l'image) ; s'il échoue, le conteneur sort et ne revient que sous une
+        // politique de redémarrage. Le client le dit avant de redémarrer.
+        "container": crate::conteneur::detecter(),
+        "container_id": std::env::var("HOSTNAME")
+            .ok()
+            .as_deref()
+            .and_then(crate::conteneur::identifiant_court)
+            .map(str::to_string),
     }))
 }
 
@@ -4056,6 +4066,11 @@ pub(super) async fn stop(_admin: crate::auth::RequireAdmin) -> impl IntoResponse
 }
 
 pub(super) async fn restart(_admin: crate::auth::RequireAdmin) -> impl IntoResponse {
+    if let Some(moteur) = crate::conteneur::detecter() {
+        // #7074 — dans un conteneur, un `execv` qui échoue arrête le
+        // conteneur : le journal le dit, c'est ce qu'on cherchera.
+        tracing::info!(moteur, "restart_in_container");
+    }
     tokio::spawn(async {
         // Let the HTTP response flush before we swap the process image.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
