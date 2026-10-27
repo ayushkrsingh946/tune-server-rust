@@ -477,7 +477,9 @@ pub(super) fn spec_du_puits_natif_vers(source: AudioSpec, voies: u16) -> AudioSp
 /// jamais regarder la frontière de trame.
 pub(super) fn mots_natifs_du_bloc(bloc: BlocPcm<'_>) -> Vec<i32> {
     bloc.octets()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|mot| i32::from_le_bytes([mot[0], mot[1], mot[2], mot[3]]))
         .collect()
 }
@@ -813,7 +815,7 @@ mod tests {
         let force_silent = AtomicBool::new(false);
         let mut puits =
             PuitsAnneauNatif::sur(anneau.clone(), spec, &stop_rx, &paused, &force_silent);
-        let mots: Vec<i32> = (0..16).map(|i| (i as i32 - 8) << 8).collect();
+        let mots: Vec<i32> = (0..16).map(|i| (i - 8) << 8).collect();
         let bloc: Vec<u8> = mots.iter().flat_map(|m| m.to_le_bytes()).collect();
         assert!(puits.ecrire(spec.bloc(&bloc)));
         let mut lus = vec![0i32; 16];

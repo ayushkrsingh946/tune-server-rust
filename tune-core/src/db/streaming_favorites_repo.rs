@@ -715,7 +715,10 @@ impl StreamingFavoritesRepo {
             let params: [&dyn ToSqlValue; 1] = [&pid];
             self.db.query_many(&sql, &params)?
         };
-        Ok(rows.iter().map(row_to_streaming_favorite).collect())
+        Ok(rows
+            .iter()
+            .map(|cols| row_to_streaming_favorite(cols))
+            .collect())
     }
 
     /// Les mêmes favoris, rangés selon `tri` (#2001).
@@ -751,7 +754,10 @@ impl StreamingFavoritesRepo {
                 // entre `created_at` et `position` dans SELECT_COLS_POUR_RANG.
                 r.get(14).and_then(|v| v.as_i64())
             });
-            return Ok(rows.iter().map(row_to_streaming_favorite).collect());
+            return Ok(rows
+                .iter()
+                .map(|cols| row_to_streaming_favorite(cols))
+                .collect());
         }
 
         let mut items = self.list(profile_id, item_type)?;
@@ -817,7 +823,7 @@ impl StreamingFavoritesRepo {
     }
 }
 
-fn row_to_streaming_favorite(cols: &Vec<SqlValue>) -> StreamingFavorite {
+fn row_to_streaming_favorite(cols: &[SqlValue]) -> StreamingFavorite {
     StreamingFavorite {
         id: cols.first().and_then(|v| v.as_i64()).unwrap_or(0),
         profile_id: cols.get(1).and_then(|v| v.as_i64()).unwrap_or(1),

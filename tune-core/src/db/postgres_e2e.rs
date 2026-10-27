@@ -238,7 +238,8 @@ async fn pg_coffrets_auto_marqueur_de_tete() {
 async fn pg_edition_album_scenarios() {
     use crate::db::edition_album::tests as e;
     let db = pg_or_skip!();
-    let scenarios: [(&str, fn(&Arc<dyn DbBackend>)); 8] = [
+    type Scenario = fn(&Arc<dyn DbBackend>);
+    let scenarios: [(&str, Scenario); 8] = [
         ("aller_retour", e::scenario_aller_retour),
         ("disque_vide", e::scenario_disque_vide),
         ("refus", e::scenario_refus),
@@ -1231,7 +1232,9 @@ async fn pg_6285_filtre_et_regles_du_verdict_hires() {
         )
         .unwrap();
     }
-    let pistes: &[(i64, i64, Option<(&str, Option<&str>)>)] = &[
+    // (piste, album, mesure : verdict et raison)
+    type Piste<'a> = (i64, i64, Option<(&'a str, Option<&'a str>)>);
+    let pistes: &[Piste] = &[
         (11, 1, Some(("verifie", None))),
         (12, 1, Some(("verifie", None))),
         (21, 2, Some(("verifie", None))),
