@@ -912,7 +912,10 @@ mod tests {
         let descendu = r
             .move_folder(rock.id, Some(musique.id), Some(rock.position + 1))
             .unwrap();
-        assert_eq!(descendu.position, 1);
+        assert_eq!(
+            descendu.position, 1,
+            "une position demandée doit faire descendre le rayon d'un cran"
+        );
         assert!(descendu.manual_order);
         assert_eq!(
             noms(&r, Some(musique.id)),
