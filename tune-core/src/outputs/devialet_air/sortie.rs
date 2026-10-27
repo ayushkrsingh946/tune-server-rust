@@ -542,14 +542,13 @@ struct SourceOuverte {
     cadence_envoyee: u32,
 }
 
-fn ouvrir_decodeur(
-    chemin: &str,
-    cadence: Option<u32>,
-    depuis_s: f64,
-) -> (
+/// Les octets PCM du décodeur, et la tâche qui les produit (profondeur, débit).
+type DecodeurOuvert = (
     mpsc::Receiver<Vec<u8>>,
     JoinHandle<Result<(u16, u32), String>>,
-) {
+);
+
+fn ouvrir_decodeur(chemin: &str, cadence: Option<u32>, depuis_s: f64) -> DecodeurOuvert {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(8);
     let (niveaux, niveaux_rx) = mpsc::unbounded_channel();
     drop(niveaux_rx);
@@ -621,7 +620,9 @@ async fn ouvrir_la_source(
             reste.extend_from_slice(&bloc);
             let complets = reste.len() / 6 * 6;
             let lot: Vec<[i32; 2]> = reste[..complets]
-                .chunks_exact(6)
+                .as_chunks::<6>()
+                .0
+                .iter()
                 .map(|t| [lire_24_le(&t[0..3]), lire_24_le(&t[3..6])])
                 .collect();
             reste.drain(..complets);

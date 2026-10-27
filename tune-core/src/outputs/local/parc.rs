@@ -821,11 +821,11 @@ fn lister_sous_le_verrou_de_balayage(
         );
         return parc;
     };
-    if let Some((last_scan, ref cached)) = *guard {
-        if last_scan.elapsed().as_secs() < SCAN_COOLDOWN_SECS {
-            debug!("local_audio_scan_cached");
-            return cached.clone();
-        }
+    if let Some((last_scan, ref cached)) = *guard
+        && last_scan.elapsed().as_secs() < SCAN_COOLDOWN_SECS
+    {
+        debug!("local_audio_scan_cached");
+        return cached.clone();
     }
     let result = enumerer();
     // Publier AVANT de relâcher `SCAN_GUARD` : le parc devient lisible sans
@@ -1062,7 +1062,7 @@ pub(super) fn list_audio_devices_uncached(backend: &str) -> Vec<AudioDevice> {
                 // SUPPOSÉE (`caps_reliable = false`) n'a jamais rien mesuré —
                 // ce drapeau était calculé puis jeté.
                 let rates_evidence =
-                    sample_rate_evidence_for_device(&host_name, &endpoint_id, caps_reliable);
+                    sample_rate_evidence_for_device(host_name, &endpoint_id, caps_reliable);
 
                 // Collapse duplicates. On Linux PipeWire lists the same physical
                 // output repeatedly with varying caps, so collapse by NAME and
@@ -1159,7 +1159,7 @@ pub(super) fn list_audio_devices_uncached(backend: &str) -> Vec<AudioDevice> {
     }
 
     if devices.is_empty() {
-        log_no_devices_diagnostics(&host_name);
+        log_no_devices_diagnostics(host_name);
     } else {
         info!(count = devices.len(), "local_audio_devices_enumerated");
     }
