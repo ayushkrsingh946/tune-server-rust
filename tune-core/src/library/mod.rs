@@ -10,6 +10,8 @@ pub mod audit;
 pub mod cover_fetcher;
 /// #6332 — compléter au rescan le débit des pistes déjà en base.
 pub mod debit_des_pistes;
+/// #6917 — ne dédoublonner que les copies d'une même racine de musique.
+pub mod dedoublonnage_par_racine;
 pub mod duplicate_detector;
 /// Les exemplaires d'une piste dans plusieurs répertoires (#4907).
 pub mod exemplaires;
