@@ -27,7 +27,8 @@ use tracing::{debug, info, warn};
 const PCM_SAMPLE_RATE: u32 = 44100;
 const PCM_CHANNELS: u16 = 2;
 const PCM_BITS_PER_SAMPLE: u16 = 16;
-const DEFAULT_BITRATE: u32 = 320;
+/// Le `--bitrate` passé à librespot : le plus haut qu'il accepte.
+pub const DEFAULT_BITRATE: u32 = 320;
 
 /// Octets d'une trame stéréo 16 bits.
 pub const OCTETS_PAR_TRAME: usize = 4;
@@ -40,6 +41,55 @@ const CANAL: usize = 8;
 /// Après `end_of_track`, la pompe vide le tuyau puis ferme le flux dès que
 /// librespot s'est tu pendant ce délai.
 const SILENCE_DE_FIN: Duration = Duration::from_millis(300);
+
+/// #6946 — le code stable de la raison du plafond : librespot ne lit aucun
+/// format sans perte de Spotify.
+pub const CODE_PLAFOND_LIBRESPOT: &str = "librespot_no_lossless";
+
+/// #6946 — ce que Spotify livre RÉELLEMENT à librespot, et pourquoi.
+///
+/// Constat dans les sources de librespot 0.8.0 (crates.io, la version que
+/// `cargo install librespot` installe dans les images) :
+///
+/// * `--bitrate` n'accepte que `96`, `160` et `320`
+///   (`librespot-playback/src/config.rs`, `enum Bitrate`, lignes 7-12 ;
+///   `src/main.rs`, ligne 1580) ;
+/// * `load_remote_track` choisit le fichier dans une liste qui ne contient
+///   que de l'Ogg Vorbis et du MP3, 320 kbit/s en tête pour `--bitrate 320`
+///   (`librespot-playback/src/player.rs`, lignes 1010-1038). `FLAC_FLAC` et
+///   `FLAC_FLAC_24BIT` existent dans `librespot-metadata/src/audio/file.rs`
+///   (lignes 29 et 33), mais aucune liste ne les demande.
+///
+/// Le débit est donc un PLAFOND : un titre absent en 320 kbit/s (la plupart
+/// des podcasts) descend à la variante suivante de la liste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct QualiteDeLibrespot {
+    /// Le codec reçu, en minuscules, tel que `AudioFormat::from_extension`
+    /// le reconnaît.
+    pub codec: &'static str,
+    /// Son nom à l'écran.
+    pub format: &'static str,
+    /// Le débit demandé à Spotify, en kbit/s : le plus haut que librespot
+    /// sache lire.
+    pub bitrate_kbps: u32,
+    /// `true` : `bitrate_kbps` est un plafond, pas une mesure.
+    pub ceiling: bool,
+    pub lossless: bool,
+    /// [`CODE_PLAFOND_LIBRESPOT`].
+    pub reason_code: &'static str,
+}
+
+/// La qualité reçue pour le `--bitrate` passé à librespot.
+pub fn qualite_de_librespot(bitrate: u32) -> QualiteDeLibrespot {
+    QualiteDeLibrespot {
+        codec: "ogg",
+        format: "Ogg Vorbis",
+        bitrate_kbps: bitrate,
+        ceiling: true,
+        lossless: false,
+        reason_code: CODE_PLAFOND_LIBRESPOT,
+    }
+}
 
 /// Préfixe des lignes écrites sur stderr par le script `--onevent`.
 pub const PREFIXE_EVENEMENT: &str = "TUNE_EVENT\t";
@@ -355,6 +405,11 @@ impl LibrespotDaemon {
         self.pompe.clone()
     }
 
+    /// #6946 — ce que Spotify livre à ce librespot.
+    pub fn qualite_recue(&self) -> QualiteDeLibrespot {
+        qualite_de_librespot(self.bitrate)
+    }
+
     /// #6933 — la dernière erreur de librespot depuis son dernier démarrage.
     pub fn derniere_erreur(&self) -> Option<String> {
         self.derniere_erreur.lock().ok().and_then(|e| e.clone())
@@ -609,6 +664,11 @@ impl SpotifyConnectManager {
         self.daemon.pompe()
     }
 
+    /// #6946 — ce que Spotify livre réellement au récepteur.
+    pub fn qualite_recue(&self) -> QualiteDeLibrespot {
+        self.daemon.qualite_recue()
+    }
+
     /// #6933 — la dernière erreur écrite par librespot depuis son démarrage.
     pub fn derniere_erreur_librespot(&self) -> Option<String> {
         self.daemon.derniere_erreur()
@@ -678,6 +738,9 @@ impl SpotifyConnectManager {
             "zone_id": zone_id,
             "active": running,
             "binary_available": binary_available(),
+            // #6946 — la qualité réellement reçue, que Réglages › Spotify
+            // affiche au lieu de laisser croire à un réglage sans perte.
+            "quality": self.qualite_recue(),
         })
     }
 }
@@ -816,6 +879,22 @@ mod tests {
         assert_eq!(sr, 44100);
         assert_eq!(ch, 2);
         assert_eq!(bd, 16);
+    }
+
+    /// #6946 — le statut du récepteur (Réglages › Spotify) dit ce que
+    /// librespot reçoit : de l'Ogg Vorbis, 320 kbit/s au plus, jamais du sans
+    /// perte, et le code de la raison.
+    #[tokio::test]
+    async fn qualite_6946_le_statut_dit_ogg_vorbis_320_plafond_de_librespot() {
+        let recepteur = SpotifyConnectManager::new("Tune".into(), 0);
+        let statut = recepteur.status().await;
+        let q = &statut["quality"];
+        assert_eq!(q["codec"], "ogg", "{statut}");
+        assert_eq!(q["format"], "Ogg Vorbis", "{statut}");
+        assert_eq!(q["bitrate_kbps"], 320, "{statut}");
+        assert_eq!(q["ceiling"], true, "un plafond, pas une mesure : {statut}");
+        assert_eq!(q["lossless"], false, "{statut}");
+        assert_eq!(q["reason_code"], CODE_PLAFOND_LIBRESPOT, "{statut}");
     }
 
     /// #6018 — le défaut du ticket : sans lecteur de stdout, librespot se
