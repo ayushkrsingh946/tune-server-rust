@@ -873,16 +873,27 @@ async fn ajouter(
 
     let (id, statut) = match existante {
         Some(st) => (st.id, StatusCode::OK),
-        None => match repo.create(&station_depuis_fiche(&fiche)) {
-            Ok(id) => {
-                state.event_bus.emit(
-                    "library.radios_changed",
-                    json!({"action": "created", "id": id, "external_id": external_id}),
-                );
-                (Some(id), StatusCode::CREATED)
+        None => {
+            let mut station = station_depuis_fiche(&fiche);
+            // Une fiche peut rester en favori même si aucun flux n'est
+            // accessible aujourd'hui ; c'est sa lecture qui sera refusée.
+            if let Ok(flux) = super::radios::geofencing::stream_for_directory(&state, &fiche, None)
+            {
+                station.url = flux.url;
+                station.codec = flux.codec.map(|c| c.to_ascii_lowercase());
+                station.bitrate = flux.bitrate;
             }
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-        },
+            match repo.create(&station) {
+                Ok(id) => {
+                    state.event_bus.emit(
+                        "library.radios_changed",
+                        json!({"action": "created", "id": id, "external_id": external_id}),
+                    );
+                    (Some(id), StatusCode::CREATED)
+                }
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+            }
+        }
     };
     let Some(id) = id else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1072,12 +1083,16 @@ async fn jouer(
         )
             .into_response();
     };
+    let flux = match super::radios::geofencing::stream_for_directory(&state, &fiche, None) {
+        Ok(flux) => flux,
+        Err(response) => return response.into_response(),
+    };
     Json(
         super::radios::jouer_un_flux(
             &state,
             zone_id,
             &fiche.name,
-            &fiche.stream_url,
+            &flux.url,
             fiche.logo_url.clone(),
         )
         .await,

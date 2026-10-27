@@ -331,6 +331,11 @@ pub(super) async fn get_config(
         ("tidal_enabled", json!(true)),
         ("qobuz_enabled", json!(true)),
         ("youtube_enabled", json!(true)),
+        // Pays déclaré pour les restrictions des radios ; vide = inconnu.
+        (
+            crate::routes::radios::geofencing::COUNTRY_SETTING,
+            json!(""),
+        ),
         // #7152 — pays de la recherche de podcasts ; vide = automatique.
         (crate::routes::podcasts::CLE_PAYS_PODCASTS, json!("")),
         // #5247 — pays des tendances YouTube Music ; vide = automatique.
@@ -1743,6 +1748,7 @@ pub(super) async fn update_config(
     normaliser_plafond_aleatoire(&mut values)?;
     normaliser_pays_tendances_youtube(&mut values)?;
     normaliser_pays_podcasts(&mut values)?;
+    crate::routes::radios::geofencing::normalize_setting(&mut values)?;
     normaliser_vitesse_des_analyses(&mut values)?;
     normaliser_nom_du_serveur(&mut values)?;
     normaliser_levee_du_bridage(&mut values)?;
