@@ -331,6 +331,8 @@ pub(super) async fn get_config(
         ("tidal_enabled", json!(true)),
         ("qobuz_enabled", json!(true)),
         ("youtube_enabled", json!(true)),
+        // #7152 — pays de la recherche de podcasts ; vide = automatique.
+        (crate::routes::podcasts::CLE_PAYS_PODCASTS, json!("")),
         // #5247 — pays des tendances YouTube Music ; vide = automatique.
         (
             tune_core::streaming::youtube_decouverte::CLE_PAYS_TENDANCES,
@@ -376,6 +378,13 @@ pub(super) async fn get_config(
         (
             tune_core::db::coffrets_auto::CLE_REGLAGE_AUTO,
             json!(tune_core::db::coffrets_auto::REGLAGE_AUTO_DEFAUT),
+        ),
+        // #6917 (fil 2397) — « Ne dédoublonner que sur un même support »,
+        // section Bibliothèque. Éteint par défaut (arbitrage du 27/10/2026),
+        // publié même absent de la base pour que la case s'affiche DÉCOCHÉE.
+        (
+            tune_core::library::dedoublonnage_par_racine::CLE,
+            json!(tune_core::library::dedoublonnage_par_racine::DEFAUT),
         ),
         // #4051 — le consentement LRCLIB, publié comme ses deux voisins de la
         // MÊME section « Bibliothèque » (`metadata_readonly`, `enrich_on_scan`).
@@ -1274,6 +1283,47 @@ fn normaliser_vitesse_des_analyses(
     Ok(())
 }
 
+/// Longueur maximale du nom du serveur, en caractères (#7044).
+pub(crate) const NOM_DU_SERVEUR_LONGUEUR_MAX: usize = 64;
+
+/// #7044 — le nom que l'utilisateur donne à son serveur (« Alec-server »).
+///
+/// Il est relu tel quel par d'autres programmes : l'interface, les autres
+/// serveurs Tune du réseau et la page publique des radios de mozaiklabs.fr
+/// (« Connecté à … »), qui le lit dans `GET /system/health` → `server_name`.
+/// Un nom qui sort de là doit donc être un texte court et affichable : espaces
+/// de tête et de queue retirés, 64 caractères au plus, aucun caractère de
+/// contrôle (retour à la ligne, tabulation, NUL). Vide ou `null` : on efface le
+/// réglage et le nom d'hôte reprend sa place. Un nom refusé est REFUSÉ (400),
+/// jamais tronqué en silence.
+fn normaliser_nom_du_serveur(values: &mut serde_json::Map<String, Value>) -> Result<(), AppError> {
+    let Some(brut) = values.get("server_name") else {
+        return Ok(());
+    };
+    let nom = match brut {
+        Value::Null => "",
+        Value::String(s) => s.trim(),
+        autre => {
+            return Err(AppError::bad_request(format!(
+                "server_name : un texte est attendu, pas {autre}"
+            )));
+        }
+    };
+    if nom.chars().count() > NOM_DU_SERVEUR_LONGUEUR_MAX {
+        return Err(AppError::bad_request(format!(
+            "server_name : {NOM_DU_SERVEUR_LONGUEUR_MAX} caractères au plus"
+        )));
+    }
+    if nom.chars().any(char::is_control) {
+        return Err(AppError::bad_request(
+            "server_name : aucun caractère de contrôle (retour à la ligne, tabulation…)",
+        ));
+    }
+    let nom = nom.to_string();
+    values.insert("server_name".to_string(), Value::String(nom));
+    Ok(())
+}
+
 /// #6713 — « lever le bridage sans température lisible » : un booléen (ou
 /// `"true"`/`"false"`), sinon 400. Une autre valeur, gardée telle quelle,
 /// se relirait « non » sans un mot.
@@ -1443,6 +1493,31 @@ fn normaliser_pays_tendances_youtube(
     Ok(())
 }
 
+/// #7152 — le pays de la recherche de podcasts : deux lettres, ou vide
+/// (« auto » compris) pour automatique. Refusé sinon, en le disant.
+fn normaliser_pays_podcasts(values: &mut serde_json::Map<String, Value>) -> Result<(), AppError> {
+    let cle = crate::routes::podcasts::CLE_PAYS_PODCASTS;
+    let Some(brut) = values.get(cle) else {
+        return Ok(());
+    };
+    let texte = match brut {
+        Value::Null => String::new(),
+        Value::String(s) => s.trim().to_string(),
+        autre => autre.to_string(),
+    };
+    let normalise = if texte.is_empty() || texte.eq_ignore_ascii_case("auto") {
+        String::new()
+    } else if texte.len() == 2 && texte.bytes().all(|b| b.is_ascii_alphabetic()) {
+        texte.to_ascii_lowercase()
+    } else {
+        return Err(AppError::bad_request(format!(
+            "{cle} : code pays à deux lettres attendu (fr, de…) ou vide pour automatique, reçu {texte:?}"
+        )));
+    };
+    values.insert(cle.to_string(), Value::String(normalise));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests_pays_tendances_youtube_5247 {
     use super::*;
@@ -1510,6 +1585,31 @@ fn normaliser_scan_au_demarrage(
         Value::String(choix.to_string()),
     );
     Ok(None)
+}
+
+/// #6917 — « Ne dédoublonner que sur un même support » : `true` ou `false`,
+/// sinon 400. Une valeur illisible ne doit pas se lire « éteint » en silence.
+fn normaliser_dedoublonnage_par_racine(
+    values: &mut serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    let cle = tune_core::library::dedoublonnage_par_racine::CLE;
+    let Some(brut) = values.get(cle) else {
+        return Ok(());
+    };
+    let choix = match brut {
+        Value::Bool(b) => Some(*b),
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(choix) = choix else {
+        return Err(AppError::bad_request(format!("{cle} attend true ou false")));
+    };
+    values.insert(cle.to_string(), Value::Bool(choix));
+    Ok(())
 }
 
 /// Fil 2148 (#5792) — le délai de la sonde des partages réseau : un nombre de
@@ -1642,7 +1742,9 @@ pub(super) async fn update_config(
     // lieu d'être acceptée puis ramenée en silence à la lecture.
     normaliser_plafond_aleatoire(&mut values)?;
     normaliser_pays_tendances_youtube(&mut values)?;
+    normaliser_pays_podcasts(&mut values)?;
     normaliser_vitesse_des_analyses(&mut values)?;
+    normaliser_nom_du_serveur(&mut values)?;
     normaliser_levee_du_bridage(&mut values)?;
     normaliser_mesures_communautaires(&mut values)?;
     let politique_de_lecture = normaliser_politique_de_lecture(&mut values)?;
@@ -1653,6 +1755,7 @@ pub(super) async fn update_config(
     // Réglages) : retirée de la boucle générique, écrite plus bas, datée.
     let reponse_ecoutes = prendre_reponse_ecoutes(&mut values)?;
     let scan_au_demarrage_efface = normaliser_scan_au_demarrage(&mut values)?.is_some();
+    normaliser_dedoublonnage_par_racine(&mut values)?;
     let full_volume_confirmed = take_full_volume_confirmation(&mut values);
     let volume_lock_was_enabled =
         tune_core::audio::audiophile::global_volume_lock_enabled(&state.backend);
@@ -3183,21 +3286,19 @@ pub(crate) fn retirer_un_dossier(
             "music_dir_removed_purge_refusee — la confirmation ne couvre pas l'ampleur \
              constatée. Le dossier est retiré des réglages ; aucune piste n'a été supprimée."
         );
-        return Ok(json!({
-            "dirs": dirs,
-            "orphan_tracks": plan.tracks,
-            "purged": 0,
-            "purge_refused": true,
-            "purge_refused_reason": "confirmation_insuffisante",
-            "confirm_purge_required": plan.tracks,
-            "impact": impact_json(&plan),
-            "message": format!(
-                "Le dossier a bien été retiré des réglages. En revanche la confirmation \
-                 reçue ne couvre pas les {} pistes concernées : aucune n'a été supprimée. \
-                 Confirmez ce nombre exact pour les retirer aussi.",
-                plan.tracks
-            ),
-        }));
+        return Ok(crate::message_api::avec_message(
+            json!({
+                "dirs": dirs,
+                "orphan_tracks": plan.tracks,
+                "purged": 0,
+                "purge_refused": true,
+                "purge_refused_reason": "confirmation_insuffisante",
+                "confirm_purge_required": plan.tracks,
+                "impact": impact_json(&plan),
+            }),
+            "api.library.removeDirPurgeNotConfirmed",
+            &[("count", plan.tracks.to_string())],
+        ));
     }
 
     let r = executer_purge(&state, &orphelines);
@@ -3828,29 +3929,31 @@ pub(super) async fn purge_orphan_tracks(
     let total_local = pistes_locales(&state).len();
 
     if ids.is_empty() {
-        return Ok(Json(json!({
-            "purged": 0,
-            "refused": false,
-            "impact": impact_json(&plan),
-            "message": format!("Aucune piste n'est enregistrée sous {cible}."),
-        }))
+        return Ok(Json(crate::message_api::avec_message(
+            json!({
+                "purged": 0,
+                "refused": false,
+                "impact": impact_json(&plan),
+            }),
+            "api.library.purgeNothingUnder",
+            &[("path", cible.to_string())],
+        ))
         .into_response());
     }
 
     // Essai à blanc : pas de confirmation ⇒ pas de suppression.
     let Some(_) = body.confirm_purge else {
-        return Ok(Json(json!({
-            "purged": 0,
-            "refused": false,
-            "dry_run": true,
-            "confirm_purge_required": plan.tracks,
-            "impact": impact_json(&plan),
-            "message": format!(
-                "{} pistes seraient retirées définitivement. Rappelez cette route avec \
-                 confirm_purge={} pour confirmer.",
-                plan.tracks, plan.tracks
-            ),
-        }))
+        return Ok(Json(crate::message_api::avec_message(
+            json!({
+                "purged": 0,
+                "refused": false,
+                "dry_run": true,
+                "confirm_purge_required": plan.tracks,
+                "impact": impact_json(&plan),
+            }),
+            "api.library.purgeDryRun",
+            &[("count", plan.tracks.to_string())],
+        ))
         .into_response());
     };
 
@@ -3867,18 +3970,17 @@ pub(super) async fn purge_orphan_tracks(
         );
         return Ok((
             StatusCode::CONFLICT,
-            Json(json!({
-                "purged": 0,
-                "refused": true,
-                "reason": "confirmation_insuffisante",
-                "confirm_purge_required": plan.tracks,
-                "impact": impact_json(&plan),
-                "message": format!(
-                    "La confirmation reçue ne couvre pas les {} pistes concernées. Rien n'a \
-                     été retiré. Confirmez ce nombre exact pour poursuivre.",
-                    plan.tracks
-                ),
-            })),
+            Json(crate::message_api::avec_message(
+                json!({
+                    "purged": 0,
+                    "refused": true,
+                    "reason": "confirmation_insuffisante",
+                    "confirm_purge_required": plan.tracks,
+                    "impact": impact_json(&plan),
+                }),
+                "api.library.purgeNotConfirmed",
+                &[("count", plan.tracks.to_string())],
+            )),
         )
             .into_response());
     }
@@ -4365,15 +4467,18 @@ pub(super) async fn set_license(
     let tier = crate::routes::cloud::validate_stored_license(&state).await;
     let premium = tier == tune_core::license::Tier::Premium;
     let ls = state.license.license_state().await;
-    Json(json!({
-        "status": if premium { "ok" } else { "pending" },
-        "tier": ls.tier,
-        "message": if premium {
-            "Licence validée : Premium activé."
+    Json(crate::message_api::avec_message(
+        json!({
+            "status": if premium { "ok" } else { "pending" },
+            "tier": ls.tier,
+        }),
+        if premium {
+            "api.license.activated"
         } else {
-            "Clé enregistrée. Premium s'activera dès qu'elle sera validée en ligne (vérifiez votre connexion et la clé)."
+            "api.license.pending"
         },
-    }))
+        &[],
+    ))
     .into_response()
 }
 

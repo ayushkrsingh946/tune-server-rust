@@ -3639,9 +3639,14 @@ impl StreamingService for QobuzService {
     /// n'avait jamais demandé `tracks`, et qui laissait croire que les deux
     /// cas étaient couverts.
     ///
-    /// Aucun tri n'est appliqué : l'ordre est celui que Qobuz rend. Classer
-    /// nous-mêmes sur une popularité que Qobuz ne donne pas reviendrait à
-    /// fabriquer le « best of » au lieu de le relayer.
+    /// Aucun tri n'est appliqué ICI : l'ordre est celui que Qobuz rend, et
+    /// c'est le catalogue dans l'ordre d'un album, pas une popularité
+    /// (Kiwanuka, 26/10/2026 : dix pistes de FUDGE). Nous n'inventons pas de
+    /// « best of » : la route (`tune-streaming-http`,
+    /// `service_artist_top_tracks`, #7107) classe ensuite sur des sources
+    /// réelles — total de la communauté, écoutes de ce serveur, puis
+    /// `artist.getTopTracks` de Last.fm (`titres_phares_lastfm`) — et ne
+    /// retombe sur l'ordre de Qobuz qu'en dernier.
     async fn get_artist_top_tracks(&self, artist_id: &str) -> Result<Vec<StreamTrack>, TuneError> {
         match self.pistes_extra_artiste(artist_id, "tracks").await {
             Ok(pistes) if !pistes.is_empty() => return Ok(pistes),
@@ -8091,7 +8096,7 @@ mod tests_livrets_qobuz_6481 {
     }
 }
 
-/// #6736 — le logo d'un label, rapproché par `label/search` ou par l'album.
+/// #6736 — le logo d'un label, rapproché par l'album ou par `catalog/search` (#7064).
 #[path = "qobuz_logos_labels.rs"]
 mod logos_labels;
 

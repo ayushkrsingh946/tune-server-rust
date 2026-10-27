@@ -1135,15 +1135,35 @@ pub struct BilanRecalculCompilations {
 
 pub struct AlbumRepo {
     db: Arc<dyn DbBackend>,
+    /// #6285 — le filtre du verdict hi-res de la liste (`?hires_verdict=`),
+    /// posé par [`Self::avec_filtre_hires`]. `None` : le SQL d'avant.
+    filtre_hires: Option<crate::audio::faux_hires_publie::FiltreHires>,
 }
 
 impl AlbumRepo {
     pub fn new(db: SqliteDb) -> Self {
-        Self { db: Arc::new(db) }
+        Self {
+            db: Arc::new(db),
+            filtre_hires: None,
+        }
     }
 
     pub fn with_backend(db: Arc<dyn DbBackend>) -> Self {
-        Self { db }
+        Self {
+            db,
+            filtre_hires: None,
+        }
+    }
+
+    /// #6285 — restreint les listages filtrés (`list_filtered*`) aux albums
+    /// dont le verdict hi-res PUBLIÉ est celui du filtre. Un réglage du dépôt
+    /// plutôt qu'un paramètre de plus aux trois listages et à leurs appelants.
+    pub fn avec_filtre_hires(
+        mut self,
+        filtre: Option<crate::audio::faux_hires_publie::FiltreHires>,
+    ) -> Self {
+        self.filtre_hires = filtre;
+        self
     }
 
     fn marque(&self, n: usize) -> String {
@@ -4032,6 +4052,11 @@ impl AlbumRepo {
             Some(true) => wheres.push("COALESCE(a.is_compilation, 0) <> 0".to_string()),
             Some(false) => wheres.push("COALESCE(a.is_compilation, 0) = 0".to_string()),
             None => {}
+        }
+        // #6285 — le verdict hi-res publié : sans valeur liée, le prédicat
+        // n'ajoute aucun marqueur à la séquence.
+        if let Some(filtre) = self.filtre_hires {
+            wheres.push(filtre.predicat("a.id"));
         }
         // Albums masqués (#1391) : exclus par défaut. Le prédicat passe par
         // `wheres` — jamais par le `replacen` de `base_select` plus bas, qui

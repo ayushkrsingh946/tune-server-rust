@@ -806,6 +806,27 @@ async fn service_artist_top_tracks(
         Err(e) => return svc_response::<()>(Err(e)),
     };
     let mut items: Vec<Value> = pistes.iter().map(|p| json!(p)).collect();
+    // #7107 — la popularité Last.fm complète la liste du service (qui n'est
+    // que l'ordre d'un album) ; sans clé ou en échec, la liste ne change pas.
+    let cle = tune_core::streaming::titres_phares_lastfm::cle_lastfm(&state.backend);
+    tune_core::streaming::titres_phares_lastfm::completer(
+        &state.http,
+        &tune_core::streaming::titres_phares_lastfm::Reglages::production(&cle),
+        &service,
+        &mut items,
+        |requete| {
+            let arc = arc.clone();
+            async move {
+                arc.read()
+                    .await
+                    .search(&requete, 10)
+                    .await
+                    .map(|r| r.tracks)
+                    .unwrap_or_default()
+            }
+        },
+    )
+    .await;
     tune_core::streaming::titres_phares_ecoutes::enrichir_et_classer(
         &state.backend,
         &state.http,
