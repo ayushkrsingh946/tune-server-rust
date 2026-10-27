@@ -379,6 +379,13 @@ pub(super) async fn get_config(
             tune_core::db::coffrets_auto::CLE_REGLAGE_AUTO,
             json!(tune_core::db::coffrets_auto::REGLAGE_AUTO_DEFAUT),
         ),
+        // #6917 (fil 2397) — « Ne dédoublonner que sur un même support »,
+        // section Bibliothèque. Éteint par défaut (arbitrage du 27/10/2026),
+        // publié même absent de la base pour que la case s'affiche DÉCOCHÉE.
+        (
+            tune_core::library::dedoublonnage_par_racine::CLE,
+            json!(tune_core::library::dedoublonnage_par_racine::DEFAUT),
+        ),
         // #4051 — le consentement LRCLIB, publié comme ses deux voisins de la
         // MÊME section « Bibliothèque » (`metadata_readonly`, `enrich_on_scan`).
         //
@@ -1580,6 +1587,31 @@ fn normaliser_scan_au_demarrage(
     Ok(None)
 }
 
+/// #6917 — « Ne dédoublonner que sur un même support » : `true` ou `false`,
+/// sinon 400. Une valeur illisible ne doit pas se lire « éteint » en silence.
+fn normaliser_dedoublonnage_par_racine(
+    values: &mut serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    let cle = tune_core::library::dedoublonnage_par_racine::CLE;
+    let Some(brut) = values.get(cle) else {
+        return Ok(());
+    };
+    let choix = match brut {
+        Value::Bool(b) => Some(*b),
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(choix) = choix else {
+        return Err(AppError::bad_request(format!("{cle} attend true ou false")));
+    };
+    values.insert(cle.to_string(), Value::Bool(choix));
+    Ok(())
+}
+
 /// Fil 2148 (#5792) — le délai de la sonde des partages réseau : un nombre de
 /// secondes dans les bornes, ou 400 qui les nomme. Rend la valeur à appliquer
 /// après l'écriture.
@@ -1723,6 +1755,7 @@ pub(super) async fn update_config(
     // Réglages) : retirée de la boucle générique, écrite plus bas, datée.
     let reponse_ecoutes = prendre_reponse_ecoutes(&mut values)?;
     let scan_au_demarrage_efface = normaliser_scan_au_demarrage(&mut values)?.is_some();
+    normaliser_dedoublonnage_par_racine(&mut values)?;
     let full_volume_confirmed = take_full_volume_confirmation(&mut values);
     let volume_lock_was_enabled =
         tune_core::audio::audiophile::global_volume_lock_enabled(&state.backend);

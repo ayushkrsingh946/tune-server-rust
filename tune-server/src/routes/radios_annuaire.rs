@@ -702,6 +702,9 @@ pub fn corps_annuaire_avec_liens(
                 "country_code": f.country.as_deref().map(str::to_ascii_uppercase),
                 "genre": f.genre,
                 "categories": f.categories,
+                // #7194 (web#2400) — les mots-clés de la fiche : le diffuseur
+                // (NPR, BBC, Radio France…), dont la carte fait ses réseaux.
+                "keywords": f.keywords,
                 "quality": f.quality,
                 "codec": f.codec,
                 "bitrate": f.bitrate,

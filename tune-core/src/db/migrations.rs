@@ -3087,15 +3087,6 @@ fn add_column_if_missing(db: &SqliteDb, table: &str, column: &str, col_type: &st
     }
 }
 
-/// La table porte-t-elle cette colonne ?
-///
-/// Meme lecture que `add_column_if_missing`, mais pour GARDER un UPDATE.
-/// Indispensable : une base assez ancienne n'a pas encore toutes les colonnes
-/// que les migrations suivantes ajouteront, et un UPDATE sur une colonne
-/// absente fait echouer le batch — donc TOUT le runner, donc le demarrage
-/// (vecu par le test `une_base_ancienne_gagne_le_drapeau_compilation`, qui
-/// part d'une table `albums` reduite a `title` et `folder_path`).
-
 /// SQL de la migration 80 — voir son entree dans `MIGRATIONS`.
 const SQL_FORMAT_LOWERCASE: &str = "UPDATE albums SET format = LOWER(TRIM(format)) \
              WHERE format IS NOT NULL AND format != LOWER(TRIM(format)); \
@@ -3122,6 +3113,14 @@ const SQL_FORMAT_CONTENEUR: &str = "UPDATE tracks SET format = 'dsf' \
                AND EXISTS (SELECT 1 FROM tracks t \
                            WHERE t.album_id = albums.id AND t.format = 'dff');";
 
+/// La table porte-t-elle cette colonne ?
+///
+/// Meme lecture que `add_column_if_missing`, mais pour GARDER un UPDATE.
+/// Indispensable : une base assez ancienne n'a pas encore toutes les colonnes
+/// que les migrations suivantes ajouteront, et un UPDATE sur une colonne
+/// absente fait echouer le batch — donc TOUT le runner, donc le demarrage
+/// (vecu par le test `une_base_ancienne_gagne_le_drapeau_compilation`, qui
+/// part d'une table `albums` reduite a `title` et `folder_path`).
 fn has_column(db: &SqliteDb, table: &str, column: &str) -> bool {
     let conn = db.connection().lock().unwrap();
     conn.prepare(&format!("PRAGMA table_info({table})"))
@@ -3228,10 +3227,9 @@ fn merge_scattered_compilations(db: &SqliteDb) {
             let mut nums = Vec::new();
             if let Ok(mut ts) = conn.prepare(
                 "SELECT track_number FROM tracks WHERE album_id = ? AND track_number IS NOT NULL",
-            ) {
-                if let Ok(r) = ts.query_map([id], |row| row.get::<_, i64>(0)) {
-                    nums = r.filter_map(Result::ok).map(|n| n as i32).collect();
-                }
+            ) && let Ok(r) = ts.query_map([id], |row| row.get::<_, i64>(0))
+            {
+                nums = r.filter_map(Result::ok).map(|n| n as i32).collect();
             }
             by_title
                 .entry(title.trim().to_lowercase())
@@ -4814,6 +4812,10 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     if let Err(e) = db.execute_batch(crate::db::track_repo::INDEX_CHEMIN_DOSSIER_SQLITE) {
         warn!(error = %e, "sqlite_tracks_chemin_dossier_index_failed");
     }
+    // #6399 — réconciliation des favoris tous profils : même passe idempotente.
+    if let Err(e) = db.execute_batch(crate::db::streaming_favorites_repo::INDEX_FAVORIS_MIROIR) {
+        warn!(error = %e, "sqlite_streaming_favorites_miroir_index_failed");
+    }
 
     db.execute_batch(include_str!("../../migrations/upnp_library_sync.sql"))?;
     db.execute_batch(include_str!("../../migrations/upnp_catalog_revision.sql"))?;
@@ -5872,6 +5874,13 @@ pub async fn run_pg_migrations(pool: &sqlx::PgPool) -> Result<(), String> {
         .await
     {
         warn!(error = %e, "pg_tracks_chemin_dossier_index_failed");
+    }
+    // #6399 — même index que SQLite, sans conversion du profil en texte.
+    if let Err(e) = sqlx::raw_sql(crate::db::streaming_favorites_repo::INDEX_FAVORIS_MIROIR)
+        .execute(pool)
+        .await
+    {
+        warn!(error = %e, "pg_streaming_favorites_miroir_index_failed");
     }
 
     // #4836 (suite) — même passe que `combler_les_labels_d_album_sqlite`,

@@ -98,15 +98,17 @@ pub fn publier_l_album(
     }
 }
 
+/// Verdict et raison de chaque piste mesurée, rangés par identifiant d'album.
+pub type PistesMesureesParAlbum = std::collections::HashMap<i64, Vec<(String, Option<String>)>>;
+
 /// Les verdicts des pistes mesurées de chaque album de `ids`, en une requête
 /// groupée par tranche (même forme que `dynamic_range_by_ids`). Un album sans
 /// aucune mesure n'a pas d'entrée.
 pub fn pistes_mesurees_par_album(
     db: &Arc<dyn DbBackend>,
     ids: &[i64],
-) -> Result<std::collections::HashMap<i64, Vec<(String, Option<String>)>>, crate::TuneError> {
-    let mut par_album: std::collections::HashMap<i64, Vec<(String, Option<String>)>> =
-        Default::default();
+) -> Result<PistesMesureesParAlbum, crate::TuneError> {
+    let mut par_album: PistesMesureesParAlbum = Default::default();
     for tranche in ids.chunks(5000) {
         let liste = tranche
             .iter()

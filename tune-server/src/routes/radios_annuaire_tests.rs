@@ -312,3 +312,31 @@ fn contre_epreuve_une_adresse_qui_n_est_pas_de_la_fiche_ne_change_rien() {
     assert_eq!(st.url, fip.stream_url);
     assert_eq!((st.codec.as_deref(), st.bitrate), (None, None));
 }
+
+/// #7194 (web#2400) — la carte des radios fait ses réseaux des mots-clés de
+/// la fiche (le diffuseur) : `/radios/directory` doit les rendre.
+#[test]
+fn l_annuaire_rend_les_mots_cles_de_chaque_fiche_pour_les_reseaux_de_la_carte() {
+    let f = fiches();
+    let etat = EtatAnnuaire::default();
+    let corps = corps_annuaire(&f, &[], &FiltresAnnuaire::default(), &etat);
+    let items = corps["items"].as_array().unwrap();
+    let fip = items
+        .iter()
+        .find(|i| i["external_id"] == "S000973")
+        .unwrap();
+    assert_eq!(
+        fip["keywords"],
+        serde_json::json!(["Radio France"]),
+        "le diffuseur de FIP doit être servi : {fip}"
+    );
+    let paradise = items
+        .iter()
+        .find(|i| i["name"] == "Radio Paradise: Main Mix")
+        .unwrap();
+    assert_eq!(
+        paradise["keywords"],
+        serde_json::json!([]),
+        "aucun mot-clé : liste vide"
+    );
+}
