@@ -2355,3 +2355,28 @@ pub fn silence_ms(echantillons_manquants: u64, releve: OutputRingStarvation) -> 
         / u128::from(releve.served_samples);
     u64::try_from(ms).unwrap_or(u64::MAX)
 }
+
+/// #7244 — a refused HQPlayer start must never enter generic restart recovery.
+pub fn echec_demarrage_hqplayer(
+    output_type: &str,
+    arret_force: bool,
+    demarrage_fige: bool,
+    position_max_ms: u64,
+) -> bool {
+    output_type == "hqplayer" && position_max_ms == 0 && (arret_force || demarrage_fige)
+}
+
+#[cfg(test)]
+mod hqplayer_demarrage_tests_7244 {
+    use super::*;
+    #[test]
+    fn hqplayer_fige_ou_arrete_a_zero_est_un_refus_sans_relance_7244() {
+        assert!(echec_demarrage_hqplayer("hqplayer", true, false, 0));
+        assert!(echec_demarrage_hqplayer("hqplayer", false, true, 0));
+        assert!(!echec_demarrage_hqplayer("hqplayer", false, false, 0));
+        assert!(!echec_demarrage_hqplayer("hqplayer", true, false, 1_000));
+        for autre in ["dlna", "local", "airplay", ""] {
+            assert!(!echec_demarrage_hqplayer(autre, true, true, 0));
+        }
+    }
+}
