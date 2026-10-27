@@ -1788,6 +1788,13 @@ name = "pg_requete_textuelle_6287"
 path = "tests/pg_requete_textuelle_6287.rs"
 required-features = ["postgres"]
 
+# #6287 — la même route sur SQLite, et l'enregistrement d'une requête
+# imbriquée (étape 4). Le fichier existait sans cible : `autotests = false` en
+# tête de ce manifeste ne l'avait jamais compilé.
+[[test]]
+name = "requete_textuelle_6287"
+path = "tests/requete_textuelle_6287.rs"
+
 # #6336 — AirPlay 2, SMB, Qobuz, TIDAL et Deezer éprouvés par le vrai routeur
 # contre des faux locaux. Binaire à lui seul : les substitutions de programmes
 # (`tune_core::services_factices`) sont un état de PROCESSUS. `autotests =
