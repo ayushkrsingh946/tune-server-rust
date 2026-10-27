@@ -250,3 +250,93 @@ fn une_fiche_rapprochee_par_le_nom_seul_ne_prete_pas_son_logo() {
     // Lié à une fiche sortie de l'annuaire : aucun repli par l'adresse.
     assert_eq!(index.lien(Some("S999001"), "FIP", &fip.stream_url), None);
 }
+
+// ── #7177 (web#2443) — les flux d'une fiche, et le flux préféré ─────────────
+
+const FIP_MIDFI: &str = "https://icecast.radiofrance.fr/fip-midfi.mp3?id=radiofrance";
+
+#[test]
+fn les_flux_proposes_d_une_fiche_v2_portent_format_et_debit_le_principal_d_abord() {
+    let f = fiches();
+    let fip = f.iter().find(|s| s.name == "FIP").unwrap();
+    let flux = fip.flux_proposes();
+    assert_eq!(flux.len(), 4, "{flux:?}");
+    assert_eq!(flux[0].url, fip.stream_url);
+    assert!(flux[0].primary);
+    assert_eq!(flux.iter().filter(|x| x.primary).count(), 1);
+    let mp3 = flux.iter().find(|x| x.url == FIP_MIDFI).unwrap();
+    assert_eq!(
+        (mp3.codec.as_deref(), mp3.bitrate, mp3.sample_rate, mp3.hls),
+        (Some("MP3"), Some(128), Some(48000), false)
+    );
+}
+
+#[test]
+fn une_entree_v1_propose_son_seul_flux_sans_format() {
+    let v1 = serde_json::json!([{"name": "X", "stream_url": "https://x.example/s"}]);
+    let f = annuaire_depuis_json(v1.as_array().unwrap());
+    let flux = f[0].flux_proposes();
+    assert_eq!(flux.len(), 1);
+    assert_eq!(flux[0].url, "https://x.example/s");
+    assert!(flux[0].primary);
+    assert_eq!((flux[0].codec.as_deref(), flux[0].bitrate), (None, None));
+}
+
+#[test]
+fn le_flux_prefere_se_choisit_parmi_ceux_de_la_fiche_avec_son_format() {
+    let f = fiches();
+    let fip = f.iter().find(|s| s.name == "FIP").unwrap();
+    let mut st = station(1, "FIP", &fip.stream_url);
+    assert!(poser_le_flux_prefere(fip, &mut st, FIP_MIDFI));
+    assert_eq!(st.url, FIP_MIDFI);
+    assert_eq!((st.codec.as_deref(), st.bitrate), (Some("mp3"), Some(128)));
+    // Le rattrapage de fond (#7043) le garde : la fiche le publie toujours.
+    assert!(!crate::routes::radios::flux_a_poser(
+        &f,
+        &mut st,
+        Some("S000973")
+    ));
+    assert_eq!(st.url, FIP_MIDFI);
+}
+
+#[test]
+fn contre_epreuve_une_adresse_qui_n_est_pas_de_la_fiche_ne_change_rien() {
+    let f = fiches();
+    let fip = f.iter().find(|s| s.name == "FIP").unwrap();
+    let mut st = station(1, "FIP", &fip.stream_url);
+    assert!(!poser_le_flux_prefere(
+        fip,
+        &mut st,
+        "https://ailleurs.example/fip.mp3"
+    ));
+    assert_eq!(st.url, fip.stream_url);
+    assert_eq!((st.codec.as_deref(), st.bitrate), (None, None));
+}
+
+/// #7194 (web#2400) — la carte des radios fait ses réseaux des mots-clés de
+/// la fiche (le diffuseur) : `/radios/directory` doit les rendre.
+#[test]
+fn l_annuaire_rend_les_mots_cles_de_chaque_fiche_pour_les_reseaux_de_la_carte() {
+    let f = fiches();
+    let etat = EtatAnnuaire::default();
+    let corps = corps_annuaire(&f, &[], &FiltresAnnuaire::default(), &etat);
+    let items = corps["items"].as_array().unwrap();
+    let fip = items
+        .iter()
+        .find(|i| i["external_id"] == "S000973")
+        .unwrap();
+    assert_eq!(
+        fip["keywords"],
+        serde_json::json!(["Radio France"]),
+        "le diffuseur de FIP doit être servi : {fip}"
+    );
+    let paradise = items
+        .iter()
+        .find(|i| i["name"] == "Radio Paradise: Main Mix")
+        .unwrap();
+    assert_eq!(
+        paradise["keywords"],
+        serde_json::json!([]),
+        "aucun mot-clé : liste vide"
+    );
+}

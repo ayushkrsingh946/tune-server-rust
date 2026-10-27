@@ -1787,6 +1787,14 @@ async fn zone_status(State(state): State<AppState>, Path(zone_id): Path<i64>) ->
             obj,
             tune_core::audio::volume_scale::EchelleDeVolume::de_la_sortie(output_type.as_deref()),
         );
+        // #6918 — les dB de l'appareil, pour une sortie à course en dB.
+        tune_core::audio::volume_appareil_db::publier(
+            obj,
+            &state.backend,
+            zone_id,
+            output_type.as_deref(),
+            zone_state.volume,
+        );
     }
     Json(v)
 }
@@ -3080,6 +3088,16 @@ async fn play(
             disc_number: None,
             album_ref: album_ref_val.clone(),
         };
+        // #7051 — une radio lancée ici n'est pas forcément dans « Mes radios » :
+        // le sondeur retrouvera son logo par l'adresse du flux.
+        if orch_req.source.as_deref() == Some("radio")
+            && let Some(url) = orch_req.source_id.as_deref()
+        {
+            tune_core::poller::logo_de_lancement::retenir_le_logo_de_lancement(
+                url,
+                orch_req.cover_url.as_deref(),
+            );
+        }
         ancrer_position_demandee(&state, zone_id, orch_req.seek_ms, reprise).await;
         return match lancer_la_lecture(&state, orch_req, reprise).await {
             Ok(result) => {

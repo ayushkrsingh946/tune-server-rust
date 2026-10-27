@@ -468,6 +468,10 @@ fn rattachement(f: &StationAnnuaire, lien: Lien, url_locale: &str) -> Value {
         "rapproche_par": lien.as_str(),
         "flux_change": flux_change,
         "stream_url_annuaire": if flux_change { Some(f.stream_url.clone()) } else { None },
+        // #7177 (web#2443) — de quoi remplir la fiche « Voir » : catégories,
+        // et les flux publiés parmi lesquels choisir son flux préféré.
+        "categories": f.categories,
+        "streams": f.flux_proposes(),
     })
 }
 
@@ -557,6 +561,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/directory/update-stream/{radio_id}",
             post(mettre_a_jour_le_flux),
+        )
+        .route(
+            "/directory/preferred-stream/{radio_id}",
+            post(choisir_le_flux),
         )
 }
 
@@ -694,11 +702,16 @@ pub fn corps_annuaire_avec_liens(
                 "country_code": f.country.as_deref().map(str::to_ascii_uppercase),
                 "genre": f.genre,
                 "categories": f.categories,
+                // #7194 (web#2400) — les mots-clés de la fiche : le diffuseur
+                // (NPR, BBC, Radio France…), dont la carte fait ses réseaux.
+                "keywords": f.keywords,
                 "quality": f.quality,
                 "codec": f.codec,
                 "bitrate": f.bitrate,
                 "website_url": f.website_url,
                 "stream_url": f.stream_url,
+                // #7177 (web#2443) — tous les flux publiés de la fiche.
+                "streams": f.flux_proposes(),
                 "radio_metadata_key": f.radio_metadata_key,
                 "now_playing": f.radio_metadata_key.is_some(),
                 "my_radio_id": locale.and_then(|s| s.id),
@@ -932,6 +945,101 @@ async fn mettre_a_jour_le_flux(
     };
     if !flux_de_la_fiche(&fiche, &station.url) {
         station.url = fiche.stream_url.clone();
+        if let Err(e) = repo.update(&station) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+        }
+        state.event_bus.emit(
+            "library.radios_changed",
+            json!({"action": "updated", "id": radio_id}),
+        );
+    }
+    let mut sortie = json!(station);
+    super::radios_libelles::enrichir(&mut sortie, &crate::i18n::lang_from_header(&headers));
+    if let Some(o) = sortie.as_object_mut() {
+        o.insert(
+            "annuaire".into(),
+            rattachement(&fiche, Lien::Id, &station.url),
+        );
+    }
+    Json(sortie).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CorpsFluxPrefere {
+    pub stream_url: String,
+}
+
+/// #7177 (web#2443) — pose `url` comme flux de `station`, s'il est l'un des
+/// flux publiés de `fiche`, avec son format et son débit. `false` : ce flux
+/// n'est pas de la fiche, rien ne change.
+///
+/// Le flux préféré EST l'adresse de la station : aucune colonne de plus. Le
+/// rattrapage de fond (#7043, [`super::radios::flux_a_poser`]) garde une
+/// adresse tant que la fiche la publie, même secondaire ; il ne revient au
+/// flux principal que si la fiche retire celle-ci.
+pub fn poser_le_flux_prefere(
+    fiche: &StationAnnuaire,
+    station: &mut RadioStation,
+    url: &str,
+) -> bool {
+    let voulu = flux_normalise(url);
+    let Some(flux) = fiche
+        .flux_proposes()
+        .into_iter()
+        .find(|f| flux_normalise(&f.url) == voulu)
+    else {
+        return false;
+    };
+    station.url = flux.url;
+    if let Some(c) = flux.codec.as_deref() {
+        station.codec = Some(c.to_ascii_lowercase());
+    }
+    if let Some(b) = flux.bitrate {
+        station.bitrate = Some(b);
+    }
+    true
+}
+
+/// `POST /radios/directory/preferred-stream/{radio_id}` `{"stream_url": …}`
+/// — la station de « Mes radios » liée à sa fiche écoute désormais ce flux,
+/// choisi parmi ceux que la fiche publie (#7177, web#2443). Une adresse qui
+/// n'est pas de la fiche est refusée (422) : pour une autre adresse, il y a la
+/// saisie manuelle.
+async fn choisir_le_flux(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(radio_id): Path<i64>,
+    Json(corps): Json<CorpsFluxPrefere>,
+) -> Response {
+    let repo = RadioRepo::with_backend(state.backend.clone());
+    let Some(mut station) = repo.get(radio_id).ok().flatten() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "radio_inconnue"})),
+        )
+            .into_response();
+    };
+    let lien = repo
+        .liens_annuaire()
+        .unwrap_or_default()
+        .get(&radio_id)
+        .cloned();
+    let Some(fiche) = lien.as_deref().and_then(|ext| fiche_par_id(&state, ext)) else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "radio_sans_fiche_liee"})),
+        )
+            .into_response();
+    };
+    let avant = (station.url.clone(), station.codec.clone(), station.bitrate);
+    if !poser_le_flux_prefere(&fiche, &mut station, &corps.stream_url) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "flux_hors_fiche"})),
+        )
+            .into_response();
+    }
+    if (station.url.clone(), station.codec.clone(), station.bitrate) != avant {
         if let Err(e) = repo.update(&station) {
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }

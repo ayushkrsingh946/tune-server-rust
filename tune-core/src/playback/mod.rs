@@ -743,6 +743,58 @@ fn piste_finie_sans_la_moindre_observation(state: &ZoneState, marge: std::time::
     ouverture.elapsed() >= std::time::Duration::from_millis(reste_ms) + marge
 }
 
+/// Ce que le journal dit d'une zone que [`zone_figee`] désigne : POURQUOI
+/// elle l'est, et avec quels chiffres.
+///
+/// #7149 (fil 2469, écoute à distance, rc8) : la zone du téléphone a été
+/// rattrapée 889 s après le départ de « Show Some Emotion », et le journal
+/// disait `zone_figee_rattrapee zone_id=48 immobile_secs=0 seuil_secs=600`.
+/// Ce `0` était un `unwrap_or_default` : personne n'avait JAMAIS observé la
+/// zone (une zone navigateur n'a pas de sondeur), et la ligne se lisait
+/// comme une position qui venait de bouger. Le verdict venait en fait de
+/// [`piste_finie_sans_la_moindre_observation`] : la piste était finie depuis
+/// dix minutes et aucun `play()` de la suivante n'était arrivé.
+///
+/// Les champs absents (`None`) ne s'écrivent pas : une immobilité ne se
+/// chiffre que si une avance a été observée.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstatDeZoneFigee {
+    /// `"immobile"` : la position ou les octets ont été observés, puis plus
+    /// rien. `"piste_finie_sans_observation"` : aucune observation, la durée
+    /// de la piste est écoulée depuis l'ouverture de la fenêtre.
+    pub motif: &'static str,
+    /// Depuis la dernière avance observée ; `None` si aucune ne l'a été.
+    pub immobile_secs: Option<u64>,
+    /// Depuis le `play()` (ou la reprise) qui a ouvert la fenêtre.
+    pub fenetre_ouverte_secs: Option<u64>,
+    /// Durée annoncée de la piste ; `None` si inconnue.
+    pub duree_piste_secs: Option<u64>,
+}
+
+/// Le [`ConstatDeZoneFigee`] d'une zone : commun au détecteur de fond et au
+/// garde-fou de mise à jour, pour que les deux journaux disent la même chose.
+pub fn constat_de_zone_figee(state: &ZoneState) -> ConstatDeZoneFigee {
+    let derniere_avance = state
+        .progression_hors_temps_reel
+        .map(|(_, t)| t)
+        .or(state.derniere_avance_de_position);
+    ConstatDeZoneFigee {
+        motif: if derniere_avance.is_some() {
+            "immobile"
+        } else {
+            "piste_finie_sans_observation"
+        },
+        immobile_secs: derniere_avance.map(|t| t.elapsed().as_secs()),
+        fenetre_ouverte_secs: state.observation_rouverte_a.map(|t| t.elapsed().as_secs()),
+        duree_piste_secs: state
+            .now_playing
+            .as_ref()
+            .map(|np| np.duration_ms)
+            .filter(|d| *d > 0)
+            .map(|d| (d / 1000) as u64),
+    }
+}
+
 /// Depuis combien de temps la position OBSERVÉE d'une zone doit-elle être
 /// immobile avant qu'on cesse de la croire ?
 ///
@@ -1742,14 +1794,13 @@ impl PlaybackManager {
             if !zone_figee(state, silence_max) {
                 continue;
             }
+            let constat = constat_de_zone_figee(state);
             tracing::warn!(
                 zone_id = *zone_id,
-                immobile_secs = state
-                    .progression_hors_temps_reel
-                    .map(|(_, t)| t)
-                    .or(state.derniere_avance_de_position)
-                    .map(|t| t.elapsed().as_secs())
-                    .unwrap_or_default(),
+                motif = constat.motif,
+                immobile_secs = constat.immobile_secs,
+                fenetre_ouverte_secs = constat.fenetre_ouverte_secs,
+                duree_piste_secs = constat.duree_piste_secs,
                 octets_traites = state.progression_hors_temps_reel.map(|(bytes, _)| bytes),
                 seuil_secs = silence_max.as_secs(),
                 "zone_figee_rattrapee"
@@ -2364,6 +2415,9 @@ fn now_playing_event_data(state: &ZoneState) -> serde_json::Value {
 
 #[cfg(test)]
 mod progression_hors_temps_reel_tests;
+
+#[cfg(test)]
+mod zone_figee_jamais_observee_7149_tests;
 
 #[cfg(test)]
 mod tests {

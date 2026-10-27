@@ -8,6 +8,13 @@ use super::sqlite::SqliteDb;
 use crate::favorites_sort::{self, CleDeTri, TriFavoris};
 use crate::streaming::favorites_identity::identite_de_favori;
 
+/// #6399 — le miroir retrouve un favori dans TOUS les profils. La clé unique
+/// commence par `profile_id` : sans statistiques permettant un skip-scan,
+/// chaque écriture sans profil peut balayer toute la table, pour chaque favori.
+/// Reposé à chaque démarrage, sur SQLite comme PostgreSQL.
+pub const INDEX_FAVORIS_MIROIR: &str = "CREATE INDEX IF NOT EXISTS idx_streaming_favorites_miroir \
+    ON streaming_favorites(service, item_type, service_id)";
+
 /// A favorited streaming item (Tidal/Qobuz/…). Unlike local `favorites` (keyed
 /// on an INTEGER `item_id`), streaming items use string `service_id`s, so they
 /// live in their own `streaming_favorites` table. Display metadata is stored so
