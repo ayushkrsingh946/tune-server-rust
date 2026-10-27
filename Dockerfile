@@ -40,8 +40,11 @@ RUN echo 'fn main() {}' > tune-server/src/main.rs && \
     cargo build --release --package tune-server --no-default-features --features oaat,cloud-relay,local-audio,bandcamp,dj,karaoke,plugins-wasm,audio-embedding,dst 2>/dev/null || true && \
     rm -rf tune-core/src tune-server/src tune-cli/src
 
-# Build librespot (Spotify Connect) — optional, touch a placeholder if it fails
-RUN cargo install librespot --no-default-features --features "alsa-backend" \
+# Build librespot (Spotify Connect) — optional, touch a placeholder if it fails.
+# #6872 : version épinglée et fonctionnalités de l'archive Linux (release.yml) ;
+# sans TLS, librespot 0.8.0 ne compile pas (le fichier vide était livré).
+RUN cargo install librespot --version 0.8.0 --locked --no-default-features \
+      --features "rustls-tls-webpki-roots,with-libmdns" \
     || touch /usr/local/cargo/bin/librespot
 
 # Build airplay-daemon (AirPlay 2 sender, #700) — GPL-2.0 standalone subprocess
@@ -146,6 +149,7 @@ RUN mkdir -p /data/artwork_cache && chown -R tune:tune /data
 # one disables and hides it (state in the database under /data) instead.
 ENV TUNE_PORT=8888 \
     TUNE_DB_PATH=/data/tune.db \
+    TUNE_LIBRESPOT=/usr/local/bin/librespot \
     TUNE_ARTWORK_DIR=/data/artwork_cache \
     TUNE_PLUGINS_USER_DIR=/data/plugins \
     TUNE_WEB_DIR=/app/web \
