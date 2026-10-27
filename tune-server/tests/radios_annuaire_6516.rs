@@ -123,7 +123,7 @@ async fn station_locale_mp3() -> String {
 #[tokio::test]
 async fn cafe_del_mar_du_portail_se_joue_depuis_l_annuaire_7200() {
     let brut: Value = serde_json::from_str(FICHE_CAFE_DEL_MAR_7200).unwrap();
-    let reelle = tune_server::routes::radios::annuaire_depuis_json(&[brut.clone()]);
+    let reelle = tune_server::routes::radios::annuaire_depuis_json(std::slice::from_ref(&brut));
     assert_eq!(reelle.len(), 1, "la fiche publiée est retenue");
     assert_eq!(reelle[0].stream_url, FLUX_CAFE_DEL_MAR);
     assert_eq!(reelle[0].codec.as_deref(), Some("MP3"));
