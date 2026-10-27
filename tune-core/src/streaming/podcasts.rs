@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use quick_xml::escape::unescape;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -6,10 +7,17 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
+use super::podcast_annuaires::{Annuaires, RelaisPodcastIndex};
+
 const ITUNES_SEARCH_URL: &str = "https://itunes.apple.com/search";
 const ITUNES_LOOKUP_URL: &str = "https://itunes.apple.com/lookup";
 const APPLE_TOP_BASE: &str = "https://rss.marketingtools.apple.com/api/v2";
 const USER_AGENT: &str = "Tune/2.0 (https://mozaiklabs.fr)";
+/// #7152 — résolutions de flux menées en parallèle pour une même recherche.
+const RESOLUTIONS_EN_PARALLELE: usize = 6;
+/// #7152 — au-delà, la recherche rend ce qui est résolu ; le reste (non mis
+/// en cache) se résoudra à la recherche suivante.
+const DELAI_DES_RESOLUTIONS: Duration = Duration::from_secs(12);
 /// Cache TTL for top podcasts (1 hour).
 const TOP_CACHE_TTL: Duration = Duration::from_secs(3600);
 
@@ -143,6 +151,12 @@ pub struct FluxPodcast {
 
 pub struct PodcastService {
     client: Client,
+    /// Adresse de la recherche Apple. Fixe en production ; un banc la pointe
+    /// vers un faux Apple local (#7152).
+    search_base: String,
+    /// Les annuaires qui résolvent le flux d'une fiche Apple sans `feedUrl`
+    /// (#7152).
+    annuaires: Annuaires,
     /// Adresse de la recherche Apple par identifiant. Fixe en production ;
     /// un banc la pointe vers un faux Apple local (#6770).
     lookup_base: String,
@@ -203,43 +217,88 @@ impl EchecResolution {
 
 impl PodcastService {
     pub fn new() -> Self {
-        Self {
-            client: crate::http::client::builder()
+        Self::with_client(
+            crate::http::client::builder()
                 .timeout(Duration::from_secs(10))
                 .user_agent(USER_AGENT)
                 .redirect(reqwest::redirect::Policy::limited(10))
                 .build()
                 .unwrap(),
-            lookup_base: ITUNES_LOOKUP_URL.to_string(),
-            top_base: APPLE_TOP_BASE.to_string(),
-        }
+        )
     }
 
     /// Create a PodcastService reusing an existing reqwest client.
     pub fn with_client(client: Client) -> Self {
-        Self {
-            client,
-            lookup_base: ITUNES_LOOKUP_URL.to_string(),
-            top_base: APPLE_TOP_BASE.to_string(),
-        }
+        Self::with_apple_bases(client, APPLE_TOP_BASE, ITUNES_LOOKUP_URL)
     }
 
     /// Comme [`Self::with_client`], avec une autre adresse de `lookup` :
     /// réservé aux bancs, qui servent un faux Apple local.
     pub fn with_lookup_base(client: Client, lookup_base: &str) -> Self {
-        Self {
-            client,
-            lookup_base: lookup_base.to_string(),
-            top_base: APPLE_TOP_BASE.to_string(),
-        }
+        Self::with_apple_bases(client, APPLE_TOP_BASE, lookup_base)
     }
 
     /// Comme [`Self::with_lookup_base`], palmarès compris : réservé aux bancs.
     pub fn with_apple_bases(client: Client, top_base: &str, lookup_base: &str) -> Self {
         Self {
+            annuaires: Annuaires::new(client.clone()),
             client,
+            search_base: ITUNES_SEARCH_URL.to_string(),
             lookup_base: lookup_base.to_string(),
             top_base: top_base.to_string(),
+        }
+    }
+
+    /// Réservé aux bancs (#7152) : recherche Apple et annuaires pointés vers
+    /// un faux serveur local.
+    pub fn with_bases_de_banc(client: Client, search_base: &str, annuaires: Annuaires) -> Self {
+        let mut svc = Self::with_client(client);
+        svc.search_base = search_base.to_string();
+        svc.annuaires = annuaires;
+        svc
+    }
+
+    /// Podcast Index en troisième annuaire, par le relais de mozaiklabs.fr
+    /// (#7152). `None` : pas de compte relié, la source est sautée.
+    pub fn avec_relais_podcast_index(mut self, relais: Option<RelaisPodcastIndex>) -> Self {
+        self.annuaires = self.annuaires.avec_relais(relais);
+        self
+    }
+
+    /// #7152 — résout, par les annuaires, le flux des podcasts de `podcasts`
+    /// dont le `feed_url` est vide. `apple_id` lit l'identifiant Apple d'une
+    /// fiche. Borné par [`DELAI_DES_RESOLUTIONS`] : ce qui n'est pas résolu à
+    /// temps garde un flux vide.
+    async fn resoudre_par_les_annuaires(
+        &self,
+        podcasts: &mut [Podcast],
+        apple_id: impl Fn(&Podcast) -> Option<String>,
+    ) {
+        let demandes: Vec<(usize, Option<String>, String, String)> = podcasts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.feed_url.is_empty())
+            .map(|(i, p)| (i, apple_id(p), p.name.clone(), p.artist.clone()))
+            .collect();
+        if demandes.is_empty() {
+            return;
+        }
+        let annuaires = &self.annuaires;
+        let resolus: Vec<(usize, Option<super::podcast_annuaires::FluxResolu>)> =
+            futures_util::stream::iter(demandes)
+                .map(|(i, id, titre, auteur)| async move {
+                    (i, annuaires.resoudre(id.as_deref(), &titre, &auteur).await)
+                })
+                .buffer_unordered(RESOLUTIONS_EN_PARALLELE)
+                .take_until(tokio::time::sleep(DELAI_DES_RESOLUTIONS))
+                .collect()
+                .await;
+        for (i, flux) in resolus {
+            if let Some(f) = flux
+                && let Some(p) = podcasts.get_mut(i)
+            {
+                p.feed_url = f.url;
+            }
         }
     }
 
@@ -287,7 +346,7 @@ impl PodcastService {
 
         let resp = self
             .client
-            .get(ITUNES_SEARCH_URL)
+            .get(&self.search_base)
             .query(&params)
             .send()
             .await
@@ -297,10 +356,16 @@ impl PodcastService {
             .await
             .map_err(|e| format!("podcast parse: {e}"))?;
         let results = data["results"].as_array().cloned().unwrap_or_default();
-        let podcasts: Vec<Podcast> = results
+        // #7152 — une fiche SANS `feedUrl` n'est plus jetée ici : son flux est
+        // résolu par les annuaires juste après. Seule celle qui reste sans
+        // flux est écartée, plus bas.
+        let mut podcasts: Vec<Podcast> = results
             .iter()
             .filter_map(|r| {
-                let feed_url = r["feedUrl"].as_str()?.to_string();
+                let feed_url = r["feedUrl"].as_str().unwrap_or("").trim().to_string();
+                if feed_url.is_empty() && r["trackId"].as_u64().is_none() {
+                    return None;
+                }
                 let source_id = r["trackId"]
                     .as_u64()
                     .map(|id| id.to_string())
@@ -331,6 +396,13 @@ impl PodcastService {
                 })
             })
             .collect();
+        self.resoudre_par_les_annuaires(&mut podcasts, |p| Some(p.source_id.clone()))
+            .await;
+        // Choix (#7152) : une fiche dont aucun annuaire ne donne le flux par
+        // concordance stricte n'est PAS proposée. Sans flux, elle ne peut être
+        // ni écoutée ni suivie dans Tune, et aucun client ne sait aujourd'hui
+        // dire « non lisible » : la montrer serait une impasse.
+        podcasts.retain(|p| !p.feed_url.is_empty());
 
         // Update cache.
         {
@@ -902,6 +974,12 @@ impl PodcastService {
                 }
             }
         }
+        // #7152 — ceux qu'Apple connaît sans flux public (Radio France…) : les
+        // annuaires, par titre et auteur, avec la même concordance stricte.
+        self.resoudre_par_les_annuaires(podcasts, |p| {
+            p.source_id.strip_prefix("apple-").map(String::from)
+        })
+        .await;
         let restants = ids_manquants(podcasts).len();
         if restants > 0 {
             debug!(
@@ -1069,6 +1147,11 @@ fn parse_rss(xml: &str, limit: usize) -> Result<Vec<PodcastEpisode>, String> {
         search_from = item_end;
     }
     Ok(episodes)
+}
+
+/// [`extract_tag`] pour les annuaires (#7152).
+pub(crate) fn extraire_balise(xml: &str, tag: &str) -> Option<String> {
+    extract_tag(xml, tag)
 }
 
 fn extract_tag(xml: &str, tag: &str) -> Option<String> {

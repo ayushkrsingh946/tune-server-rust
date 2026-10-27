@@ -19,7 +19,10 @@
 //!   de la grille, sinon celles de la source — sans grille, rien ne change.
 //!
 //! L'ouverture des bras eux-mêmes (WASAPI, ASIO, CoreAudio, compilés sous
-//! Windows ou macOS seulement) n'est PAS branchée dans cette étape.
+//! Windows ou macOS seulement) n'est PAS branchée dans cette étape. L'étape 2
+//! l'a branchée : WASAPI par #6898, ASIO et CoreAudio ensuite ; leur
+//! branchement, que Linux ne compile pas, est gardé par texte en fin de
+//! fichier.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -506,4 +509,73 @@ fn le_reliquat_24_bits_suit_les_voies_pilotees_6230() {
     let reliquat = etage.vider(&mut puits).expect("reliquat");
     assert_eq!(reliquat.trames, 10);
     assert_eq!(puits.mots.len(), 10 * 2, "10 trames de 2 voies");
+}
+
+/// Le code d'un fichier source, sans ses lignes de commentaire : une garde ne
+/// doit pas être satisfaite par la phrase qui décrit ce qu'elle garde.
+fn sans_commentaires(source: &str) -> String {
+    source
+        .lines()
+        .filter(|ligne| !ligne.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// #6230 (étape 2) — les bras ASIO et CoreAudio, que Linux ne compile pas,
+/// ouvrent sur les voies de la grille comme le WASAPI exclusif (#6898) : la
+/// demande porte les voies que la grille pilote (et non plus `None`), le
+/// backend les essaie d'abord, plafonnées aux voies que la sortie déclare,
+/// et l'ouverture est constatée pour le chemin du signal. La règle elle-même
+/// (`ouvrir_sur_les_voies_pilotees`, `voies_pilotees_permises`) est jugée
+/// dans `reaffectation.rs`.
+#[test]
+fn asio_et_coreaudio_ouvrent_sur_les_voies_de_la_grille_6230() {
+    for (bras, source) in [
+        ("bras_asio.rs", include_str!("bras_asio.rs")),
+        ("bras_coreaudio.rs", include_str!("bras_coreaudio.rs")),
+    ] {
+        let code = sans_commentaires(source);
+        assert!(
+            !code.contains("voies_de_la_matrice: None"),
+            "#6230 : {bras} ouvre encore au format de la source, la grille armée est ignorée"
+        );
+        for attendu in [
+            "voies_a_ouvrir_en_exclusif(",
+            "ouvrir_sur_les_voies_pilotees(",
+            "new_sur_voies_pilotees(",
+            "constater_l_ouverture(",
+        ] {
+            assert!(
+                code.contains(attendu),
+                "#6230 : {bras} n'appelle plus `{attendu}` — la grille qui pilote les voies \
+                 n'est plus demandée, plafonnée ou constatée à l'ouverture"
+            );
+        }
+    }
+    for (sortie, source) in [
+        ("asio_exclusive.rs", include_str!("../asio_exclusive.rs")),
+        (
+            "coreaudio_exclusive.rs",
+            include_str!("../coreaudio_exclusive.rs"),
+        ),
+    ] {
+        let production = sans_commentaires(source.split("#[cfg(test)]").next().unwrap_or(source));
+        assert!(
+            production.contains("super::local::voies_pilotees_permises("),
+            "#6230 : {sortie} n'ouvre plus les voies pilotées sous le plafond des voies déclarées"
+        );
+    }
+    // ASIO : l'étage et le puits de la route native, et l'étage de la route
+    // traitée, portent les voies OUVERTES quand la grille pilote.
+    let asio = sans_commentaires(include_str!("bras_asio.rs"));
+    for attendu in [
+        "spec_du_puits_natif_vers(self.spec, self.voies_de_l_etage())",
+        "FormatOuvert::new(backend.format_ouvert().cadence, voies_de_l_etage)",
+        "sortie: FormatOuvert::new(sample_rate, voies_de_l_etage)",
+    ] {
+        assert!(
+            asio.contains(attendu),
+            "#6230 : bras_asio.rs ne monte plus l'étage sur les voies ouvertes (`{attendu}`)"
+        );
+    }
 }
