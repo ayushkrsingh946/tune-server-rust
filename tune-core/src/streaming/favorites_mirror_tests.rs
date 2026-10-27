@@ -16,10 +16,13 @@ use crate::streaming::traits::{
     AuthStatus, SearchResults, StreamAlbum, StreamArtist, StreamPlaylist, StreamTrack, StreamUrl,
 };
 
+/// Un favori chez le service : (titre, artiste, album, isrc).
+type Favori = (String, String, String, Option<String>);
+
 /// Le compte chez le service : `type pluriel → id → (titre, artiste, album, isrc)`.
 #[derive(Default)]
 struct Compte {
-    favoris: BTreeMap<String, BTreeMap<String, (String, String, String, Option<String>)>>,
+    favoris: BTreeMap<String, BTreeMap<String, Favori>>,
     /// Panne réseau : toute lecture et toute écriture échouent.
     panne: bool,
     /// Journal des écritures reçues : `"add tracks 71"`, `"remove albums 9"`.

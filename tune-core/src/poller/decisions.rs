@@ -452,6 +452,9 @@ pub fn renderer_a_l_arret_sans_avoir_joue(peak_position_ms: u64, position_prouve
 /// own an actual realtime stream, startup and seek recovery must be over,
 /// the renderer must already have proven that it reports position, and a
 /// known track end is left to the normal end-of-track machinery.
+// Prédicat pur : une condition nommée par argument, lue telle quelle par ses
+// témoins ; même choix que les deux autres décisions de ce fichier.
+#[allow(clippy::too_many_arguments)]
 pub fn dlna_playing_stall_eligible(
     output_type: &str,
     tune_is_playing: bool,
