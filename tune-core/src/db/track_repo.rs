@@ -681,6 +681,9 @@ mod like_escape_tests {
     }
 }
 
+/// Poser ou retirer une étiquette sur tout le résultat d'un filtre d'Oxygen
+/// (#7128).
+mod etiquetage_par_filtre;
 /// Engine-agnostic SQL builders for track_repo.
 ///
 /// Complex dynamic queries (search() FTS5, list_doubtful() aggregate,
@@ -690,6 +693,9 @@ mod like_escape_tests {
 /// La liste des pistes paginée côté serveur, triée et comptée par
 /// provenance (tune-web-client#1716).
 mod page_de_pistes;
+pub use etiquetage_par_filtre::{
+    BilanEtiquetage, CibleDuFiltre, PLAFOND_ETIQUETAGE_PAR_FILTRE, RefusEtiquetage,
+};
 pub use page_de_pistes::{
     COLONNES_TRIABLES, ColonneDeTri, ComptesParProvenance, DemandeDePistes, PageDePistes,
     expression_provenance, expression_provenance_de,

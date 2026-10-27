@@ -72,6 +72,8 @@ pub mod faststart;
 pub mod faux_hires;
 /// La passe de fond des faux hi-res (#6285).
 pub mod faux_hires_passe;
+/// Le verdict des faux hi-res tel qu'il se publie : liste, filtre, règles (#6285).
+pub mod faux_hires_publie;
 /// Mémoire du volume d'avant l'armement du mode bit-perfect (#2395).
 pub mod fixed_volume;
 pub mod flac_vendeur;

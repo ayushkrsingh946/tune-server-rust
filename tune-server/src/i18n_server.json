@@ -3688,6 +3688,23 @@
     "pl": "Odtwarzanie Spotify nie jest włączone: opcja „Odtwarzanie Spotify (eksperymentalne)” znajduje się w Ustawienia › Dostęp i tokeny › Spotify Connect (poziom zaawansowany).",
     "el": "Η αναπαραγωγή Spotify δεν είναι ενεργοποιημένη: η επιλογή «Αναπαραγωγή Spotify (πειραματική)» βρίσκεται στις Ρυθμίσεις › Πρόσβαση και διακριτικά › Spotify Connect (προχωρημένο επίπεδο)."
   },
+  "spotify.quality.librespotCeiling": {
+    "fr": "Spotify ne livre à librespot, le lecteur Spotify Connect de Tune, que de l'Ogg Vorbis, {bitrate} kbit/s au plus : librespot ne sait pas lire le sans-perte de Spotify, quel que soit votre abonnement.",
+    "en": "Spotify only delivers Ogg Vorbis, at most {bitrate} kbit/s, to librespot, Tune's Spotify Connect player: librespot cannot play Spotify's lossless streams, whatever your subscription.",
+    "de": "Spotify liefert an librespot, den Spotify-Connect-Player von Tune, nur Ogg Vorbis mit höchstens {bitrate} kbit/s: librespot kann die verlustfreien Streams von Spotify nicht abspielen, unabhängig von Ihrem Abo.",
+    "es": "Spotify solo entrega a librespot, el reproductor Spotify Connect de Tune, Ogg Vorbis a {bitrate} kbit/s como máximo: librespot no puede reproducir el audio sin pérdida de Spotify, sea cual sea su suscripción.",
+    "it": "Spotify fornisce a librespot, il lettore Spotify Connect di Tune, solo Ogg Vorbis a {bitrate} kbit/s al massimo: librespot non sa riprodurre i flussi lossless di Spotify, qualunque sia il tuo abbonamento.",
+    "zh": "Spotify 只向 librespot（Tune 的 Spotify Connect 播放器）提供 Ogg Vorbis，最高 {bitrate} kbit/s：无论您的订阅如何，librespot 都无法播放 Spotify 的无损音频。",
+    "ja": "Spotify が librespot（Tune の Spotify Connect プレーヤー）に配信するのは最大 {bitrate} kbit/s の Ogg Vorbis のみです。ご契約内容にかかわらず、librespot は Spotify のロスレス音源を再生できません。",
+    "ko": "Spotify는 librespot(Tune의 Spotify Connect 플레이어)에 최대 {bitrate} kbit/s의 Ogg Vorbis만 제공합니다. 구독 종류와 관계없이 librespot은 Spotify의 무손실 음원을 재생할 수 없습니다.",
+    "ro": "Spotify îi livrează lui librespot, playerul Spotify Connect al Tune, doar Ogg Vorbis de cel mult {bitrate} kbit/s: librespot nu poate reda fluxurile fără pierderi ale Spotify, indiferent de abonament.",
+    "sv": "Spotify levererar bara Ogg Vorbis, högst {bitrate} kbit/s, till librespot, Tunes Spotify Connect-spelare: librespot kan inte spela Spotifys förlustfria strömmar, oavsett abonnemang.",
+    "hu": "A Spotify a librespotnak, a Tune Spotify Connect-lejátszójának, csak legfeljebb {bitrate} kbit/s-os Ogg Vorbist küld: a librespot nem tudja lejátszani a Spotify veszteségmentes adatfolyamait, előfizetéstől függetlenül.",
+    "vi": "Spotify chỉ cung cấp cho librespot, trình phát Spotify Connect của Tune, định dạng Ogg Vorbis tối đa {bitrate} kbit/s: librespot không phát được luồng lossless của Spotify, dù bạn dùng gói nào.",
+    "nb": "Spotify leverer bare Ogg Vorbis, høyst {bitrate} kbit/s, til librespot, Tunes Spotify Connect-spiller: librespot kan ikke spille Spotifys tapsfrie strømmer, uansett abonnement.",
+    "pl": "Spotify dostarcza do librespot, odtwarzacza Spotify Connect w Tune, wyłącznie Ogg Vorbis o przepływności najwyżej {bitrate} kbit/s: librespot nie potrafi odtwarzać bezstratnych strumieni Spotify, niezależnie od subskrypcji.",
+    "el": "Το Spotify παραδίδει στο librespot, τη συσκευή αναπαραγωγής Spotify Connect του Tune, μόνο Ogg Vorbis έως {bitrate} kbit/s: το librespot δεν μπορεί να αναπαράγει τις ροές χωρίς απώλειες του Spotify, ανεξάρτητα από τη συνδρομή σας."
+  },
   "plugin.uninstall.bundled_hidden": {
     "fr": "Ce greffon est fourni avec cette installation et ne peut pas être supprimé. Il a été désactivé et masqué ; l'installer de nouveau le rétablit.",
     "en": "This plugin ships with this installation and cannot be deleted. It has been disabled and hidden; installing it again brings it back.",
@@ -4112,6 +4129,23 @@
     "nb": "Bekreftelsen som ble mottatt dekker ikke de {count} berørte sporene. Ingenting ble fjernet. Bekreft nøyaktig dette tallet for å fortsette.",
     "pl": "Otrzymane potwierdzenie nie obejmuje {count} utworów. Nic nie zostało usunięte. Potwierdź dokładnie tę liczbę, aby kontynuować.",
     "el": "Η επιβεβαίωση που λήφθηκε δεν καλύπτει τα {count} κομμάτια. Δεν αφαιρέθηκε τίποτα. Επιβεβαιώστε αυτόν ακριβώς τον αριθμό για να συνεχίσετε."
+  },
+  "api.library.nightWindowEmpty": {
+    "fr": "L'heure de début ({start} h) doit précéder l'heure de fin ({end} h). Rien n'a été enregistré.",
+    "en": "The start hour ({start}:00) must come before the end hour ({end}:00). Nothing was saved.",
+    "de": "Die Startstunde ({start}:00) muss vor der Endstunde ({end}:00) liegen. Es wurde nichts gespeichert.",
+    "es": "La hora de inicio ({start}:00) debe ser anterior a la hora de fin ({end}:00). No se ha guardado nada.",
+    "it": "L'ora di inizio ({start}:00) deve precedere l'ora di fine ({end}:00). Non è stato salvato nulla.",
+    "zh": "开始时间（{start}:00）必须早于结束时间（{end}:00）。未保存任何内容。",
+    "ja": "開始時刻（{start}:00）は終了時刻（{end}:00）より前である必要があります。何も保存されていません。",
+    "ko": "시작 시각({start}:00)은 종료 시각({end}:00)보다 앞서야 합니다. 아무것도 저장되지 않았습니다.",
+    "ro": "Ora de început ({start}:00) trebuie să fie înaintea orei de sfârșit ({end}:00). Nu s-a salvat nimic.",
+    "sv": "Starttimmen ({start}:00) måste komma före sluttimmen ({end}:00). Inget sparades.",
+    "hu": "A kezdő órának ({start}:00) a záró óra ({end}:00) előtt kell lennie. Semmi sem lett mentve.",
+    "vi": "Giờ bắt đầu ({start}:00) phải trước giờ kết thúc ({end}:00). Chưa có gì được lưu.",
+    "nb": "Starttimen ({start}:00) må komme før slutttimen ({end}:00). Ingenting ble lagret.",
+    "pl": "Godzina rozpoczęcia ({start}:00) musi poprzedzać godzinę zakończenia ({end}:00). Nic nie zostało zapisane.",
+    "el": "Η ώρα έναρξης ({start}:00) πρέπει να προηγείται της ώρας λήξης ({end}:00). Δεν αποθηκεύτηκε τίποτα."
   },
   "api.license.activated": {
     "fr": "Licence validée : Premium activé.",
