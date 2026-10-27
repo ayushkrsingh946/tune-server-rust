@@ -460,7 +460,21 @@ async fn un_mot_de_passe_qobuz_refuse_rend_400_et_ne_connecte_pas_6336() {
     )
     .await;
     assert_eq!(statut, StatusCode::BAD_REQUEST, "{corps}");
-    assert!(corps.to_string().contains("401"), "{corps}");
+    // #7068 : le 401 du service est désormais un refus structuré ; le
+    // contrat #6336 reste HTTP400 et aucune session ouverte, sans imposer
+    // que le texte brut du service soit encore recopié dans la réponse.
+    assert_eq!(
+        corps["code"], "invalid_credentials",
+        "#7068/#6336 : le refus d'identifiants doit porter son code structuré : {corps}"
+    );
+    assert_eq!(corps["service"], "qobuz", "{corps}");
+    let message = corps["error"]
+        .as_str()
+        .expect("une phrase d'erreur lisible");
+    assert!(
+        !message.trim().is_empty() && !message.contains('{') && !message.contains('}'),
+        "#7068 : le refus doit rester une phrase sans JSON du service : {corps}"
+    );
     let (_, etat_auth) = appeler(&app, "GET", "/api/v1/streaming/qobuz/auth/status", None).await;
     assert_eq!(etat_auth["authenticated"], false, "{etat_auth}");
 }

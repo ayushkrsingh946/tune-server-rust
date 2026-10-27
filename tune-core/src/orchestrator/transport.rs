@@ -1926,14 +1926,16 @@ impl PlaybackOrchestrator {
         // Coût nul sur une lecture qui démarre : on n'entre dans ce bloc que
         // lorsqu'une sortie a EXPLICITEMENT refusé le flux.
         if let Some(ref bus) = self.event_bus {
-            bus.emit(
-                "zone.playback_error",
-                serde_json::json!({
-                    "zone_id": req.zone_id,
-                    "error": output_error.as_deref().unwrap_or_default(),
-                    "fatal": true,
-                }),
-            );
+            let message = output_error.as_deref().unwrap_or_default();
+            let mut charge = serde_json::json!({
+                "zone_id": req.zone_id,
+                "error": message,
+                "fatal": true,
+            });
+            if message == crate::outputs::hqplayer::MESSAGE_ECHEC_DE_SORTIE {
+                charge["code"] = crate::outputs::hqplayer::CODE_ECHEC_DE_SORTIE.into();
+            }
+            bus.emit("zone.playback_error", charge);
         }
         // La session de flux ne se détruit que si la commande n'a
         // certainement PAS été exécutée. Sur un timeout, elle a pu atteindre

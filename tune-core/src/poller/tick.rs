@@ -3424,11 +3424,16 @@ impl PositionPoller {
                     } else {
                         track_duration_ms
                     };
-                    let past_end = decisions::past_end_reached(
-                        effective_end_duration_ms,
-                        played_enough,
-                        status.position_ms,
-                    );
+                    // #6994 — une position périmée pendant la recréation du
+                    // flux ne prouve pas une fin de piste. Même grâce que les
+                    // autres détecteurs ci-dessous, avec remise à zéro du
+                    // compteur par leur branche commune.
+                    let past_end = !in_seek_grace
+                        && decisions::past_end_reached(
+                            effective_end_duration_ms,
+                            played_enough,
+                            status.position_ms,
+                        );
                     // Exclusive local outputs (ASIO / WASAPI exclusive) cap the
                     // reported position at exactly the track duration and keep
                     // reporting Playing — their blocking HTTP read never sees a
@@ -3917,6 +3922,36 @@ impl PositionPoller {
                     ),
                 },
             );
+
+            let output_type = all_zones
+                .iter()
+                .find(|z| z.id == Some(zone_id))
+                .and_then(|z| z.output_type.as_deref())
+                .unwrap_or("");
+            if decisions::echec_demarrage_hqplayer(
+                output_type,
+                force_stop,
+                demarrage_fige != demarrage_fige_5522::Verdict::Attendre,
+                ps.peak_position_ms,
+            ) {
+                // HQPlayer's ASIO engine refused to start. Replaying the same
+                // command cannot free the DAC, and must not restart the loop.
+                poll_states.remove(&zone_id);
+                let appareil = self.get_zone_device_id(zone_id);
+                self.orchestrator.stop(zone_id, appareil.as_deref()).await;
+                if let Some(ref bus) = self.event_bus {
+                    bus.emit(
+                        "zone.playback_error",
+                        serde_json::json!({
+                            "zone_id": zone_id,
+                            "error": crate::outputs::hqplayer::MESSAGE_ECHEC_DE_SORTIE,
+                            "code": crate::outputs::hqplayer::CODE_ECHEC_DE_SORTIE,
+                            "fatal": true,
+                        }),
+                    );
+                }
+                continue;
+            }
 
             if demarrage_fige != demarrage_fige_5522::Verdict::Attendre {
                 poll_states.remove(&zone_id);

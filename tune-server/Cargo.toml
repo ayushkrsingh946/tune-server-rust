@@ -156,6 +156,9 @@ dotenvy = { workspace = true }
 
 [dev-dependencies]
 tower = "0.5"
+# Test-only (#6286) : donner aux FLAC témoins de l'audit d'intégrité le MD5
+# STREAMINFO de leur PCM. Déjà dans Cargo.lock par tune-core.
+md-5 = { workspace = true }
 # Test-only (#3326, S2-a) : jouer le ROLE CLIENT du protocole Sendspin contre
 # notre propre point d'acces, sur une vraie connexion WebSocket. `axum` sait
 # accepter une connexion, pas en ouvrir une.

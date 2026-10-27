@@ -156,6 +156,9 @@ impl PlaybackOrchestrator {
         annonce: Option<bool>,
         mime_type: &str,
     ) -> String {
+        if erreur.starts_with("hqplayer_output_start_failed:") {
+            return crate::outputs::hqplayer::MESSAGE_ECHEC_DE_SORTIE.into();
+        }
         if dsd_mode == "native" && annonce == Some(false) && est_dsd_brut(mime_type) {
             return format!(
                 "Output device error: le mode DSD de cette zone est réglé sur « natif » \
