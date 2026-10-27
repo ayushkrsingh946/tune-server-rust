@@ -714,9 +714,10 @@ pub fn lire_index(image: &Path) -> io::Result<IndexImage> {
 // ─── Cache des index ────────────────────────────────────────────────────
 
 type CleCache = (PathBuf, u64, Option<std::time::SystemTime>);
+type CacheDesIndex = Mutex<Vec<(CleCache, Arc<IndexImage>)>>;
 
-fn cache() -> &'static Mutex<Vec<(CleCache, Arc<IndexImage>)>> {
-    static CACHE: OnceLock<Mutex<Vec<(CleCache, Arc<IndexImage>)>>> = OnceLock::new();
+fn cache() -> &'static CacheDesIndex {
+    static CACHE: OnceLock<CacheDesIndex> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
