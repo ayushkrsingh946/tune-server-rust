@@ -239,7 +239,8 @@ async fn jouer(state: &AppState, etiquette: &str) {
     assert_eq!(
         rapport["duplicate_tracks_removed"],
         json!(0),
-        "{etiquette} : {rapport}"
+        "{etiquette} : option allumée, « Nettoyage du serveur » a retiré la copie \
+         d'une AUTRE racine : {rapport}"
     );
     assert_eq!(
         rapport["dedup_same_root_only"],
