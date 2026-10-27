@@ -1719,6 +1719,9 @@ pub(crate) async fn jouer_un_flux(
 ) -> Value {
     // #6465 — une station n'appartient à aucun album ni playlist joué avant.
     state.playback.effacer_contexte_de_session(zone_id).await;
+    // #7051 — une station de l'annuaire n'est pas en base : le sondeur, qui y
+    // cherche le logo, le retrouvera ici quand le premier titre arrivera.
+    tune_core::poller::logo_de_lancement::retenir_le_logo_de_lancement(url, logo_url.as_deref());
     let play_req = tune_core::orchestrator::PlayRequest {
         zone_id,
         output_device_id: None,
@@ -4036,3 +4039,7 @@ mod tests_logos_exacts;
 #[cfg(test)]
 #[path = "radios_recherche_diffuseur_6964_tests.rs"]
 mod tests_recherche_diffuseur_6964;
+
+#[cfg(test)]
+#[path = "radios_logo_de_lancement_7051_tests.rs"]
+mod tests_logo_de_lancement_7051;

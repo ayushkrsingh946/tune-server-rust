@@ -508,6 +508,8 @@ pub const ECHECS_SONDAGE_DETAILLES: u32 = 5;
 mod etat;
 use etat::*;
 
+pub mod logo_de_lancement;
+
 /// Retrouver en base la station qui joue, a partir du `source_id` du
 /// now-playing.
 ///
@@ -1320,6 +1322,11 @@ mod bascule_des_niveaux_tests {
 /// station qui n'expose aucune API de now-playing.
 #[cfg(test)]
 mod repli_logo_station_tests;
+
+/// #7051 — une station jouée depuis l'annuaire, hors de « Mes radios », garde
+/// son logo quand le premier titre du flux arrive (Radio Bergeijk, fil 2443).
+#[cfg(test)]
+mod logo_de_lancement_7051_tests;
 
 /// Garde-fou #1998 : c'est le poller qui LIBÈRE l'annonce d'une zone
 /// navigateur.
