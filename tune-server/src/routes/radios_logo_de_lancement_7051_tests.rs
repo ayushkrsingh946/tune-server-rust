@@ -52,3 +52,27 @@ fn jouer_un_flux_retient_le_logo_de_lancement() {
         "le logo doit être retenu AVANT le lancement : le sondeur peut passer aussitôt"
     );
 }
+
+/// La lecture générique d'une zone (`POST /zones/{id}/play` avec
+/// `source: "radio"` et une pochette) retient aussi le logo de lancement,
+/// avant de lancer la lecture.
+#[test]
+fn la_lecture_generique_d_une_radio_retient_le_logo_de_lancement() {
+    let source = include_str!("playback.rs");
+    let debut = source
+        .find("async fn play(")
+        .expect("le play générique existe");
+    let corps = &source[debut..];
+    let fin = corps.find("\n}\n").expect("fin du play générique");
+    let corps = &corps[..fin];
+    let appel = corps
+        .find("retenir_le_logo_de_lancement(")
+        .expect("le play générique doit retenir le logo d'une radio (#7051)");
+    let lecture = corps[appel..]
+        .find("lancer_la_lecture(&state, orch_req")
+        .is_some();
+    assert!(
+        lecture,
+        "le logo doit être retenu AVANT de lancer la lecture de la radio"
+    );
+}
