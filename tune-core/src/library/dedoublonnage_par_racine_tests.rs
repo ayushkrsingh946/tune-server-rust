@@ -17,7 +17,7 @@ fn racines() -> Vec<String> {
 
 #[test]
 fn le_reglage_est_eteint_par_defaut_6917() {
-    assert!(!DEFAUT);
+    const { assert!(!DEFAUT) };
     assert!(!depuis_valeur(None));
     assert!(!depuis_valeur(Some("false")));
     assert!(!depuis_valeur(Some("n'importe quoi")));
