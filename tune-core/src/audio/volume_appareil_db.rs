@@ -282,8 +282,9 @@ mod tests {
         // −45 dB avant, −45 dB après.
         assert!(
             (apres.db_exacts(zone.volume / 100.0) + 45.0).abs() < 1e-9,
-            "{}",
-            zone.volume
+            "le volume enregistré ne garde pas −45 dB sur la nouvelle course : {} % = {} dB",
+            zone.volume,
+            apres.db_exacts(zone.volume / 100.0)
         );
         let l = super::super::volume_limites::lire(&db, id);
         assert!((apres.db_exacts(l.securite.unwrap()) + 24.0).abs() < 1e-9);
