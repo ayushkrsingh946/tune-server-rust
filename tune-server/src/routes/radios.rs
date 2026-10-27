@@ -497,9 +497,39 @@ fn favicon_from_url(url: &str) -> Option<String> {
     if host.is_empty() || !host.contains('.') {
         return None;
     }
-    Some(format!(
-        "https://www.google.com/s2/favicons?domain={host}&sz=128"
-    ))
+    Some(format!("{FAVICON_CALCULEE}domain={host}&sz=128"))
+}
+
+/// Le début des favicons que Tune CALCULE ([`favicon_from_url`]) pour une
+/// station arrivée sans logo. Ce n'est pas un choix de l'utilisateur, et le
+/// relais de pochettes refuse son hôte (`www.google.com` hors de
+/// `HOTES_AUTORISES`) : à l'écran, elle donne un fond gris.
+pub(crate) const FAVICON_CALCULEE: &str = "https://www.google.com/s2/favicons?";
+
+/// #7051 — Le logo d'une station qu'on crée.
+///
+/// Radio Bergeijk (fil forum 2443) : radio-browser publie la variante FLAC
+/// avec une favicon VIDE. Ajoutée par son adresse, la station recevait la
+/// favicon calculée, alors que la fiche de l'annuaire au MÊME flux a un logo.
+///
+/// Dans l'ordre : le logo saisi s'il est renseigné ; sinon celui de la fiche
+/// dont une adresse de flux est celle-ci (jamais par le nom) ; sinon le repli
+/// d'avant (`favicon` quand aucun logo n'était donné, le logo vide sinon).
+pub(crate) fn logo_a_la_creation(
+    annuaire: &[StationAnnuaire],
+    url: &str,
+    saisi: Option<String>,
+    favicon: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if saisi.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+        return saisi;
+    }
+    let de_la_fiche = annuaire
+        .iter()
+        .find(|f| super::radios_annuaire::flux_de_la_fiche(f, url))
+        .and_then(|f| f.logo_url.clone())
+        .filter(|l| !l.trim().is_empty());
+    de_la_fiche.or(saisi).or_else(favicon)
 }
 
 #[derive(Deserialize)]
@@ -1255,7 +1285,9 @@ pub(crate) enum DecisionLogo {
 ///   normalisation près, celle de la station. Pas de nom, pas d'approximation :
 ///   sans adresse commune, aucun logo n'est posé ;
 /// * un logo choisi par l'utilisateur (toute adresse hors du dossier des logos
-///   de l'annuaire, image téléversée, favicon…) n'est jamais touché ;
+///   de l'annuaire, image téléversée…) n'est jamais touché ;
+/// * #7051 — une favicon CALCULÉE par Tune ([`FAVICON_CALCULEE`]) n'est pas un
+///   choix : le logo de la fiche la remplace ; sans fiche, elle reste ;
 /// * un logo de l'ANNUAIRE déjà posé suit sa fiche : si la fiche rapprochée par
 ///   l'adresse porte un autre logo, il est remplacé ; s'il est le logo d'une
 ///   AUTRE fiche, d'une autre adresse et d'un autre nom, alors que la station
@@ -1288,6 +1320,12 @@ pub(crate) fn logo_a_poser(
             Some(logo) => DecisionLogo::Poser(Some(logo)),
             None => DecisionLogo::Garder,
         },
+        Some(logo) if logo.starts_with(FAVICON_CALCULEE) => {
+            match sa_fiche.and_then(|f| f.logo_url.clone()) {
+                Some(neuf) => DecisionLogo::Poser(Some(neuf)),
+                None => DecisionLogo::Garder,
+            }
+        }
         Some(logo) if !logo.starts_with(LOGOS_DE_L_ANNUAIRE) => DecisionLogo::Garder,
         Some(logo) => match sa_fiche {
             Some(f) => match f.logo_url.as_deref() {
@@ -1591,17 +1629,23 @@ async fn create_radio(
             &suggestions,
         );
     }
-    let auto_logo = if body.logo_url.is_none() {
-        favicon_from_url(body.homepage.as_deref().unwrap_or(&url))
-    } else {
-        None
+    // #7051 — sans logo saisi, celui de la fiche au même flux passe avant la
+    // favicon calculée.
+    let logo_url = {
+        let annuaire = state.annuaire_radios.read().ok();
+        logo_a_la_creation(
+            annuaire.as_deref().map(Vec::as_slice).unwrap_or(&[]),
+            &url,
+            body.logo_url,
+            || favicon_from_url(body.homepage.as_deref().unwrap_or(&url)),
+        )
     };
     let station = RadioStation {
         id: None,
         name: body.name,
         url,
         homepage: body.homepage,
-        logo_url: body.logo_url.or(auto_logo),
+        logo_url,
         country: body.country,
         language: body.language,
         genre: body.genre,
@@ -1800,6 +1844,9 @@ pub(crate) async fn jouer_un_flux(
 ) -> Value {
     // #6465 — une station n'appartient à aucun album ni playlist joué avant.
     state.playback.effacer_contexte_de_session(zone_id).await;
+    // #7051 — une station de l'annuaire n'est pas en base : le sondeur, qui y
+    // cherche le logo, le retrouvera ici quand le premier titre arrivera.
+    tune_core::poller::logo_de_lancement::retenir_le_logo_de_lancement(url, logo_url.as_deref());
     let play_req = tune_core::orchestrator::PlayRequest {
         zone_id,
         output_device_id: None,
@@ -2024,13 +2071,23 @@ async fn add_from_web(
             &crate::i18n::t(&lang, "radio.canCloseTab"),
         ));
     }
+    // Fall back to the stream host favicon so a web-added radio shows art.
+    // #7051 — le logo de la fiche au même flux passe avant cette favicon.
+    let logo_url = {
+        let annuaire = state.annuaire_radios.read().ok();
+        logo_a_la_creation(
+            annuaire.as_deref().map(Vec::as_slice).unwrap_or(&[]),
+            &url,
+            q.logo_url.clone(),
+            || favicon_from_url(&url),
+        )
+    };
     let station = RadioStation {
         id: None,
         name: q.name.clone(),
         url: url.clone(),
         homepage: None,
-        // Fall back to the stream host favicon so a web-added radio shows art.
-        logo_url: q.logo_url.clone().or_else(|| favicon_from_url(&url)),
+        logo_url,
         country: q.country,
         language: None,
         genre: q.genre,
@@ -4117,3 +4174,7 @@ mod tests_logos_exacts;
 #[cfg(test)]
 #[path = "radios_recherche_diffuseur_6964_tests.rs"]
 mod tests_recherche_diffuseur_6964;
+
+#[cfg(test)]
+#[path = "radios_logo_de_lancement_7051_tests.rs"]
+mod tests_logo_de_lancement_7051;

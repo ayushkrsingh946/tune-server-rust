@@ -3080,6 +3080,16 @@ async fn play(
             disc_number: None,
             album_ref: album_ref_val.clone(),
         };
+        // #7051 — une radio lancée ici n'est pas forcément dans « Mes radios » :
+        // le sondeur retrouvera son logo par l'adresse du flux.
+        if orch_req.source.as_deref() == Some("radio")
+            && let Some(url) = orch_req.source_id.as_deref()
+        {
+            tune_core::poller::logo_de_lancement::retenir_le_logo_de_lancement(
+                url,
+                orch_req.cover_url.as_deref(),
+            );
+        }
         ancrer_position_demandee(&state, zone_id, orch_req.seek_ms, reprise).await;
         return match lancer_la_lecture(&state, orch_req, reprise).await {
             Ok(result) => {
