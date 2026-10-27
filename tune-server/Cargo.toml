@@ -1478,6 +1478,11 @@ path = "tests/labels_par_le_pilote_4836.rs"
 [[test]]
 name = "identification_choix_4805"
 path = "tests/identification_choix_4805.rs"
+# #6845 — une nuit simulée de la passe de nuit, contre un faux MusicBrainz,
+# horloge donnée. `autotests = false` : sans cette cible, jamais compilé.
+[[test]]
+name = "identification_nuit_6845"
+path = "tests/identification_nuit_6845.rs"
 # #4805 (idée 4) — la passe par empreinte AcoustID, par la route montée, sur
 # des réponses enregistrées et un faux `fpcalc`. `autotests = false` en tête de
 # ce manifeste : sans cette cible, le fichier ne serait jamais compilé.
