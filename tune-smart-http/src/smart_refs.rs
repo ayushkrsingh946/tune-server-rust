@@ -103,6 +103,11 @@ pub trait RefResolver {
     fn smart_entity(&self, kind: RefKind, id: i64) -> Option<SmartEntity>;
     /// Albums d'une collection classique (blob `collections` des settings).
     fn collection_album_ids(&self, id: i64) -> Option<Vec<i64>>;
+    /// #6285 — le verdict hi-res « douteux » est-il montré ? Masqué par
+    /// défaut : seul le résolveur branché sur la base lit le réglage.
+    fn hires_douteux_visible(&self) -> bool {
+        false
+    }
 }
 
 /// Résolveur vide : aucune entité. Pour les chemins sans résolution
@@ -131,6 +136,9 @@ impl<'a> DbRefResolver<'a> {
 }
 
 impl RefResolver for DbRefResolver<'_> {
+    fn hires_douteux_visible(&self) -> bool {
+        tune_core::audio::faux_hires_publie::douteux_visible(self.backend)
+    }
     fn smart_entity(&self, kind: RefKind, id: i64) -> Option<SmartEntity> {
         let sql = match kind {
             RefKind::SmartCollection => {
