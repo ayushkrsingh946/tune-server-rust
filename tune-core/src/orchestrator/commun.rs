@@ -876,6 +876,22 @@ impl PlaybackOrchestrator {
         muted: bool,
         device_id: Option<&str>,
     ) -> OutputCommandResult<()> {
+        let zone_air = ZoneRepo::with_backend(self.db.clone())
+            .get(zone_id)
+            .ok()
+            .flatten()
+            .filter(|z| {
+                z.output_type.as_deref() == Some(crate::outputs::devialet_air::TYPE_DE_SORTIE)
+            });
+        let file_air = zone_air
+            .as_ref()
+            .and_then(|z| z.output_device_id.as_deref())
+            .map(|did| self.volume_coalesceur.file(did, zone_id));
+        if let Some(ref zone) = zone_air {
+            self.playback
+                .marquer_geste_air(zone_id, zone.volume / 100.0, zone.muted)
+                .await;
+        }
         if let Some(did) = device_id {
             let output = { self.outputs.lock().await.get(did) }.ok_or_else(|| {
                 OutputCommandError::failed(
@@ -884,6 +900,16 @@ impl PlaybackOrchestrator {
                 )
             })?;
             output.lock().await.checked_set_mute(muted).await?;
+        }
+        let _tenue_air = if let Some(ref file) = file_air {
+            Some(file.etat.lock().await)
+        } else {
+            None
+        };
+        if let Some(ref zone) = zone_air {
+            self.playback
+                .marquer_geste_air(zone_id, zone.volume / 100.0, zone.muted)
+                .await;
         }
         self.playback.set_mute(zone_id, muted).await;
         ZoneRepo::with_backend(self.db.clone())

@@ -210,6 +210,21 @@ impl DevialetAirOutput {
         self.ecoute.ampli(&self.mac)
     }
 
+    /// #6912 — seulement une annonce encore présente, jamais volume_voulu.
+    pub(crate) fn observation_volume(&self) -> Option<crate::playback::ObservationVolumeAppareil> {
+        if !(self.contexte.activee)() {
+            return None;
+        }
+        let ampli = self.ampli()?;
+        let volume_db = ampli.annonce.volume_db();
+        Some(crate::playback::ObservationVolumeAppareil {
+            device_id: self.device_id.clone(),
+            volume: (self.contexte.bornes_db)().db_vers_volume(volume_db),
+            volume_db,
+            muted: ampli.annonce.sourdine,
+        })
+    }
+
     fn adresse_ampli(&self, a: &AmpliVu) -> SocketAddr {
         SocketAddr::new(a.ip, self.contexte.ports.ampli)
     }

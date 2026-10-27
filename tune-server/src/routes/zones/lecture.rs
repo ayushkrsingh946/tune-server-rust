@@ -392,6 +392,10 @@ pub(super) async fn list_zones(State(state): State<AppState>) -> Json<Value> {
             obj.insert("current_track".into(), json!(ps.now_playing));
             inject_metadata_anchor(obj, &ps);
             inject_session_context(obj, &ps);
+            obj.insert(
+                "device_volume_observation".into(),
+                json!(ps.device_volume_observation),
+            );
             obj.insert("position_ms".into(), json!(ps.position_ms));
             obj.insert("queue_length".into(), json!(ps.queue_length));
             // #3514 — le refus « radio hors file » (#3342) fait partie de la
@@ -612,6 +616,10 @@ pub(crate) async fn get_zone(
                 obj.insert("current_track".into(), json!(ps.now_playing));
                 inject_metadata_anchor(obj, &ps);
                 inject_session_context(obj, &ps);
+                obj.insert(
+                    "device_volume_observation".into(),
+                    json!(ps.device_volume_observation),
+                );
                 obj.insert("position_ms".into(), json!(ps.position_ms));
                 obj.insert("queue_length".into(), json!(ps.queue_length));
                 // Expose the queue index too so the client can refresh the
