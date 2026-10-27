@@ -126,6 +126,10 @@ Pourquoi une règle plutôt qu'une colonne ou un arbre JSON : la colonne
 lecteurs voient la règle, et l'éditeur relit le texte que l'utilisateur a
 écrit. Code : `tune-smart-http/src/requete_enregistree.rs`.
 
+`docs/contrat-web.json` est régénéré depuis le client web
+(`scripts/web-contract-map.py`) : il citera `enregistrement` quand l'éditeur
+le lira. Jusque-là, c'est cette section qui décrit le contrat.
+
 ## Étapes suivantes
 
 1. **Crédits par piste du chantier artistes multiples** (`track_artists`).

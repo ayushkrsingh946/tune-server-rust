@@ -2317,9 +2317,7 @@
         "rules",
         "match_mode"
       ],
-      "champs_optionnels": [
-        "enregistrement"
-      ]
+      "champs_optionnels": []
     },
     {
       "route": "/library/smart-playlists/{}",
