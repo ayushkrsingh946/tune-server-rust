@@ -112,6 +112,17 @@ pub(super) async fn patch_zone(
     {
         return reponse;
     }
+    // #7133 — la zone a changé d'appareil : celui qu'elle quitte se tait,
+    // sans quoi il continue de jouer à côté du nouveau.
+    if let Some(ref nouvelle) = body.output_device_id {
+        couper_l_ancienne_sortie(
+            &state,
+            id,
+            zone_before.output_device_id.as_deref(),
+            Some(nouvelle),
+        )
+        .await;
+    }
 
     if body.brand.is_some() || body.model.is_some() {
         push_device_correction(&state, id).await;
