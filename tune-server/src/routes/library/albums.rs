@@ -1130,6 +1130,7 @@ pub(super) async fn album_bio(
         return Json(json!({
             "album": album.title,
             "bio": bio,
+            "source": prov.as_ref().and_then(|p| p.get("source")).and_then(Value::as_str),
             "bio_provenance": prov,
         }))
         .into_response();
@@ -1199,10 +1200,11 @@ fn repli_sur_la_bio_stockee(
         Some(b) => Json(json!({
             "album": titre,
             "bio": b,
+            "source": prov.as_ref().and_then(|p| p.get("source")).and_then(Value::as_str),
             "bio_provenance": prov,
         }))
         .into_response(),
-        None => Json(json!({"album": titre, "bio": null})).into_response(),
+        None => Json(json!({"album": titre, "bio": null, "source": null})).into_response(),
     }
 }
 
