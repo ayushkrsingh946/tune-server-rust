@@ -2343,10 +2343,10 @@ impl RingBuf {
         let r = self.read.load(Ordering::Acquire);
         let free = cap - (w.wrapping_sub(r)) as usize;
         let n = samples.len().min(free);
-        for i in 0..n {
+        for (i, &sample) in samples[..n].iter().enumerate() {
             let idx = (w as usize + i) % cap;
             // SAFETY: producteur unique, case libre (i < free), index borné.
-            unsafe { *self.buf[idx].get() = samples[i] };
+            unsafe { *self.buf[idx].get() = sample };
         }
         self.write.store(w + n as u64, Ordering::Release);
         // Fil 1908 — ce qui attend le pilote, pour la position audible.
@@ -2369,11 +2369,11 @@ impl RingBuf {
         let avail = (w.wrapping_sub(r)) as usize;
         let n = out.len().min(avail);
         let cap = self.capacity();
-        for i in 0..n {
+        for (i, slot) in out[..n].iter_mut().enumerate() {
             let idx = (r as usize + i) % cap;
             // SAFETY: consommateur unique, case publiée par le Release de
             // `push` que le Acquire ci-dessus a observé.
-            out[i] = map(unsafe { *self.buf[idx].get() });
+            *slot = map(unsafe { *self.buf[idx].get() });
         }
         self.read.store(r + n as u64, Ordering::Release);
         // #3205 : `n < out.len()` ICI, c'est exactement le `read < data.len()`
@@ -2670,17 +2670,14 @@ fn parse_wav_header(header: &[u8]) -> Option<(u16, u32, u16, usize)> {
                 WAVE_FORMAT_IEEE_FLOAT => {
                     // Signal to pcm_bytes_to_f32 that the data is already
                     // IEEE float.  We use 0 as a sentinel value.
-                    if channels > 0 {
-                        let container_bytes = block_align / channels;
-                        // 32-bit float -> sentinel 0; 64-bit float -> unsupported
-                        if container_bytes == 4 {
-                            bit_depth = 0; // sentinel: IEEE float 32-bit
-                        } else {
-                            // 64-bit float — cannot handle, fall through to
-                            // compressed decode path
-                            return None;
-                        }
+                    // Zéro canal : pas de conteneur lisible.
+                    let container_bytes = block_align.checked_div(channels)?;
+                    // 32-bit float -> sentinel 0; 64-bit float -> unsupported
+                    if container_bytes == 4 {
+                        bit_depth = 0; // sentinel: IEEE float 32-bit
                     } else {
+                        // 64-bit float — cannot handle, fall through to
+                        // compressed decode path
                         return None;
                     }
                 }
@@ -3140,6 +3137,10 @@ fn periode_muette<T: Copy>(ring: &RingBuf, output: &mut [T], zero: T) {
 /// `cpal::Device::build_output_stream`. Les réunir ici est ce qui rend le
 /// témoin de #3814 possible, et évite qu'un correctif ne soit posé que dans
 /// une des deux.
+// Le rappel temps réel du pilote : chaque argument est un état partagé
+// distinct que les fermetures `cpal` capturent une à une (six appelants). Les
+// regrouper imposerait de remanier ces fermetures sur le chemin temps réel.
+#[allow(clippy::too_many_arguments)]
 fn render_local_shared_f32_callback(
     ring: &RingBuf,
     volume: &AtomicU32,
@@ -3253,6 +3254,9 @@ where
 /// as orchestrator.rs already does). Only used as a fallback after both
 /// f32 attempts fail, so the f32 happy path is untouched (Pascal, XMOS
 /// USB Audio 2.0 → Totaldac).
+// Même raison que `render_local_shared_f32_callback` : les états partagés
+// passent tels quels dans la fermeture du flux entier, par format (9 appels).
+#[allow(clippy::too_many_arguments)]
 fn build_int_stream<T>(
     device: &cpal::Device,
     cfg: &cpal::StreamConfig,
@@ -3702,6 +3706,9 @@ fn flush_local_dsp(
     queue
 }
 
+// Un argument par étage de traitement (EQ, convolution, crossfeed…), chacun
+// sous son propre verrou ; 41 appels, dont les témoins de chaque étage.
+#[allow(clippy::too_many_arguments)]
 fn apply_local_dsp(
     samples: &mut [f32],
     eq: &std::sync::Mutex<Option<crate::audio::eq::EqProcessor>>,
