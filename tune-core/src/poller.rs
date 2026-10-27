@@ -519,10 +519,10 @@ pub(crate) fn station_du_now_playing(
     repo: &crate::db::radio_repo::RadioRepo,
     source_id: &str,
 ) -> Option<crate::db::radio_repo::RadioStation> {
-    if let Ok(id) = source_id.parse::<i64>() {
-        if let Ok(Some(station)) = repo.get(id) {
-            return Some(station);
-        }
+    if let Ok(id) = source_id.parse::<i64>()
+        && let Ok(Some(station)) = repo.get(id)
+    {
+        return Some(station);
     }
     // Et par URL de flux, qui est ce que le chemin de lecture normal écrit :
     // `POST /radios/{id}/play/{zone_id}` pose `source_id: Some(radio.url)`.

@@ -907,6 +907,7 @@ impl DlnaOutput {
     /// répondeur SSDP sans privilège sur le port 1900. Aucun appelant de
     /// production : les défauts sont [`redecouverte::PORT_SSDP`] et
     /// [`redecouverte::BUDGET_REPONSE`].
+    #[cfg(test)]
     pub(crate) fn with_redecouverte(self, port_ssdp: u16, budget: std::time::Duration) -> Self {
         self.redecouverte
             .port_ssdp
@@ -2755,20 +2756,20 @@ impl OutputTarget for DlnaOutput {
                 // then audio/L16) if we have not tried it yet.
                 if !tried_fallback {
                     tried_fallback = true;
-                    if let Some(fb) = fallback_mime_from_sink(&sink) {
-                        if !fb.eq_ignore_ascii_case(&attempt_mime) {
-                            warn!(
-                                device = %self.name,
-                                advertised_mime = %attempt_mime,
-                                fallback_mime = %fb,
-                                sink = ?sink,
-                                "dlna_set_uri_714_pcm_fallback_retry"
-                            );
-                            attempt_mime = fb;
-                            mime_est_un_alias = false;
-                            replis += 1;
-                            continue;
-                        }
+                    if let Some(fb) = fallback_mime_from_sink(&sink)
+                        && !fb.eq_ignore_ascii_case(&attempt_mime)
+                    {
+                        warn!(
+                            device = %self.name,
+                            advertised_mime = %attempt_mime,
+                            fallback_mime = %fb,
+                            sink = ?sink,
+                            "dlna_set_uri_714_pcm_fallback_retry"
+                        );
+                        attempt_mime = fb;
+                        mime_est_un_alias = false;
+                        replis += 1;
+                        continue;
                     }
                 }
             }
