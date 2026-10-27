@@ -4563,7 +4563,13 @@ impl TrackRepo {
     /// clefant sur `(condensat, Option<cue_start_ms>)` (#3998). Cette
     /// fonction-ci n'a pas cette clef ; tant qu'elle ne l'a pas, elle ne doit
     /// pas voir les pistes CUE.
+    ///
+    /// #6917 — option `library_dedup_same_root_only` allumée, une copie ne se
+    /// replie que sur une copie de la MÊME racine de musique
+    /// ([`crate::library::dedoublonnage_par_racine`]) : le disque et le NAS
+    /// gardent chacun leur entrée. Éteinte, rien ne change.
     pub fn deduplicate(&self) -> Result<i64, TuneError> {
+        let racines = crate::library::dedoublonnage_par_racine::racines_si_active(&*self.db);
         let rows = self.db.query_many(
             "SELECT id, audio_hash, file_path FROM tracks \
              WHERE source = 'local' AND audio_hash IS NOT NULL AND file_path IS NOT NULL \
@@ -4589,7 +4595,11 @@ impl TrackRepo {
             let mut representatives: Vec<(i64, String)> = Vec::new();
             for candidate in group {
                 let is_exact_duplicate = representatives.iter().any(|(_, representative)| {
-                    crate::scanner::hasher::files_are_byte_identical(
+                    crate::library::dedoublonnage_par_racine::repliable(
+                        &candidate.1,
+                        representative,
+                        racines.as_deref(),
+                    ) && crate::scanner::hasher::files_are_byte_identical(
                         std::path::Path::new(&candidate.1),
                         std::path::Path::new(representative),
                     )

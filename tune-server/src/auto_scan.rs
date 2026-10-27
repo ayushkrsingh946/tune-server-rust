@@ -707,7 +707,7 @@ pub fn spawn_auto_scan(db: Arc<dyn DbBackend>, event_bus: Arc<EventBus>) -> Arc<
                 // Lignes posées par un importateur que ce lot reprend (#2939).
                 let mut a_adopter: Vec<i64> = Vec::new();
                 let mut exemplaires_du_lot =
-                    crate::routes::system::scan::ExemplairesDuLot::default();
+                    crate::routes::system::scan::ExemplairesDuLot::pour(&*db);
 
                 // #5202 — relues HORS transaction, sous délai : un fichier qui
                 // ne rend pas la main est sauté et journalisé, il ne fige plus
@@ -2347,6 +2347,13 @@ pub(crate) fn reimporter_fichier_surveillant(
             let candidates = track_repo
                 .paths_by_audio_hash_and_album(hash, aid)
                 .unwrap_or_default();
+            // #6917 — la règle du scan : option allumée, une copie d'une
+            // AUTRE racine entre comme sa propre piste.
+            let candidates = tune_core::library::dedoublonnage_par_racine::candidats_repliables(
+                &sf.path,
+                candidates,
+                tune_core::library::dedoublonnage_par_racine::racines_si_active(&**db).as_deref(),
+            );
             if let Some(existing_path) = tune_core::scanner::hasher::find_byte_identical_path(
                 std::path::Path::new(&sf.path),
                 &candidates,
