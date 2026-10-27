@@ -1658,6 +1658,9 @@ mod signal_path_conteneur_local_6166_tests;
 // #6334 — un AAC Tidal servi en WAV se dit AAC, sans profondeur de bits.
 #[cfg(test)]
 mod signal_path_aac_tidal_6334_tests;
+// #6946 — un titre Spotify se dit Ogg Vorbis 320 kbit/s, avec la raison.
+#[cfg(test)]
+mod signal_path_spotify_6946_tests;
 // #2029 — un DSD qui part en DoP se dit « over PCM (DoP) ».
 #[cfg(test)]
 mod signal_path_dop_2029_tests;

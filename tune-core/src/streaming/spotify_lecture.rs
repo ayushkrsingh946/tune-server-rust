@@ -26,7 +26,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc};
 
-use crate::source_pcm::{FluxPcm, FormatPcm, FournisseurPcm};
+use crate::source_pcm::{FluxPcm, FormatPcm, FournisseurPcm, QualiteRecue};
 use crate::streaming::registry::ServiceRegistry;
 use crate::streaming::spotify::SpotifyService;
 use crate::streaming::spotify_connect::{
@@ -298,6 +298,16 @@ impl FournisseurPcm for FournisseurSpotify {
     /// pré-armement gapless couperait le titre qui joue.
     fn pre_armable(&self) -> bool {
         false
+    }
+
+    /// #6946 — librespot reçoit de l'Ogg Vorbis, au plus 320 kbit/s : le PCM
+    /// qu'il rend n'est pas une source sans perte.
+    fn qualite_recue(&self) -> Option<QualiteRecue> {
+        let q = self.recepteur.qualite_recue();
+        Some(QualiteRecue {
+            codec: q.codec.to_string(),
+            debit_kbps: Some(q.bitrate_kbps),
+        })
     }
 }
 

@@ -83,6 +83,7 @@ impl PlaybackOrchestrator {
             .clone()
             .ok_or_else(|| format!("source « {source} » : source_id requis"))?;
         let depuis_ms = req.seek_ms.unwrap_or(0);
+        let qualite = fournisseur.qualite_recue();
         // #5079 — une lecture EXPLICITE (pas un pré-armement gapless, qui
         // doit laisser finir la piste qui joue) arrête d'abord les pompes que
         // la zone fait encore tourner : un seul bras de lecture ne sert pas
@@ -251,8 +252,10 @@ impl PlaybackOrchestrator {
             bit_depth: Some(format.bits as u32),
             channels: Some(format.canaux as u32),
             origin_url: None,
-            bitrate_kbps: None,
-            format_source: None,
+            // #6946 — ce que la source a reçu avant d'en faire du PCM (Spotify :
+            // Ogg Vorbis 320 kbit/s). Le fil, lui, reste le WAV ci-dessus.
+            bitrate_kbps: qualite.as_ref().and_then(|q| q.debit_kbps),
+            format_source: qualite.map(|q| q.codec),
         })
     }
 
