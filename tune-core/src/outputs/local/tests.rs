@@ -229,7 +229,7 @@ fn la_sortie_expose_les_compteurs_du_vrai_processeur_eq() {
 /// Fait traverser la chaîne DSP locale RÉELLE à un tampon, sans égaliseur,
 /// sans convolveur, sans crossfeed : seul le repli mono peut donc en
 /// changer le contenu.
-fn chaine_locale_nue(mono: bool, pure: bool, dop: bool, pcm: &mut Vec<f32>) {
+fn chaine_locale_nue(mono: bool, pure: bool, dop: bool, pcm: &mut [f32]) {
     let sortie = LocalOutput::new("DAC test".to_string());
     sortie.set_mono_downmix(mono);
     sortie.set_pure_bypass(pure);
@@ -2645,7 +2645,12 @@ fn native_windows_ring_preserves_every_dop_marker_and_payload_byte() {
     observed[written..].fill(0);
     assert_eq!(&observed[..source.len()], source);
     assert!(observed[source.len()..].iter().all(|octet| *octet == 0));
-    for (frame, pair) in observed[..source.len()].chunks_exact(6).enumerate() {
+    for (frame, pair) in observed[..source.len()]
+        .as_chunks::<6>()
+        .0
+        .iter()
+        .enumerate()
+    {
         let marker = if frame % 2 == 0 { 0x05 } else { 0xFA };
         assert_eq!(pair[2], marker);
         assert_eq!(pair[5], marker);
