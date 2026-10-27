@@ -1973,14 +1973,14 @@ impl StreamingService for TidalService {
         let mut data = None;
         let mut downgraded_fallback: Option<serde_json::Value> = None;
         // #6334 — la v2 `trackManifests` d'abord (elle rend le FLAC que la v1
-        // refuse au client de Tune). Une réponse sans perte, ou une réponse à
-        // une demande avec perte, sert telle quelle ; un AAC reçu sur une
-        // demande sans perte n'est qu'un repli, et la cascade v1 est jouée
-        // derrière lui. Tout échec de la v2 laisse la v1 faire, comme avant.
+        // refuse au client de Tune). Seule une réponse qui atteint la qualité
+        // demandée termine la recherche. Un FLAC CD reçu après refus du Hi-Res
+        // reste un repli : la v1 peut encore rendre du Hi-Res (#7196).
+        // Tout échec de la v2 laisse la v1 faire, comme avant.
         match self.manifeste_v2(track_id, requested_quality).await {
             Ok(d) => {
                 let rang = quality_rank(d["audioQuality"].as_str().unwrap_or(""));
-                if rang >= 2 || quality_rank(requested_quality) < 2 {
+                if rang >= quality_rank(requested_quality) {
                     data = Some(d);
                 } else {
                     garder_le_meilleur_repli(&mut downgraded_fallback, d);
