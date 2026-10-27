@@ -586,6 +586,7 @@ fn repli(s: &str) -> String {
 
 /// La fiche répond-elle à la recherche ? Nom, genre, catégories, pays,
 /// description et mots-clés (le diffuseur, #6964), sans accents ni casse.
+/// Tous les mots doivent figurer dans un même champ, dans n'importe quel ordre.
 fn correspond(f: &StationAnnuaire, motif: &str) -> bool {
     if motif.is_empty() {
         return true;
@@ -596,7 +597,10 @@ fn correspond(f: &StationAnnuaire, motif: &str) -> bool {
         .chain(f.description.as_deref())
         .chain(f.categories.iter().map(String::as_str))
         .chain(f.keywords.iter().map(String::as_str))
-        .any(|champ| repli(champ).contains(motif))
+        .any(|champ| {
+            let champ = repli(champ);
+            motif.split_whitespace().all(|mot| champ.contains(mot))
+        })
 }
 
 fn meme_pays(f: &StationAnnuaire, pays: Option<&str>) -> bool {
@@ -1088,3 +1092,7 @@ async fn jouer(
 #[cfg(test)]
 #[path = "radios_annuaire_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "radios_annuaire_recherche_7198_tests.rs"]
+mod tests_recherche_7198;
