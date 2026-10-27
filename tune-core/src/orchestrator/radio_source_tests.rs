@@ -343,23 +343,26 @@ const CAFE_DEL_MAR_CHEMIN: &str = "/se1a320b47/listen";
 
 /// Quatre secondes de MP3 192 kbit/s : la fixture (MPEG-1 couche III,
 /// en-tête `FFFBB000` : 192 kbit/s, 44,1 kHz), puis ses trames répétées sans
-/// leur étiquette ID3.
+/// leur étiquette ID3. Construit une seule fois pour tout le témoin.
 fn mp3_192_en_boucle() -> &'static [u8] {
-    let fixture: &[u8] = include_bytes!("../../tests/fixtures/test.mp3");
-    let premiere_trame = fixture
-        .windows(2)
-        .position(|w| w == [0xFF, 0xFB])
-        .expect("la fixture MP3 a une trame");
-    assert_eq!(
-        &fixture[premiere_trame..premiere_trame + 3],
-        &[0xFF, 0xFB, 0xB0],
-        "la fixture doit rester un MP3 192 kbit/s à 44,1 kHz, comme le flux"
-    );
-    let mut corps = fixture.to_vec();
-    for _ in 0..3 {
-        corps.extend_from_slice(&fixture[premiere_trame..]);
-    }
-    Box::leak(corps.into_boxed_slice())
+    static CORPS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    CORPS.get_or_init(|| {
+        let fixture: &[u8] = include_bytes!("../../tests/fixtures/test.mp3");
+        let premiere_trame = fixture
+            .windows(2)
+            .position(|w| w == [0xFF, 0xFB])
+            .expect("la fixture MP3 a une trame");
+        assert_eq!(
+            &fixture[premiere_trame..premiere_trame + 3],
+            &[0xFF, 0xFB, 0xB0],
+            "la fixture doit rester un MP3 192 kbit/s à 44,1 kHz, comme le flux"
+        );
+        let mut corps = fixture.to_vec();
+        for _ in 0..3 {
+            corps.extend_from_slice(&fixture[premiere_trame..]);
+        }
+        corps
+    })
 }
 
 /// La station rejouée : `CAFE_DEL_MAR_CHEMIN` répond par une redirection
