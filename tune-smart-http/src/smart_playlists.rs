@@ -461,6 +461,21 @@ pub(crate) fn build_smart_query_rapport(
                     regles_sql::FAUX.to_string()
                 }
             }
+        } else if field == "hires_verdict" {
+            // #6285 — le verdict hi-res PUBLIÉ de la piste.
+            match regles_sql::condition_verdict_hires(
+                "t.id",
+                false,
+                op,
+                value,
+                ctx.resolver.hires_douteux_visible(),
+            ) {
+                Some(c) => c,
+                None => {
+                    refusees.push(format!("{field} {op}"));
+                    regles_sql::FAUX.to_string()
+                }
+            }
         } else if field == "rating" {
             // #5547 — la note de l'album de la piste, pour le profil actif.
             match regles_sql::condition_note("t.album_id", op, value_raw, ctx.profile_id) {
