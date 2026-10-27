@@ -4113,6 +4113,23 @@
     "pl": "Otrzymane potwierdzenie nie obejmuje {count} utworów. Nic nie zostało usunięte. Potwierdź dokładnie tę liczbę, aby kontynuować.",
     "el": "Η επιβεβαίωση που λήφθηκε δεν καλύπτει τα {count} κομμάτια. Δεν αφαιρέθηκε τίποτα. Επιβεβαιώστε αυτόν ακριβώς τον αριθμό για να συνεχίσετε."
   },
+  "api.library.nightWindowEmpty": {
+    "fr": "L'heure de début ({start} h) doit précéder l'heure de fin ({end} h). Rien n'a été enregistré.",
+    "en": "The start hour ({start}:00) must come before the end hour ({end}:00). Nothing was saved.",
+    "de": "Die Startstunde ({start}:00) muss vor der Endstunde ({end}:00) liegen. Es wurde nichts gespeichert.",
+    "es": "La hora de inicio ({start}:00) debe ser anterior a la hora de fin ({end}:00). No se ha guardado nada.",
+    "it": "L'ora di inizio ({start}:00) deve precedere l'ora di fine ({end}:00). Non è stato salvato nulla.",
+    "zh": "开始时间（{start}:00）必须早于结束时间（{end}:00）。未保存任何内容。",
+    "ja": "開始時刻（{start}:00）は終了時刻（{end}:00）より前である必要があります。何も保存されていません。",
+    "ko": "시작 시각({start}:00)은 종료 시각({end}:00)보다 앞서야 합니다. 아무것도 저장되지 않았습니다.",
+    "ro": "Ora de început ({start}:00) trebuie să fie înaintea orei de sfârșit ({end}:00). Nu s-a salvat nimic.",
+    "sv": "Starttimmen ({start}:00) måste komma före sluttimmen ({end}:00). Inget sparades.",
+    "hu": "A kezdő órának ({start}:00) a záró óra ({end}:00) előtt kell lennie. Semmi sem lett mentve.",
+    "vi": "Giờ bắt đầu ({start}:00) phải trước giờ kết thúc ({end}:00). Chưa có gì được lưu.",
+    "nb": "Starttimen ({start}:00) må komme før slutttimen ({end}:00). Ingenting ble lagret.",
+    "pl": "Godzina rozpoczęcia ({start}:00) musi poprzedzać godzinę zakończenia ({end}:00). Nic nie zostało zapisane.",
+    "el": "Η ώρα έναρξης ({start}:00) πρέπει να προηγείται της ώρας λήξης ({end}:00). Δεν αποθηκεύτηκε τίποτα."
+  },
   "api.license.activated": {
     "fr": "Licence validée : Premium activé.",
     "en": "License validated: Premium activated.",

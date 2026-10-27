@@ -581,14 +581,19 @@ pub(crate) async fn regler_nuit(
     let nuit = match demandes {
         Ok(n) => n,
         Err(motif) => {
-            return (
+            let (debut, fin) = (
+                corps.heure_debut.unwrap_or(actuels.heure_debut.into()),
+                corps.heure_fin.unwrap_or(actuels.heure_fin.into()),
+            );
+            return crate::message_api::refus(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": motif,
-                    "detail": "L'heure de début doit précéder l'heure de fin.",
-                })),
-            )
-                .into_response();
+                motif,
+                "api.library.nightWindowEmpty",
+                &[
+                    ("start", debut.clamp(0, 23).to_string()),
+                    ("end", fin.clamp(1, 24).to_string()),
+                ],
+            );
         }
     };
     if nuit != actuels {
@@ -814,6 +819,12 @@ mod tests {
         )
         .await;
         assert_eq!(statut, StatusCode::BAD_REQUEST, "{v}");
+        // Un code stable et une phrase traduite, pas du français en dur (#7077).
+        assert_eq!(v["error"], "fenetre_vide", "{v}");
+        assert_eq!(v["message_key"], "api.library.nightWindowEmpty", "{v}");
+        assert_eq!(v["params"], json!({ "start": "5", "end": "4" }), "{v}");
+        let m = v["message"].as_str().unwrap_or_default();
+        assert!(m.starts_with("The start hour (5:00)"), "{v}");
         let nuit = ReglagesDeNuit::lire(&etat.backend);
         assert_eq!((nuit.heure_debut, nuit.heure_fin), (1, 4));
     }
