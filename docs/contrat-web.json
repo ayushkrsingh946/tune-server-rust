@@ -239,12 +239,7 @@
         "volume_ceiling_db",
         "max_sample_rate"
       ],
-      "champs_optionnels": [
-        "volume_floor_db",
-        "volume_step_db",
-        "volume_min_db",
-        "volume_max_db"
-      ]
+      "champs_optionnels": []
     },
     {
       "route": "/devialet-air/reglages",
@@ -260,12 +255,7 @@
         "volume_ceiling_db",
         "max_sample_rate"
       ],
-      "champs_optionnels": [
-        "volume_floor_db",
-        "volume_step_db",
-        "volume_min_db",
-        "volume_max_db"
-      ]
+      "champs_optionnels": []
     },
     {
       "route": "/devices",
@@ -3750,11 +3740,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -5718,11 +5704,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -5805,11 +5787,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -5958,11 +5936,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -6045,11 +6019,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -6328,11 +6298,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -6427,11 +6393,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -6551,11 +6513,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -6691,11 +6649,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -6829,11 +6783,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -6916,11 +6866,7 @@
         "dop_active",
         "detected_manufacturer",
         "detected_model",
-        "identite_appareil_effacee",
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
+        "identite_appareil_effacee"
       ]
     },
     {
@@ -6948,12 +6894,7 @@
         "volume_limit_safety",
         "volume_limit_comfort"
       ],
-      "champs_optionnels": [
-        "device_volume_db",
-        "device_volume_range",
-        "volume_limit_safety_device_db",
-        "volume_limit_comfort_device_db"
-      ]
+      "champs_optionnels": []
     }
   ],
   "non_resolus": [
