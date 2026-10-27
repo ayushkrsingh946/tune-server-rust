@@ -1816,7 +1816,7 @@ async fn enregistrer_la_sortie_mdns_et_sa_zone(
 ) {
     use tune_core::discovery::device::OutputType;
     let mut reg = outputs.lock().await;
-    register_discovered_output(&mut reg, output, &event_bus, &dev, output_type_str, annonce);
+    register_discovered_output(&mut reg, output, event_bus, dev, output_type_str, annonce);
     info!(name = %dev.name, host = %dev.host, port = dev.port, r#type = output_type_str, "mdns_output_registered");
 
     let zone_repo = tune_core::db::zone_repo::ZoneRepo::with_backend(db.clone());
@@ -1830,7 +1830,7 @@ async fn enregistrer_la_sortie_mdns_et_sa_zone(
     // whole reconnect/create block for hidden devices.
     if zone_repo.is_device_hidden(&dev.id) {
         info!(name = %dev.name, id = %dev.id, "mdns_zone_hidden_skipping");
-    } else if let Some((zid, was_hidden)) = legacy_zone_to_reanchor(&zone_repo, &dev) {
+    } else if let Some((zid, was_hidden)) = legacy_zone_to_reanchor(&zone_repo, dev) {
         // Zone creee AVANT #1528, donc enregistree sous
         // l'ancien identifiant derive de l'adresse. On la
         // re-ancre sur le nouvel identifiant durable — c'est
@@ -1852,7 +1852,7 @@ async fn enregistrer_la_sortie_mdns_et_sa_zone(
             },
         );
         if !was_hidden {
-            set_zone_online(&event_bus, &db, &dev.id, true);
+            set_zone_online(event_bus, db, &dev.id, true);
         }
         info!(
             name = %dev.name,
@@ -1862,7 +1862,7 @@ async fn enregistrer_la_sortie_mdns_et_sa_zone(
             "mdns_zone_reanchored_from_legacy_id"
         );
     } else if let Ok(Some(zone)) = zone_repo.get_by_device_id(&dev.id) {
-        set_zone_online(&event_bus, &db, &dev.id, true);
+        set_zone_online(event_bus, db, &dev.id, true);
         if let Some(zone_id) = zone.id {
             let vol = zone.volume / 100.0;
             playback.set_volume(zone_id, vol).await;
@@ -1927,7 +1927,7 @@ async fn enregistrer_la_sortie_mdns_et_sa_zone(
                 },
             );
             let _ = zone_repo.update_output_type(zid, output_type_str);
-            set_zone_online(&event_bus, &db, &dev.id, true);
+            set_zone_online(event_bus, db, &dev.id, true);
             info!(
                 name = %dev.name,
                 id = %dev.id,
@@ -2021,7 +2021,7 @@ async fn enregistrer_la_sortie_mdns_et_sa_zone(
                     },
                 );
                 let _ = zone_repo.update_output_type(zid, output_type_str);
-                set_zone_online(&event_bus, &db, &dev.id, true);
+                set_zone_online(event_bus, db, &dev.id, true);
                 info!(name = %dev.name, id = %dev.id, old_id = ?z.output_device_id, "mdns_zone_device_updated");
             } else if let Some(zid) = zone_repo.find_hidden_id_by_name(&dev.name) {
                 // Une zone SUPPRIMEE portant ce nom. Le
@@ -2048,7 +2048,7 @@ async fn enregistrer_la_sortie_mdns_et_sa_zone(
                 );
                 info!(name = %dev.name, id = %dev.id, zone_id = zid, "mdns_hidden_zone_reanchored");
             } else if let Some((zid, masquee)) =
-                zone_reseau_a_reancrer_par_mac(&zone_repo, &dev, output_type_str)
+                zone_reseau_a_reancrer_par_mac(&zone_repo, dev, output_type_str)
             {
                 // #3919 — les trois filets par NOM viennent
                 // d'echouer ensemble : la zone a ete
@@ -2072,7 +2072,7 @@ async fn enregistrer_la_sortie_mdns_et_sa_zone(
                 );
                 let _ = zone_repo.set_identity(zid, &dev.host, dev.mac_address.as_deref());
                 if !masquee {
-                    set_zone_online(&event_bus, &db, &dev.id, true);
+                    set_zone_online(event_bus, db, &dev.id, true);
                 }
                 info!(
                     name = %dev.name,
@@ -2167,7 +2167,7 @@ async fn enregistrer_la_sortie_mdns_et_sa_zone(
                                         &dev.host,
                                         dev.mac_address.as_deref(),
                                     );
-                                    set_zone_online(&event_bus, &db, &dev.id, true);
+                                    set_zone_online(event_bus, db, &dev.id, true);
                                     info!(name = %dev.name, zone_id = zid, "mdns_zone_already_existed");
                                 }
                                 Err(e) => {
