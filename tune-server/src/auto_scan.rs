@@ -1579,7 +1579,28 @@ fn scan_de_demarrage_arrete(event_bus: &EventBus, etape: &str) {
 /// demande (`auto_scan`), et aussi, seule exception, quand une mise à jour
 /// forcée a arrêté un scan : il reprend alors en incrémental
 /// (`file_needs_scan` saute les fichiers inchangés).
+///
+/// #7169 — sauf si l'utilisateur a éteint « Analyser la bibliothèque au
+/// démarrage » : son choix explicite prime sur la reprise. Le repère est
+/// alors levé, sans quoi il relancerait le scan à chaque démarrage (seul un
+/// scan allé au bout l'efface).
 pub fn scan_au_demarrage(auto_scan: bool, db: &Arc<dyn DbBackend>) -> bool {
+    if choix_utilisateur_lu(db) == Some(false) {
+        if crate::routes::system::scan::reprise_du_scan_demandee(db) {
+            info!(
+                "auto_scan_reprise_abandonnee — « library_scan_on_startup » vaut false : le scan arrêté par une mise à jour n'est pas repris"
+            );
+            crate::routes::system::scan::effacer_reprise_du_scan(db);
+        }
+        if auto_scan {
+            info!(
+                voulu = false,
+                deploiement = auto_scan,
+                "auto_scan_regle_par_l_utilisateur — le réglage « library_scan_on_startup » prime sur la configuration de déploiement"
+            );
+        }
+        return false;
+    }
     let voulu = scan_au_demarrage_voulu(auto_scan, db);
     if voulu != auto_scan {
         info!(
@@ -1621,11 +1642,16 @@ pub fn choix_utilisateur_scan_au_demarrage(brut: Option<&str>) -> Option<bool> {
 /// Le scan de démarrage voulu, selon l'ordre de précédence de
 /// [`CLE_SCAN_AU_DEMARRAGE`]. `auto_scan` est la valeur de déploiement.
 pub fn scan_au_demarrage_voulu(auto_scan: bool, db: &Arc<dyn DbBackend>) -> bool {
+    choix_utilisateur_lu(db).unwrap_or(auto_scan)
+}
+
+/// Le choix de l'utilisateur tel que rangé dans `settings`.
+fn choix_utilisateur_lu(db: &Arc<dyn DbBackend>) -> Option<bool> {
     let brut = tune_core::db::settings_repo::SettingsRepo::with_backend(db.clone())
         .get(CLE_SCAN_AU_DEMARRAGE)
         .ok()
         .flatten();
-    choix_utilisateur_scan_au_demarrage(brut.as_deref()).unwrap_or(auto_scan)
+    choix_utilisateur_scan_au_demarrage(brut.as_deref())
 }
 
 /// Le scan voulu, ou la reprise d'un scan arrêté par une mise à jour (#5531).
