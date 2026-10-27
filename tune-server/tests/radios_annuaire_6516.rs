@@ -20,6 +20,73 @@ use tune_server::routes::radios_annuaire::{self, Releve};
 const EXTRAIT: &str = include_str!("fixtures/annuaire_v2_extrait_20261019.json");
 const ETAG: &str = "W/\"annuaire-6516\"";
 
+// Forme de la fiche Radio Bonheur lue dans le cache RÉEL du .18 le
+// 27/10/2026 (relevé 06:24:55Z). Nom, adresses, logo et identifiants locaux
+// anonymisés ; external_id=null, source, statut et forme des flux conservés.
+const FICHE_PORTAIL_7011: &str = include_str!("fixtures/annuaire_portail_7011_anonymise.json");
+
+#[tokio::test]
+async fn une_fiche_portail_sans_id_externe_reste_adressable_et_s_ajoute_sans_doublon_7011() {
+    let brut: Value = serde_json::from_str(FICHE_PORTAIL_7011).unwrap();
+    let fiches = tune_server::routes::radios::annuaire_depuis_json(&[brut.clone()]);
+    assert_eq!(fiches.len(), 1);
+    assert_eq!(
+        fiches[0].external_id.as_deref(),
+        Some("mozaiklabs:7011001"),
+        "une fiche publiée du portail sans id radio-metadata doit garder une clé de lecture"
+    );
+    assert!(fiches[0].radio_metadata_key.is_none());
+    let state = etat();
+    let repo = RadioRepo::with_backend(state.backend.clone());
+    let avant = repo.list().unwrap().len();
+    let page = radios_annuaire::corps_annuaire(
+        &fiches,
+        &repo.list().unwrap(),
+        &Default::default(),
+        &Default::default(),
+    );
+    assert_eq!(page["items"][0]["external_id"], "mozaiklabs:7011001");
+    // La fiche n'a pas de relais de titres. Ce témoin n'a pas à remplacer
+    // le registre global que les autres tests d'annuaire emploient.
+    *state.annuaire_radios.write().unwrap() = fiches;
+    let app = tune_server::routes::router(state.clone());
+    let chemin = "/api/v1/radios/directory/mozaiklabs%3A7011001/add";
+    let (status, ajoutee) = requete(&app, "POST", chemin, None).await;
+    assert_eq!(status, StatusCode::CREATED, "{ajoutee}");
+    let id = ajoutee["id"].as_i64().unwrap();
+    let (status, seconde) = requete(&app, "POST", chemin, None).await;
+    assert_eq!(status, StatusCode::OK, "{seconde}");
+    assert_eq!(seconde["id"], id);
+    assert_eq!(repo.list().unwrap().len(), avant + 1);
+    assert_eq!(repo.liens_annuaire().unwrap()[&id], "mozaiklabs:7011001");
+
+    // Le lien n'est ni le nom ni le flux : une correction de la fiche ne
+    // crée pas une deuxième radio lors du prochain ajout.
+    let mut modifiee = brut;
+    modifiee["name"] = json!("Nouveau nom anonymisé");
+    modifiee["stream_url"] = json!("https://station-7011.example/nouveau.mp3");
+    *state.annuaire_radios.write().unwrap() =
+        tune_server::routes::radios::annuaire_depuis_json(&[modifiee]);
+    let (status, retrouvee) = requete(&app, "POST", chemin, None).await;
+    assert_eq!(status, StatusCode::OK, "{retrouvee}");
+    assert_eq!(retrouvee["id"], id);
+    assert_eq!(repo.list().unwrap().len(), avant + 1);
+}
+
+#[test]
+fn le_repli_7011_ne_remplace_pas_un_id_externe_et_n_invente_pas_un_id_absent() {
+    let mut brut: Value = serde_json::from_str(FICHE_PORTAIL_7011).unwrap();
+    brut["external_id"] = json!(" S007011 ");
+    let f = tune_server::routes::radios::annuaire_depuis_json(&[brut.clone()]);
+    assert_eq!(f[0].external_id.as_deref(), Some("S007011"));
+    for invalide in [Value::Null, json!(0), json!(-1), json!("7011001")] {
+        brut["external_id"] = Value::Null;
+        brut["id"] = invalide;
+        let f = tune_server::routes::radios::annuaire_depuis_json(&[brut.clone()]);
+        assert!(f[0].external_id.is_none());
+    }
+}
+
 fn etat() -> tune_server::state::AppState {
     tune_server::state::AppState::new(":memory:", 0, Default::default()).unwrap()
 }
