@@ -1748,387 +1748,18 @@ pub fn spawn_mdns_handler(
                     };
 
                     if let Some(output) = output {
-                        let mut reg = outputs.lock().await;
-                        register_discovered_output(
-                            &mut reg,
-                            output,
+                        enregistrer_la_sortie_mdns_et_sa_zone(
+                            &outputs,
+                            &db,
                             &event_bus,
+                            &playback,
                             &dev,
+                            output,
                             output_type_str,
+                            airplay_v2_fallback,
                             annonce,
-                        );
-                        info!(name = %dev.name, host = %dev.host, port = dev.port, r#type = output_type_str, "mdns_output_registered");
-
-                        let zone_repo =
-                            tune_core::db::zone_repo::ZoneRepo::with_backend(db.clone());
-                        // Honour a user deletion: deleting a zone soft-hides it
-                        // (is_hidden=1). The SSDP handler already skips hidden
-                        // devices; the mDNS handler did not, so an AirPlay/
-                        // Chromecast/BluOS device (e.g. Fabien's Beosound Stage)
-                        // was reconnected — or, with no device_id match, re-created
-                        // via auto_create — at startup, resurrecting the deleted
-                        // zone even with "create zones automatically" OFF. Skip the
-                        // whole reconnect/create block for hidden devices.
-                        if zone_repo.is_device_hidden(&dev.id) {
-                            info!(name = %dev.name, id = %dev.id, "mdns_zone_hidden_skipping");
-                        } else if let Some((zid, was_hidden)) =
-                            legacy_zone_to_reanchor(&zone_repo, &dev)
-                        {
-                            // Zone creee AVANT #1528, donc enregistree sous
-                            // l'ancien identifiant derive de l'adresse. On la
-                            // re-ancre sur le nouvel identifiant durable — c'est
-                            // ce qui remplace la migration SQL, qui n'aurait pas
-                            // pu calculer ces identifiants (ils ne sont connus
-                            // qu'a la decouverte) et aurait fait perdre toutes
-                            // les zones d'un coup.
-                            //
-                            // Une zone supprimee reste supprimee : on deplace
-                            // son identifiant sans la remettre en ligne, sinon
-                            // la mise a jour ressusciterait ce que
-                            // l'utilisateur avait efface.
-                            let _ = zone_repo.changer_d_appareil(
-                                zid,
-                                &dev.id,
-                                tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
-                                    origine: "mdns_reancrage_identifiant_herite",
-                                    mac: dev.mac_address.as_deref(),
-                                },
-                            );
-                            if !was_hidden {
-                                set_zone_online(&event_bus, &db, &dev.id, true);
-                            }
-                            info!(
-                                name = %dev.name,
-                                id = %dev.id,
-                                zone_id = zid,
-                                hidden = was_hidden,
-                                "mdns_zone_reanchored_from_legacy_id"
-                            );
-                        } else if let Ok(Some(zone)) = zone_repo.get_by_device_id(&dev.id) {
-                            set_zone_online(&event_bus, &db, &dev.id, true);
-                            if let Some(zone_id) = zone.id {
-                                let vol = zone.volume / 100.0;
-                                playback.set_volume(zone_id, vol).await;
-                            }
-                            info!(name = %dev.name, id = %dev.id, "mdns_zone_reconnected");
-                            event_bus.emit(
-                                "device.reconnected",
-                                serde_json::json!({
-                                    "device_id": &dev.id,
-                                    "name": &dev.name,
-                                }),
-                            );
-                        } else if airplay_v2_fallback {
-                            // No existing zone for this device and the legacy
-                            // AirPlay fallback can never play on it (v2 pairing
-                            // required → ANNOUNCE 403): don't auto-create a
-                            // guaranteed-dead zone, and don't let it capture an
-                            // existing same-name/same-host zone of another
-                            // protocol either (forum #1183).
-                            info!(name = %dev.name, id = %dev.id, "mdns_zone_skipped_airplay_v2_fallback");
-                        } else {
-                            let existing = zone_repo.list().unwrap_or_default();
-
-                            // When a higher-priority protocol discovers a device at the
-                            // same host as an existing zone (e.g. BluOS vs AirPlay for a
-                            // Bluesound Node), upgrade the zone to the better protocol
-                            // instead of creating a duplicate.
-                            let upgrade_zone = zone_a_monter_en_priorite(
-                                &existing,
-                                |id| reg.host_of(id),
-                                &dev.host,
-                                dev.device_type,
-                            );
-                            // #6393 — la montée vers OAAT que permet désormais
-                            // l'hôte du registre ne coupe pas une lecture en
-                            // cours : elle attend une annonce suivante.
-                            let montee_reportee = match upgrade_zone.and_then(|z| z.id) {
-                                Some(zid) if dev.device_type == OutputType::Oaat => {
-                                    playback.get_state(zid).await.state
-                                        == tune_core::playback::PlayState::Playing
-                                }
-                                _ => false,
-                            };
-                            if montee_reportee {
-                                info!(
-                                    name = %dev.name,
-                                    id = %dev.id,
-                                    zone = ?upgrade_zone.map(|z| z.name.as_str()),
-                                    "mdns_montee_de_priorite_reportee_zone_en_lecture"
-                                );
-                            }
-                            let upgrade_zone = upgrade_zone.filter(|_| !montee_reportee);
-
-                            if let Some(z) = upgrade_zone
-                                && let Some(zid) = z.id
-                            {
-                                // Remove the old lower-priority output
-                                if let Some(ref old_dev_id) = z.output_device_id {
-                                    reg.remove(old_dev_id);
-                                }
-                                let _ = zone_repo.changer_d_appareil(
-                                    zid,
-                                    &dev.id,
-                                    tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
-                                        origine: "mdns_montee_de_priorite",
-                                        mac: dev.mac_address.as_deref(),
-                                    },
-                                );
-                                let _ = zone_repo.update_output_type(zid, output_type_str);
-                                set_zone_online(&event_bus, &db, &dev.id, true);
-                                info!(
-                                    name = %dev.name,
-                                    id = %dev.id,
-                                    old_id = ?z.output_device_id,
-                                    old_type = ?z.output_type,
-                                    new_type = output_type_str,
-                                    "mdns_zone_upgraded_to_higher_priority"
-                                );
-                            } else {
-                                // Check if a zone with the same name exists but different
-                                // device_id (device_id may have changed after a firmware
-                                // update / re-pairing).
-                                let same_name_zone = existing.iter().find(|z| z.name == dev.name);
-                                // #4520 — la sortie que la zone quitte est-elle
-                                // encore EN SERVICE ? Un Endpoint OAAT qui
-                                // redemarre s'annonce sous un nouvel identifiant,
-                                // au meme hote : re-ancrer en pleine lecture
-                                // laissait le sondeur surveiller la nouvelle
-                                // sortie, inactive, et couper la bonne.
-                                let ancienne_en_service = match same_name_zone
-                                    .and_then(|z| z.output_device_id.as_deref())
-                                {
-                                    Some(ancien) if ancien != dev.id => {
-                                        let etat = match reg.get(ancien) {
-                                            // Verrou tenu = sortie occupee par
-                                            // l'orchestrateur : en service.
-                                            Some(sortie) => match sortie.try_lock() {
-                                                Ok(s) => Some(
-                                                    s.get_status().await.map(|st| st.state).ok(),
-                                                ),
-                                                Err(_) => Some(None),
-                                            },
-                                            None => None,
-                                        };
-                                        reancrage_a_differer(
-                                            reg.type_of(ancien).as_deref(),
-                                            reg.host_of(ancien).as_deref(),
-                                            output_type_str,
-                                            &dev.host,
-                                            etat,
-                                        )
-                                    }
-                                    _ => false,
-                                };
-                                // #6947 — une zone montée vers un protocole
-                                // préféré ne redescend pas parce qu'une
-                                // annonce moins bonne porte son nom.
-                                let retrogradation = same_name_zone.is_some_and(|z| {
-                                    let ancienne_enregistree = z
-                                        .output_device_id
-                                        .as_deref()
-                                        .is_some_and(|a| a != dev.id && reg.type_of(a).is_some());
-                                    retrogradation_par_meme_nom(
-                                        z.output_type.as_deref(),
-                                        ancienne_enregistree,
-                                        dev.device_type,
-                                    )
-                                });
-                                if ancienne_en_service {
-                                    info!(
-                                        name = %dev.name,
-                                        id = %dev.id,
-                                        old_id = ?same_name_zone.and_then(|z| z.output_device_id.clone()),
-                                        "mdns_zone_device_update_deferred_while_in_use"
-                                    );
-                                } else if retrogradation {
-                                    info!(
-                                        name = %dev.name,
-                                        id = %dev.id,
-                                        old_id = ?same_name_zone.and_then(|z| z.output_device_id.clone()),
-                                        old_type = ?same_name_zone.and_then(|z| z.output_type.clone()),
-                                        new_type = output_type_str,
-                                        "mdns_zone_meme_nom_retrogradation_refusee"
-                                    );
-                                } else if let Some(z) = same_name_zone
-                                    && let Some(zid) = z.id
-                                {
-                                    let _ = zone_repo.changer_d_appareil(
-                                        zid,
-                                        &dev.id,
-                                        tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
-                                            origine: "mdns_meme_nom",
-                                            mac: dev.mac_address.as_deref(),
-                                        },
-                                    );
-                                    let _ = zone_repo.update_output_type(zid, output_type_str);
-                                    set_zone_online(&event_bus, &db, &dev.id, true);
-                                    info!(name = %dev.name, id = %dev.id, old_id = ?z.output_device_id, "mdns_zone_device_updated");
-                                } else if let Some(zid) =
-                                    zone_repo.find_hidden_id_by_name(&dev.name)
-                                {
-                                    // Une zone SUPPRIMEE portant ce nom. Le
-                                    // garde-fou `is_device_hidden` en haut de
-                                    // ce bloc ne l'a pas vue : il teste le
-                                    // nouvel identifiant, la ligne masquee
-                                    // porte l'ancien. Et le rattrapage par nom
-                                    // juste au-dessus ne pouvait pas la voir non
-                                    // plus — `list()` filtre les masquees.
-                                    // Sans ce cas, la zone renaissait a neuf a
-                                    // chaque changement d'adresse (#1528).
-                                    //
-                                    // On la re-ancre sur le nouvel identifiant
-                                    // SANS la demasquer : la suppression reste
-                                    // une suppression, et le garde-fou redevient
-                                    // operant des le tour suivant.
-                                    let _ = zone_repo.changer_d_appareil(
-                                        zid,
-                                        &dev.id,
-                                        tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
-                                            origine: "mdns_zone_masquee_meme_nom",
-                                            mac: dev.mac_address.as_deref(),
-                                        },
-                                    );
-                                    info!(name = %dev.name, id = %dev.id, zone_id = zid, "mdns_hidden_zone_reanchored");
-                                } else if let Some((zid, masquee)) = zone_reseau_a_reancrer_par_mac(
-                                    &zone_repo,
-                                    &dev,
-                                    output_type_str,
-                                ) {
-                                    // #3919 — les trois filets par NOM viennent
-                                    // d'echouer ensemble : la zone a ete
-                                    // renommee. Sans ce quatrieme, le flux
-                                    // tombe dans `auto_create` et laisse les
-                                    // reglages sur une ligne orpheline. La MAC,
-                                    // elle, n'a pas bouge.
-                                    //
-                                    // Une zone SUPPRIMEE se re-ancre sans se
-                                    // demasquer, comme au-dessus : la
-                                    // suppression reste une suppression, et le
-                                    // garde-fou `is_device_hidden` redevient
-                                    // operant des le tour suivant.
-                                    let _ = zone_repo.changer_d_appareil(
-                                        zid,
-                                        &dev.id,
-                                        tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
-                                            origine: "mdns_reancrage_par_mac",
-                                            mac: dev.mac_address.as_deref(),
-                                        },
-                                    );
-                                    let _ = zone_repo.set_identity(
-                                        zid,
-                                        &dev.host,
-                                        dev.mac_address.as_deref(),
-                                    );
-                                    if !masquee {
-                                        set_zone_online(&event_bus, &db, &dev.id, true);
-                                    }
-                                    info!(
-                                        name = %dev.name,
-                                        id = %dev.id,
-                                        zone_id = zid,
-                                        hidden = masquee,
-                                        mac = ?dev.mac_address,
-                                        "mdns_zone_reancree_par_mac"
-                                    );
-                                } else {
-                                    // Cross-protocol dedup (forum #1183): the
-                                    // same physical device may already be a
-                                    // zone through another protocol — e.g. a
-                                    // Samsung S95BA TV present as a (renamed)
-                                    // DLNA zone that also announces AirPlay
-                                    // over mDNS. Match against the output
-                                    // registry (same name + same host across
-                                    // protocols) AND against existing zones by
-                                    // the REAL host of their registered output
-                                    // (`host_of`, robust for DLNA `uuid:…`
-                                    // device_ids the old "{type}-{host}-{port}"
-                                    // parsing mangled) or by case-insensitive
-                                    // name. Skip zone creation on conflict.
-                                    let registry_conflicts = reg.conflicting_outputs_same_host(
-                                        &dev.name,
-                                        output_type_str,
-                                        &dev.host,
-                                    );
-                                    let zone_conflict = physical_zone_conflict(
-                                        &zone_repo,
-                                        &existing,
-                                        |id| reg.host_of(id),
-                                        &dev.name,
-                                        &dev.host,
-                                        dev.mac_address.as_deref(),
-                                        output_type_str,
-                                    );
-                                    if !registry_conflicts.is_empty() || zone_conflict.is_some() {
-                                        info!(
-                                            name = %dev.name,
-                                            id = %dev.id,
-                                            host = %dev.host,
-                                            r#type = output_type_str,
-                                            registry_conflicts = ?registry_conflicts,
-                                            conflicting_zone = ?zone_conflict,
-                                            "mdns_zone_skipped_conflicting_protocol"
-                                        );
-                                    } else {
-                                        // Check zone_auto_create setting (#3529 :
-                                        // lecture unique, portée par `ZoneRepo`).
-                                        let auto_create = zone_repo.zone_auto_create_autorise();
-                                        if !auto_create {
-                                            info!(name = %dev.name, id = %dev.id, "mdns_zone_auto_create_disabled_skipping");
-                                        } else {
-                                            // Auto-created zones start dormant; the
-                                            // free-tier cap is enforced at first play.
-                                            {
-                                                match zone_repo.get_or_create(
-                                                    &dev.name,
-                                                    Some(output_type_str),
-                                                    &dev.id,
-                                                ) {
-                                                    Ok((zid, true)) => {
-                                                        // Persist the physical identity so later
-                                                        // discoveries of the SAME device under
-                                                        // another protocol/UUID find this zone.
-                                                        let _ = zone_repo.set_identity(
-                                                            zid,
-                                                            &dev.host,
-                                                            dev.mac_address.as_deref(),
-                                                        );
-                                                        event_bus.emit_typed(
-                                                            EventType::ZoneCreated,
-                                                            charge_utile_zone_creee(
-                                                                &zone_repo,
-                                                                zid,
-                                                                serde_json::json!({
-                                                                    "zone_id": zid,
-                                                                    "name": dev.name,
-                                                                    "device_id": dev.id,
-                                                                    "type": output_type_str,
-                                                                }),
-                                                            ),
-                                                        );
-                                                        info!(name = %dev.name, zone_id = zid, r#type = output_type_str, "mdns_zone_auto_created");
-                                                    }
-                                                    Ok((zid, false)) => {
-                                                        let _ = zone_repo.set_identity(
-                                                            zid,
-                                                            &dev.host,
-                                                            dev.mac_address.as_deref(),
-                                                        );
-                                                        set_zone_online(
-                                                            &event_bus, &db, &dev.id, true,
-                                                        );
-                                                        info!(name = %dev.name, zone_id = zid, "mdns_zone_already_existed");
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!(name = %dev.name, device = %dev.id, error = %e, "mdns_zone_create_failed");
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        )
+                        .await;
                     }
                 }
                 MdnsEvent::DeviceLost(id) => {
@@ -2159,6 +1790,408 @@ pub fn spawn_mdns_handler(
     }
 
     handle
+}
+
+/// Enregistre la sortie d'un appareil annoncé par mDNS, puis rattache ou crée
+/// sa zone : reconnexion, montée de priorité, ré-ancrages, dédoublonnage entre
+/// protocoles et création automatique.
+///
+/// Sorti de la boucle de `spawn_mdns_handler` pour qu'un banc puisse rejouer
+/// une suite d'annonces sur une vraie base, sans réseau (#6947).
+#[allow(clippy::too_many_arguments)]
+async fn enregistrer_la_sortie_mdns_et_sa_zone(
+    outputs: &Arc<tokio::sync::Mutex<OutputRegistry>>,
+    db: &Arc<dyn DbBackend>,
+    event_bus: &Arc<EventBus>,
+    playback: &Arc<tune_core::playback::PlaybackManager>,
+    dev: &tune_core::discovery::device::DiscoveredDevice,
+    output: Box<dyn tune_core::outputs::OutputTarget>,
+    output_type_str: &str,
+    airplay_v2_fallback: bool,
+    annonce: AnnonceAppareil,
+) {
+    use tune_core::discovery::device::OutputType;
+    let mut reg = outputs.lock().await;
+    register_discovered_output(
+        &mut reg,
+        output,
+        &event_bus,
+        &dev,
+        output_type_str,
+        annonce,
+    );
+    info!(name = %dev.name, host = %dev.host, port = dev.port, r#type = output_type_str, "mdns_output_registered");
+
+    let zone_repo =
+        tune_core::db::zone_repo::ZoneRepo::with_backend(db.clone());
+    // Honour a user deletion: deleting a zone soft-hides it
+    // (is_hidden=1). The SSDP handler already skips hidden
+    // devices; the mDNS handler did not, so an AirPlay/
+    // Chromecast/BluOS device (e.g. Fabien's Beosound Stage)
+    // was reconnected — or, with no device_id match, re-created
+    // via auto_create — at startup, resurrecting the deleted
+    // zone even with "create zones automatically" OFF. Skip the
+    // whole reconnect/create block for hidden devices.
+    if zone_repo.is_device_hidden(&dev.id) {
+        info!(name = %dev.name, id = %dev.id, "mdns_zone_hidden_skipping");
+    } else if let Some((zid, was_hidden)) =
+        legacy_zone_to_reanchor(&zone_repo, &dev)
+    {
+        // Zone creee AVANT #1528, donc enregistree sous
+        // l'ancien identifiant derive de l'adresse. On la
+        // re-ancre sur le nouvel identifiant durable — c'est
+        // ce qui remplace la migration SQL, qui n'aurait pas
+        // pu calculer ces identifiants (ils ne sont connus
+        // qu'a la decouverte) et aurait fait perdre toutes
+        // les zones d'un coup.
+        //
+        // Une zone supprimee reste supprimee : on deplace
+        // son identifiant sans la remettre en ligne, sinon
+        // la mise a jour ressusciterait ce que
+        // l'utilisateur avait efface.
+        let _ = zone_repo.changer_d_appareil(
+            zid,
+            &dev.id,
+            tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                origine: "mdns_reancrage_identifiant_herite",
+                mac: dev.mac_address.as_deref(),
+            },
+        );
+        if !was_hidden {
+            set_zone_online(&event_bus, &db, &dev.id, true);
+        }
+        info!(
+            name = %dev.name,
+            id = %dev.id,
+            zone_id = zid,
+            hidden = was_hidden,
+            "mdns_zone_reanchored_from_legacy_id"
+        );
+    } else if let Ok(Some(zone)) = zone_repo.get_by_device_id(&dev.id) {
+        set_zone_online(&event_bus, &db, &dev.id, true);
+        if let Some(zone_id) = zone.id {
+            let vol = zone.volume / 100.0;
+            playback.set_volume(zone_id, vol).await;
+        }
+        info!(name = %dev.name, id = %dev.id, "mdns_zone_reconnected");
+        event_bus.emit(
+            "device.reconnected",
+            serde_json::json!({
+                "device_id": &dev.id,
+                "name": &dev.name,
+            }),
+        );
+    } else if airplay_v2_fallback {
+        // No existing zone for this device and the legacy
+        // AirPlay fallback can never play on it (v2 pairing
+        // required → ANNOUNCE 403): don't auto-create a
+        // guaranteed-dead zone, and don't let it capture an
+        // existing same-name/same-host zone of another
+        // protocol either (forum #1183).
+        info!(name = %dev.name, id = %dev.id, "mdns_zone_skipped_airplay_v2_fallback");
+    } else {
+        let existing = zone_repo.list().unwrap_or_default();
+
+        // When a higher-priority protocol discovers a device at the
+        // same host as an existing zone (e.g. BluOS vs AirPlay for a
+        // Bluesound Node), upgrade the zone to the better protocol
+        // instead of creating a duplicate.
+        let upgrade_zone = zone_a_monter_en_priorite(
+            &existing,
+            |id| reg.host_of(id),
+            &dev.host,
+            dev.device_type,
+        );
+        // #6393 — la montée vers OAAT que permet désormais
+        // l'hôte du registre ne coupe pas une lecture en
+        // cours : elle attend une annonce suivante.
+        let montee_reportee = match upgrade_zone.and_then(|z| z.id) {
+            Some(zid) if dev.device_type == OutputType::Oaat => {
+                playback.get_state(zid).await.state
+                    == tune_core::playback::PlayState::Playing
+            }
+            _ => false,
+        };
+        if montee_reportee {
+            info!(
+                name = %dev.name,
+                id = %dev.id,
+                zone = ?upgrade_zone.map(|z| z.name.as_str()),
+                "mdns_montee_de_priorite_reportee_zone_en_lecture"
+            );
+        }
+        let upgrade_zone = upgrade_zone.filter(|_| !montee_reportee);
+
+        if let Some(z) = upgrade_zone
+            && let Some(zid) = z.id
+        {
+            // Remove the old lower-priority output
+            if let Some(ref old_dev_id) = z.output_device_id {
+                reg.remove(old_dev_id);
+            }
+            let _ = zone_repo.changer_d_appareil(
+                zid,
+                &dev.id,
+                tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                    origine: "mdns_montee_de_priorite",
+                    mac: dev.mac_address.as_deref(),
+                },
+            );
+            let _ = zone_repo.update_output_type(zid, output_type_str);
+            set_zone_online(&event_bus, &db, &dev.id, true);
+            info!(
+                name = %dev.name,
+                id = %dev.id,
+                old_id = ?z.output_device_id,
+                old_type = ?z.output_type,
+                new_type = output_type_str,
+                "mdns_zone_upgraded_to_higher_priority"
+            );
+        } else {
+            // Check if a zone with the same name exists but different
+            // device_id (device_id may have changed after a firmware
+            // update / re-pairing).
+            let same_name_zone = existing.iter().find(|z| z.name == dev.name);
+            // #4520 — la sortie que la zone quitte est-elle
+            // encore EN SERVICE ? Un Endpoint OAAT qui
+            // redemarre s'annonce sous un nouvel identifiant,
+            // au meme hote : re-ancrer en pleine lecture
+            // laissait le sondeur surveiller la nouvelle
+            // sortie, inactive, et couper la bonne.
+            let ancienne_en_service = match same_name_zone
+                .and_then(|z| z.output_device_id.as_deref())
+            {
+                Some(ancien) if ancien != dev.id => {
+                    let etat = match reg.get(ancien) {
+                        // Verrou tenu = sortie occupee par
+                        // l'orchestrateur : en service.
+                        Some(sortie) => match sortie.try_lock() {
+                            Ok(s) => Some(
+                                s.get_status().await.map(|st| st.state).ok(),
+                            ),
+                            Err(_) => Some(None),
+                        },
+                        None => None,
+                    };
+                    reancrage_a_differer(
+                        reg.type_of(ancien).as_deref(),
+                        reg.host_of(ancien).as_deref(),
+                        output_type_str,
+                        &dev.host,
+                        etat,
+                    )
+                }
+                _ => false,
+            };
+            // #6947 — une zone montée vers un protocole
+            // préféré ne redescend pas parce qu'une
+            // annonce moins bonne porte son nom.
+            let retrogradation = same_name_zone.is_some_and(|z| {
+                let ancienne_enregistree = z
+                    .output_device_id
+                    .as_deref()
+                    .is_some_and(|a| a != dev.id && reg.type_of(a).is_some());
+                retrogradation_par_meme_nom(
+                    z.output_type.as_deref(),
+                    ancienne_enregistree,
+                    dev.device_type,
+                )
+            });
+            if ancienne_en_service {
+                info!(
+                    name = %dev.name,
+                    id = %dev.id,
+                    old_id = ?same_name_zone.and_then(|z| z.output_device_id.clone()),
+                    "mdns_zone_device_update_deferred_while_in_use"
+                );
+            } else if retrogradation {
+                info!(
+                    name = %dev.name,
+                    id = %dev.id,
+                    old_id = ?same_name_zone.and_then(|z| z.output_device_id.clone()),
+                    old_type = ?same_name_zone.and_then(|z| z.output_type.clone()),
+                    new_type = output_type_str,
+                    "mdns_zone_meme_nom_retrogradation_refusee"
+                );
+            } else if let Some(z) = same_name_zone
+                && let Some(zid) = z.id
+            {
+                let _ = zone_repo.changer_d_appareil(
+                    zid,
+                    &dev.id,
+                    tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                        origine: "mdns_meme_nom",
+                        mac: dev.mac_address.as_deref(),
+                    },
+                );
+                let _ = zone_repo.update_output_type(zid, output_type_str);
+                set_zone_online(&event_bus, &db, &dev.id, true);
+                info!(name = %dev.name, id = %dev.id, old_id = ?z.output_device_id, "mdns_zone_device_updated");
+            } else if let Some(zid) =
+                zone_repo.find_hidden_id_by_name(&dev.name)
+            {
+                // Une zone SUPPRIMEE portant ce nom. Le
+                // garde-fou `is_device_hidden` en haut de
+                // ce bloc ne l'a pas vue : il teste le
+                // nouvel identifiant, la ligne masquee
+                // porte l'ancien. Et le rattrapage par nom
+                // juste au-dessus ne pouvait pas la voir non
+                // plus — `list()` filtre les masquees.
+                // Sans ce cas, la zone renaissait a neuf a
+                // chaque changement d'adresse (#1528).
+                //
+                // On la re-ancre sur le nouvel identifiant
+                // SANS la demasquer : la suppression reste
+                // une suppression, et le garde-fou redevient
+                // operant des le tour suivant.
+                let _ = zone_repo.changer_d_appareil(
+                    zid,
+                    &dev.id,
+                    tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                        origine: "mdns_zone_masquee_meme_nom",
+                        mac: dev.mac_address.as_deref(),
+                    },
+                );
+                info!(name = %dev.name, id = %dev.id, zone_id = zid, "mdns_hidden_zone_reanchored");
+            } else if let Some((zid, masquee)) = zone_reseau_a_reancrer_par_mac(
+                &zone_repo,
+                &dev,
+                output_type_str,
+            ) {
+                // #3919 — les trois filets par NOM viennent
+                // d'echouer ensemble : la zone a ete
+                // renommee. Sans ce quatrieme, le flux
+                // tombe dans `auto_create` et laisse les
+                // reglages sur une ligne orpheline. La MAC,
+                // elle, n'a pas bouge.
+                //
+                // Une zone SUPPRIMEE se re-ancre sans se
+                // demasquer, comme au-dessus : la
+                // suppression reste une suppression, et le
+                // garde-fou `is_device_hidden` redevient
+                // operant des le tour suivant.
+                let _ = zone_repo.changer_d_appareil(
+                    zid,
+                    &dev.id,
+                    tune_core::audio::reglages_de_volume::Rattachement::SansPreuve {
+                        origine: "mdns_reancrage_par_mac",
+                        mac: dev.mac_address.as_deref(),
+                    },
+                );
+                let _ = zone_repo.set_identity(
+                    zid,
+                    &dev.host,
+                    dev.mac_address.as_deref(),
+                );
+                if !masquee {
+                    set_zone_online(&event_bus, &db, &dev.id, true);
+                }
+                info!(
+                    name = %dev.name,
+                    id = %dev.id,
+                    zone_id = zid,
+                    hidden = masquee,
+                    mac = ?dev.mac_address,
+                    "mdns_zone_reancree_par_mac"
+                );
+            } else {
+                // Cross-protocol dedup (forum #1183): the
+                // same physical device may already be a
+                // zone through another protocol — e.g. a
+                // Samsung S95BA TV present as a (renamed)
+                // DLNA zone that also announces AirPlay
+                // over mDNS. Match against the output
+                // registry (same name + same host across
+                // protocols) AND against existing zones by
+                // the REAL host of their registered output
+                // (`host_of`, robust for DLNA `uuid:…`
+                // device_ids the old "{type}-{host}-{port}"
+                // parsing mangled) or by case-insensitive
+                // name. Skip zone creation on conflict.
+                let registry_conflicts = reg.conflicting_outputs_same_host(
+                    &dev.name,
+                    output_type_str,
+                    &dev.host,
+                );
+                let zone_conflict = physical_zone_conflict(
+                    &zone_repo,
+                    &existing,
+                    |id| reg.host_of(id),
+                    &dev.name,
+                    &dev.host,
+                    dev.mac_address.as_deref(),
+                    output_type_str,
+                );
+                if !registry_conflicts.is_empty() || zone_conflict.is_some() {
+                    info!(
+                        name = %dev.name,
+                        id = %dev.id,
+                        host = %dev.host,
+                        r#type = output_type_str,
+                        registry_conflicts = ?registry_conflicts,
+                        conflicting_zone = ?zone_conflict,
+                        "mdns_zone_skipped_conflicting_protocol"
+                    );
+                } else {
+                    // Check zone_auto_create setting (#3529 :
+                    // lecture unique, portée par `ZoneRepo`).
+                    let auto_create = zone_repo.zone_auto_create_autorise();
+                    if !auto_create {
+                        info!(name = %dev.name, id = %dev.id, "mdns_zone_auto_create_disabled_skipping");
+                    } else {
+                        // Auto-created zones start dormant; the
+                        // free-tier cap is enforced at first play.
+                        {
+                            match zone_repo.get_or_create(
+                                &dev.name,
+                                Some(output_type_str),
+                                &dev.id,
+                            ) {
+                                Ok((zid, true)) => {
+                                    // Persist the physical identity so later
+                                    // discoveries of the SAME device under
+                                    // another protocol/UUID find this zone.
+                                    let _ = zone_repo.set_identity(
+                                        zid,
+                                        &dev.host,
+                                        dev.mac_address.as_deref(),
+                                    );
+                                    event_bus.emit_typed(
+                                        EventType::ZoneCreated,
+                                        charge_utile_zone_creee(
+                                            &zone_repo,
+                                            zid,
+                                            serde_json::json!({
+                                                "zone_id": zid,
+                                                "name": dev.name,
+                                                "device_id": dev.id,
+                                                "type": output_type_str,
+                                            }),
+                                        ),
+                                    );
+                                    info!(name = %dev.name, zone_id = zid, r#type = output_type_str, "mdns_zone_auto_created");
+                                }
+                                Ok((zid, false)) => {
+                                    let _ = zone_repo.set_identity(
+                                        zid,
+                                        &dev.host,
+                                        dev.mac_address.as_deref(),
+                                    );
+                                    set_zone_online(
+                                        &event_bus, &db, &dev.id, true,
+                                    );
+                                    info!(name = %dev.name, zone_id = zid, "mdns_zone_already_existed");
+                                }
+                                Err(e) => {
+                                    tracing::warn!(name = %dev.name, device = %dev.id, error = %e, "mdns_zone_create_failed");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// For every AirPlay zone, probe port 11000 to see if the device supports
