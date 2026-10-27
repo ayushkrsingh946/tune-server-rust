@@ -4814,6 +4814,10 @@ pub fn run_migrations(db: &SqliteDb) -> Result<(), String> {
     if let Err(e) = db.execute_batch(crate::db::track_repo::INDEX_CHEMIN_DOSSIER_SQLITE) {
         warn!(error = %e, "sqlite_tracks_chemin_dossier_index_failed");
     }
+    // #6399 — réconciliation des favoris tous profils : même passe idempotente.
+    if let Err(e) = db.execute_batch(crate::db::streaming_favorites_repo::INDEX_FAVORIS_MIROIR) {
+        warn!(error = %e, "sqlite_streaming_favorites_miroir_index_failed");
+    }
 
     db.execute_batch(include_str!("../../migrations/upnp_library_sync.sql"))?;
     db.execute_batch(include_str!("../../migrations/upnp_catalog_revision.sql"))?;
@@ -5872,6 +5876,13 @@ pub async fn run_pg_migrations(pool: &sqlx::PgPool) -> Result<(), String> {
         .await
     {
         warn!(error = %e, "pg_tracks_chemin_dossier_index_failed");
+    }
+    // #6399 — même index que SQLite, sans conversion du profil en texte.
+    if let Err(e) = sqlx::raw_sql(crate::db::streaming_favorites_repo::INDEX_FAVORIS_MIROIR)
+        .execute(pool)
+        .await
+    {
+        warn!(error = %e, "pg_streaming_favorites_miroir_index_failed");
     }
 
     // #4836 (suite) — même passe que `combler_les_labels_d_album_sqlite`,
