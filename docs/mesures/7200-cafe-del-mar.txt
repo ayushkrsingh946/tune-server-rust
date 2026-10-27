@@ -11,7 +11,7 @@ d'administration ne joue (Radio Bonheur, Café del Mar, « Rémi API »).
 Flux : https://streams.radio.co/se1a320b47/listen, sain le 27/10 (HTTP 200,
 audio/mpeg, icy-br 192, icy-name « Café del Mar Radio »).
 
-Cause
+Cause probable (à confirmer sur la fiche réelle, #7218)
 La même que #7011 (Radio Bonheur). Une fiche créée sur le portail a
 external_id=null : external_id est réservé à l'identifiant radio-metadata
 importé (mesure du .18, docs/mesures/7011-radio-bonheur.txt). Le parseur de
@@ -24,19 +24,29 @@ leur flux : c'est ce que décrit le fait nouveau du fil.
   sans repli (tune-server/src/routes/radios.rs, ligne 751).
 - Le correctif d48ba3dd9 (#7011, repli `mozaiklabs:ID`) est dans
   batch/bugs-rc9-20261025, pas dans rc/v1.0.0-rc8.1 :
-  `git merge-base --is-ancestor d48ba3dd9 origin/rc/v1.0.0-rc8.1` → non.
+  `git merge-base --is-ancestor d48ba3dd9 origin/rc/v1.0.0-rc8.1` → non ;
+  idem pour l'étiquette v1.0.0-rc8.1 (3394e47b4).
+- Aucune version publiée ne porte le lot rc9 : la dernière étiquette est
+  v1.0.0-rc8.1, et rc/v1.0.0-rc8.1 est la dernière branche rc/*. Le
+  signalement du 27/10 (fil 2476, dont le test « Rémi API ») ne peut donc
+  pas venir d'une version qui contient le correctif #7011, sauf construction
+  locale : point à faire confirmer par le testeur.
 
-Hypothèses écartées côté serveur (lecture du code, puis témoin)
+Hypothèses écartées côté serveur (lecture du code ; témoin quand il est dit)
 - Adresse sans extension (/listen) : la sonde suppose MP3 par défaut, et
   Symphonia reconnaît le flux (orchestrator/radio.rs, sonder_la_station).
+  Témoin 1.
 - Redirection : le client HTTP bloquant suit les redirections (politique
-  par défaut de reqwest, http/client.rs, blocking_builder).
+  par défaut de reqwest, http/client.rs, blocking_builder). Témoin 1.
 - En-têtes ICY doublés : `icy-br` est lu sur sa première valeur
   (debit_icy, #6821) ; `icy-name` n'est pas lu sur le chemin de lecture.
   Un « é » en octet brut dans un en-tête ne gêne pas la connexion.
-- Zone et sortie : le chemin est celui de toutes les radios, et Radio
+  Témoin 1.
+- Zone et sortie : écartée par LECTURE DU CODE SEULEMENT. Après la
+  résolution de la clé, le chemin est celui de toutes les radios, et Radio
   Bonheur (même forme de fiche) a été décodée sur le .18 avec le correctif
-  #7011.
+  #7011. Le témoin 2 ne joue que sur une zone navigateur ; la sortie locale
+  du Mac, probablement celle du testeur, n'est couverte par aucun témoin.
 
 Témoins (aucune vraie station contactée)
 1. tune-core, radio_7200_cafe_del_mar_se_decode_avec_ses_en_tetes_reels :
@@ -68,7 +78,7 @@ Contre-épreuves (le correctif retiré, le test inchangé, tout compile)
    ({"error":"radio_annuaire_inconnue"}) » — le symptôme de la rc8.1.
 Restauration par copie, puis retour au vert des deux témoins.
 
-Limites
+Limites (reste à faire : #7218)
 Le vrai flux n'a PAS été joint depuis le .18 : l'environnement de cette
 tentative n'a accès ni au .18 ni à streams.radio.co (mandataire : CONNECT
 403), ni à l'annuaire de mozaiklabs.fr. La fiche réelle de Café del Mar
@@ -76,6 +86,9 @@ n'a donc pas été relue ; que ce soit une fiche du portail (external_id=null)
 est déduit du signalement (validée par l'administrateur radio, comme toutes
 les radios citées). Les en-têtes rejoués sont ceux relevés le 27/10 et
 cités dans la demande, pas une capture complète. Aucun son audible.
+La relecture de la fiche réelle, les en-têtes et le décodage sans son sur
+le vrai flux depuis le .18, avant et après, avec les journaux, sont
+reportés dans https://github.com/renesenses/tune-server-rust/issues/7218.
 
 À demander au testeur
 Réessayer Café del Mar avec la version qui portera le lot rc9. Si elle
