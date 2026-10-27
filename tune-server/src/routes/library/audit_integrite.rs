@@ -387,6 +387,8 @@ fn resultat_reutilisable(
             .zip(date_secondes(meta))
             .is_some_and(|(a, b)| (a - b).abs() < 0.001)
         && avant.resultat.code != "modifie_pendant_audit";
+    // `chemin` et `taille` repris de la référence : égaux aux valeurs du
+    // disque, puisque `inchange` l'exige.
     Ok(inchange.then(|| Ligne {
         verifie_par: avant.verifie_par.clone().or(Some(reference.to_string())),
         ..avant

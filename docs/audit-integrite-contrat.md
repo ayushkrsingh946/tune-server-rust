@@ -84,7 +84,9 @@ Toute autre valeur est refusée (400) en nommant les bornes.
 
 - Réglages › Bibliothèque : une case « Seulement les fichiers changés depuis le
   dernier audit » qui ajoute `changed_only=true` au lancement ; le compteur
-  `reutilises` à côté de l'avancement.
+  `reutilises` à côté de l'avancement. Près de la case, rappeler la limite
+  ci-dessus : un fichier réécrit avec la même taille et la même date n'est
+  relu que par un audit complet.
 - Un champ « Me rappeler de relancer l'audit tous les … jours » (0 / vide =
   jamais) sur `library_integrity_reminder_days`, et un bandeau quand
   `rappel.du` est vrai.
