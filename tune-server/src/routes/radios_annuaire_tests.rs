@@ -398,7 +398,12 @@ fn les_genres_7215_sont_lus_sans_doublon_et_rendus_par_l_annuaire() {
     assert_eq!(metal.genre.as_deref(), Some("rock"));
     assert_eq!(metal.genres, vec!["rock".to_string(), "metal".to_string()]);
 
-    let corps = corps_annuaire(&f, &[], &FiltresAnnuaire::default(), &EtatAnnuaire::default());
+    let corps = corps_annuaire(
+        &f,
+        &[],
+        &FiltresAnnuaire::default(),
+        &EtatAnnuaire::default(),
+    );
     let ouifm = corps["items"]
         .as_array()
         .unwrap()
@@ -412,12 +417,22 @@ fn les_genres_7215_sont_lus_sans_doublon_et_rendus_par_l_annuaire() {
 #[test]
 fn les_compteurs_7215_comptent_une_fiche_dans_chacun_de_ses_genres() {
     let f = fiches_genres_7215();
-    let corps = corps_annuaire(&f, &[], &FiltresAnnuaire::default(), &EtatAnnuaire::default());
+    let corps = corps_annuaire(
+        &f,
+        &[],
+        &FiltresAnnuaire::default(),
+        &EtatAnnuaire::default(),
+    );
     let comptes: std::collections::BTreeMap<String, u64> = corps["genres"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|g| (g["key"].as_str().unwrap().to_string(), g["count"].as_u64().unwrap()))
+        .map(|g| {
+            (
+                g["key"].as_str().unwrap().to_string(),
+                g["count"].as_u64().unwrap(),
+            )
+        })
         .collect();
     let attendu: std::collections::BTreeMap<String, u64> = [
         ("rock", 2),
@@ -441,7 +456,10 @@ fn les_compteurs_7215_comptent_une_fiche_dans_chacun_de_ses_genres() {
         },
         &EtatAnnuaire::default(),
     );
-    assert_eq!(be["genres"], serde_json::json!([{"key": "eclectic", "count": 1}]));
+    assert_eq!(
+        be["genres"],
+        serde_json::json!([{"key": "eclectic", "count": 1}])
+    );
 }
 
 #[test]
@@ -466,7 +484,15 @@ fn ancien_format_7215_sans_genres_se_replie_sur_genre() {
 #[test]
 fn contre_epreuve_7215_un_genre_que_la_fiche_n_a_pas_ne_la_trouve_pas() {
     let f = fiches_genres_7215();
-    assert!(ids_du_genre_7215(&f, "metal").iter().all(|id| id != "S100001"));
-    assert!(ids_du_genre_7215(&f, "jazz").iter().all(|id| id != "S100001"));
+    assert!(
+        ids_du_genre_7215(&f, "metal")
+            .iter()
+            .all(|id| id != "S100001")
+    );
+    assert!(
+        ids_du_genre_7215(&f, "jazz")
+            .iter()
+            .all(|id| id != "S100001")
+    );
     assert!(ids_du_genre_7215(&f, "funk").is_empty());
 }
