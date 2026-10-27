@@ -629,7 +629,8 @@ pub struct StationAnnuaire {
     pub quality: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub website_url: Option<String>,
-    /// L'identifiant de la fiche dans l'annuaire (`S000973`).
+    /// Clé adressable de la fiche : identifiant externe (`S000973`) ou,
+    /// pour une station du portail sans identifiant externe, `mozaiklabs:ID`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
     /// La clé radio-metadata.fr (`fip`) : la station a un titre en cours.
@@ -748,7 +749,17 @@ pub fn annuaire_depuis_json(brut: &[Value]) -> Vec<StationAnnuaire> {
                 genre: texte(item, "genre"),
                 quality: texte(item, "quality"),
                 website_url: texte(item, "website_url"),
-                external_id: texte(item, "external_id"),
+                // #7011 : une station proposée sur le portail n'a pas de
+                // station_id radio-metadata. Son id local reste stable quand
+                // son nom ou son flux change. Sans ce repli, l'annuaire rend
+                // null et les gestes du client visent /directory/null/…,
+                // rejeté avant même une tentative de lecture.
+                external_id: texte(item, "external_id").or_else(|| {
+                    item.get("id")
+                        .and_then(Value::as_u64)
+                        .filter(|id| *id > 0)
+                        .map(|id| format!("mozaiklabs:{id}"))
+                }),
                 radio_metadata_key: texte(item, "radio_metadata_key"),
                 description: texte(item, "description"),
                 categories,
