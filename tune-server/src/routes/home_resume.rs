@@ -687,3 +687,70 @@ mod replay_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod server_shuffle_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt;
+    use tune_core::db::backend::ToSqlValue;
+
+    #[tokio::test]
+    async fn reprise_fabien_7280_le_menu_album_aleatoire_memorise_son_ordre() {
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        state.outputs.lock().await.register(Box::new(
+            tune_core::outputs::mock::MockOutput::new("mock-album-shuffle", "Muette")
+                .with_type("dlna"),
+        ));
+        let zone = tune_core::db::zone_repo::ZoneRepo::with_backend(state.backend.clone())
+            .create("Muette", Some("dlna"), Some("mock-album-shuffle"))
+            .unwrap();
+        state
+            .backend
+            .execute("INSERT INTO albums (title) VALUES ('Album mélangé')", &[])
+            .unwrap();
+        let album = state.backend.last_insert_rowid();
+        let dir = tempfile::tempdir().unwrap();
+        let mut wav =
+            tune_core::audio::wav::build_wav_header_with_data_size(2, 44100, 16, 16).to_vec();
+        wav.extend_from_slice(&[0; 16]);
+        for i in 1..=2_i64 {
+            let path = dir.path().join(format!("silence-{i}.wav"));
+            std::fs::write(&path, &wav).unwrap();
+            let path = path.to_string_lossy().into_owned();
+            let title = format!("Titre {i}");
+            state.backend.execute("INSERT INTO tracks (title, file_path, album_id, track_number, duration_ms, format, sample_rate, bit_depth, channels) VALUES (?, ?, ?, ?, 1000, 'wav', 44100, 16, 2)", &[&title as &dyn ToSqlValue, &path, &album, &i]).unwrap();
+        }
+        let response = crate::routes::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/playback/shuffle-all?zone_id={zone}&album_id={album}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            body["output_sent"], true,
+            "la sortie factice doit accepter le titre"
+        );
+        let rows = resumes::recent(&state.backend, Some(zone), 10).unwrap();
+        assert_eq!(rows.len(), 1, "l'album réellement démarré doit être suivi");
+        assert_eq!(rows[0].context_type, "album");
+        assert_eq!(rows[0].context_id, album.to_string());
+        assert!(
+            rows[0].shuffled,
+            "le menu album aléatoire doit conserver le tirage mémorisé sans shuffle de zone"
+        );
+        assert_eq!(rows[0].items.len(), 2);
+        assert!(!state.playback.get_state(zone).await.shuffle);
+    }
+}

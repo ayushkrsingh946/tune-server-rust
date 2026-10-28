@@ -7767,6 +7767,7 @@ pub async fn shuffle_all(
                 .playback
                 .update_queue_info(zone_id, 0, all_ids.len() as i64)
                 .await;
+            persist_play_queue(&state, zone_id, true);
             let mut resp = reponse_shuffle(zone_id, all_ids.len(), disponibles, result.output_sent);
             if let Some(ref err) = result.error {
                 resp.as_object_mut()
