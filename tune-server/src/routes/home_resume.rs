@@ -81,6 +81,7 @@ pub(super) async fn resume_listening(
         }
     }
     complete_single_container(&state, &mut r).await?;
+    let shuffled = r.shuffled;
     resumes::restore(&state.backend, zone_id, &r).map_err(AppError::bad_request)?;
     state
         .playback
@@ -110,6 +111,9 @@ pub(super) async fn resume_listening(
         .map_err(AppError::internal)?;
     if let Some(error) = result.sortie_refusee() {
         return Err(AppError::internal(error));
+    }
+    if shuffled {
+        resumes::mark_current_shuffled(&state.backend, zone_id).map_err(AppError::internal)?;
     }
     super::super::playback::persist_queue_async(&state, zone_id);
     Ok(Json(super::super::playback::build_zone_json(&state, zone_id).await).into_response())
@@ -284,11 +288,15 @@ async fn complete_single_container(
     r: &mut resumes::Resume,
 ) -> Result<(), AppError> {
     use tune_core::db::play_queue_repo::QueueInput;
-    if r.items.len() != 1 || r.shuffled || !matches!(r.context_type.as_str(), "album" | "playlist")
+    if r.items.is_empty() || r.shuffled || !matches!(r.context_type.as_str(), "album" | "playlist")
     {
         return Ok(());
     }
-    let current = r.items[0].clone();
+    let current = r
+        .items
+        .get(r.position)
+        .ok_or_else(|| AppError::bad_request("position de reprise absente"))?
+        .clone();
     let full = if r.source == "local" {
         let id = r
             .context_id
@@ -516,6 +524,30 @@ mod single_origin_tests {
                 .collect::<Vec<_>>(),
             ids
         );
+        r.items = vec![
+            QueueInput::Local { track_id: ids[1] },
+            QueueInput::Local { track_id: ids[0] },
+        ];
+        r.position = 0;
+        r.shuffled = true;
+        complete_single_container(&state, &mut r)
+            .await
+            .unwrap_or_else(|_| panic!("ordre mémorisé"));
+        assert_eq!(
+            r.items.len(),
+            2,
+            "une file mélangée doit garder son ordre mémorisé"
+        );
+        r.shuffled = false;
+        complete_single_container(&state, &mut r)
+            .await
+            .unwrap_or_else(|_| panic!("sélection partielle"));
+        assert_eq!(
+            r.items.len(),
+            3,
+            "plusieurs titres sélectionnés doivent aussi retrouver toute la suite de l'album"
+        );
+        assert_eq!(r.position, 1);
     }
 }
 
@@ -572,7 +604,7 @@ mod replay_tests {
             &ContexteEcoute {
                 nature: Some("playlist"),
                 id: Some("p42"),
-                rang: Some(1),
+                rang: None,
                 service: Some("circle"),
                 titre: Some("Playlist"),
                 pochette: None,

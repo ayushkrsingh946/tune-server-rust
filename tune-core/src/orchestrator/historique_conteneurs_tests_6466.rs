@@ -545,6 +545,19 @@ async fn reprise_fabien_7280_album_aleatoire_et_titre_seul() {
         Some("a:1"),
         "l'ordre aléatoire doit survivre à la reprise"
     );
+    b.orch.playback.set_shuffle(b.salon, false).await;
+    let mut normal = r.clone();
+    normal.shuffled = false;
+    listening_resume::save(&b.db, b.salon, &normal).unwrap();
+    listening_resume::mark_current_shuffled(&b.db, b.salon).unwrap();
+    b.jouer(b.salon, 1).await;
+    let client = listening_resume::recent(&b.db, Some(b.salon), 10)
+        .unwrap()
+        .remove(0);
+    assert!(
+        client.shuffled,
+        "l'ordre mélangé par le client doit survivre au titre suivant sans shuffle de zone"
+    );
     b.ajouter(
         b.salon,
         &[piste("seul", "Seul")],

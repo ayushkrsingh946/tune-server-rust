@@ -584,6 +584,16 @@ async fn depart_hors_bannis(
     }
 }
 
+fn persist_play_queue(state: &AppState, zone_id: i64, shuffled: bool) {
+    if shuffled
+        && let Err(error) =
+            tune_core::db::listening_resume::mark_current_shuffled(&state.backend, zone_id)
+    {
+        tracing::warn!(zone_id, %error, "reprise_ordre_client_non_enregistre");
+    }
+    persist_queue_async(state, zone_id);
+}
+
 /// Persist the queue state for a zone to disk (non-blocking).
 pub(super) fn persist_queue_async(state: &AppState, zone_id: i64) {
     let db = state.backend.clone();
@@ -1109,6 +1119,8 @@ fn position_du_titre_dans_l_album(
 
 #[derive(Deserialize, Default)]
 struct PlayRequest {
+    #[serde(default)]
+    context_shuffle: bool,
     track_id: Option<i64>,
     track_ids: Option<Vec<i64>>,
     album_id: Option<i64>,
@@ -2315,6 +2327,7 @@ async fn play(
     // chaque requete : c'est elle qui decide dans quelle langue un refus se
     // lit (#3672). Relevee une fois, passee a tous les refus de ce handler.
     let lang = crate::i18n::lang_from_header(&headers);
+    let context_shuffle = body.as_ref().is_some_and(|Json(b)| b.context_shuffle);
     // #3966 (jumeau du seek) — `start_index` négatif refusé avant la moindre
     // écriture, y compris le marquage du profil de session juste dessous.
     if let Err(refus) = body
@@ -2418,7 +2431,7 @@ async fn play(
                                  mais la longueur de file n'a pas pu être relue"
                             ),
                         }
-                        persist_queue_async(&state, zone_id);
+                        persist_play_queue(&state, zone_id, context_shuffle);
                         Json(build_zone_json_with_result(&state, zone_id, &result).await)
                             .into_response()
                     }
@@ -2810,7 +2823,7 @@ async fn play(
                     .playback
                     .update_queue_info(zone_id, start as i64, tracks.len() as i64)
                     .await;
-                persist_queue_async(&state, zone_id);
+                persist_play_queue(&state, zone_id, context_shuffle);
                 // DIRE ce qui a ete enjambe. Une piste indisponible passee sous
                 // silence est exactement ce qui fait croire a une panne : Alex
                 // n'a eu ni son ni message. Les deux champs sont ADDITIFS — un
@@ -2976,7 +2989,7 @@ async fn play(
                     .playback
                     .update_queue_info(zone_id, start as i64, tracks.len() as i64)
                     .await;
-                persist_queue_async(&state, zone_id);
+                persist_play_queue(&state, zone_id, context_shuffle);
                 // DIRE ce qui a ete enjambe. Une piste indisponible passee sous
                 // silence est exactement ce qui fait croire a une panne : Alex
                 // n'a eu ni son ni message. Les deux champs sont ADDITIFS — un
@@ -3151,7 +3164,7 @@ async fn play(
                             .playback
                             .update_queue_info(zone_id, position, longueur)
                             .await;
-                        persist_queue_async(&state, zone_id);
+                        persist_play_queue(&state, zone_id, context_shuffle);
                     }
                     FileDejaChargee::RemplacerParCeTitre => {
                         let (album_ref_ligne, artist_ref_ligne) =
@@ -3189,7 +3202,7 @@ async fn play(
                             "file_de_lecture_ecrite"
                         );
                         state.playback.update_queue_info(zone_id, 0, 1).await;
-                        persist_queue_async(&state, zone_id);
+                        persist_play_queue(&state, zone_id, context_shuffle);
                     }
                     FileDejaChargee::NePasToucher => {
                         // La base n'a pas repondu. On ne sait pas ce que la file
@@ -3345,7 +3358,7 @@ async fn play(
             ancrer_position_demandee(&state, zone_id, orch_req.seek_ms, reprise).await;
             return match lancer_la_lecture(&state, orch_req, reprise).await {
                 Ok(result) => {
-                    persist_queue_async(&state, zone_id);
+                    persist_play_queue(&state, zone_id, context_shuffle);
                     Json(build_zone_json_with_result(&state, zone_id, &result).await)
                         .into_response()
                 }
@@ -3371,7 +3384,7 @@ async fn play(
             state.playback.update_queue_info(zone_id, pos, q_len).await;
             return match state.orchestrator.play_from_queue(zone_id, pos).await {
                 Ok(result) => {
-                    persist_queue_async(&state, zone_id);
+                    persist_play_queue(&state, zone_id, context_shuffle);
                     Json(build_zone_json_with_result(&state, zone_id, &result).await)
                         .into_response()
                 }
@@ -3597,7 +3610,7 @@ async fn play(
                 .playback
                 .update_queue_info(zone_id, queue_position, q_len)
                 .await;
-            persist_queue_async(&state, zone_id);
+            persist_play_queue(&state, zone_id, context_shuffle);
             Json(build_zone_json_with_result(&state, zone_id, &result).await).into_response()
         }
         Err(e) => play_error_response(e, &lang),

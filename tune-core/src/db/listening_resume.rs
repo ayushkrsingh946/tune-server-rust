@@ -22,6 +22,8 @@ pub struct Resume {
     pub position: usize,
     #[serde(default)]
     pub shuffled: bool,
+    #[serde(default)]
+    pub queue_row_ids: Vec<i64>,
     pub position_ms: i64,
     pub updated_at: String,
     pub items: Vec<QueueInput>,
@@ -128,6 +130,7 @@ pub fn started(
     };
     let service = c.service.unwrap_or(source);
     let mut selected = Vec::new();
+    let mut queue_row_ids = Vec::new();
     let mut position = None;
     let contexts = db.query_many(
         "SELECT id, context_type, context_id, context_source FROM queue_items WHERE zone_id = ?",
@@ -154,6 +157,7 @@ pub fn started(
             position = Some(selected.len());
         }
         selected.push(input(e));
+        queue_row_ids.push(e.id);
     }
     let Some(position) = position else {
         return Ok(());
@@ -203,12 +207,34 @@ pub fn started(
             .then(|| id.parse().ok())
             .flatten(),
         position,
-        shuffled: c.rang.is_none(),
+        shuffled: c.rang.is_none() || db.query_one(
+            "SELECT payload, resume_key FROM listening_resumes WHERE zone_id = ? AND context_type = ? AND context_id = ? AND source = ?",
+            &[&zone_id as &dyn ToSqlValue, &nature, &id, &service],
+        )?.map(|row| decode(&row)).transpose()?.is_some_and(|r| r.shuffled && r.queue_row_ids.contains(&current.id)),
+        queue_row_ids,
         position_ms: 0,
         updated_at: chrono::Utc::now().to_rfc3339(),
         items: selected,
     };
     save(db, zone_id, &r)
+}
+
+/// L'ordre aléatoire d'un client est déjà matérialisé : il doit rester
+/// mémorisé même si le drapeau d'aléatoire de la zone est faux.
+/// Ne crée jamais de contexte qui n'a pas réellement démarré.
+pub fn mark_current_shuffled(db: &Arc<dyn DbBackend>, zone_id: i64) -> Result<(), String> {
+    let queue = PlayQueueRepo::with_backend(db.clone()).get_ordered(zone_id)?;
+    let Some(current) = queue.iter().find(|e| e.is_current) else {
+        return Ok(());
+    };
+    if let Some(mut r) = recent(db, Some(zone_id), 200)?
+        .into_iter()
+        .find(|r| r.queue_row_ids.contains(&current.id))
+    {
+        r.shuffled = true;
+        save(db, zone_id, &r)?;
+    }
+    Ok(())
 }
 
 pub fn rewind(position_ms: i64, seconds: u64) -> u64 {
@@ -275,6 +301,7 @@ pub fn podcast_started_in_context(
         album_id: None,
         position: 0,
         shuffled: false,
+        queue_row_ids: Vec::new(),
         position_ms: position_ms.max(0),
         updated_at: chrono::Utc::now().to_rfc3339(),
         items: vec![QueueInput::Streaming {
