@@ -6546,7 +6546,16 @@ pub(crate) async fn do_transfer(
             )
             .await
     {
-        return output_command_error_response(error);
+        return match error {
+            tune_core::orchestrator::ErreurDeTransfert::Commande(error) => {
+                output_command_error_response(error)
+            }
+            tune_core::orchestrator::ErreurDeTransfert::Lancement(message) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "transfer_target_play_failed", "message": message})),
+            )
+                .into_response(),
+        };
     }
 
     if stop_source {
@@ -10441,3 +10450,7 @@ mod lecture_d_une_playlist_a_lignes_introuvables_6179 {
         assert_eq!(sans_les_introuvables(lignes, None).1, None);
     }
 }
+
+#[cfg(test)]
+#[path = "playback/echec_transfert_6155_tests.rs"]
+mod echec_transfert_6155_tests;
