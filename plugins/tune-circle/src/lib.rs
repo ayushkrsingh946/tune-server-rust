@@ -34,6 +34,7 @@ pub mod ecoute;
 pub mod ensembles;
 pub mod globe;
 pub mod lecture;
+pub mod messagerie;
 pub mod notifications;
 pub mod playlists;
 pub mod rayons;

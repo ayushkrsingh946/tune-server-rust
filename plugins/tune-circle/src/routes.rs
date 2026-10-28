@@ -122,6 +122,7 @@ pub const CODE_SERVEUR_NON_LIE: &str = "circle.server_not_linked";
 pub fn router(relais: Arc<Relais>, license: Arc<LicenseManager>) -> Router<()> {
     // rc9 (#7130) : les notifications de Tune web, dans [`crate::notifications`].
     let notifications = crate::notifications::router(relais.clone());
+    let messagerie = crate::messagerie::router(relais.clone());
     let etat_de_la_copie = Router::new()
         .route("/library-sync", get(etat_de_la_copie_en_ligne))
         .with_state(Arc::new(EtatDeLaCopie {
@@ -206,6 +207,7 @@ pub fn router(relais: Arc<Relais>, license: Arc<LicenseManager>) -> Router<()> {
         .with_state(relais)
         .merge(etat_de_la_copie)
         .merge(notifications)
+        .merge(messagerie)
 }
 
 // #6521 — les vignettes des pochettes partagées avec le cercle -----------------
