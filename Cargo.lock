@@ -6969,6 +6969,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "symphonia",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

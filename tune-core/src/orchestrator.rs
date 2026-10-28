@@ -1210,13 +1210,13 @@ pub struct PlaybackOrchestrator {
     /// `device_id|profondeur`. Les sondes inconcluantes n'y entrent pas.
     dlna_lpcm_accepte: Mutex<HashMap<String, bool>>,
     /// #4573 — ce que le Sink du renderer ANNONCE en nombre de canaux, par
-    /// `device_id`. `Some(None)` veut dire « le Sink a été lu, il ne porte
+    /// `(device_id, mime)`. `Some(None)` veut dire « le Sink a été lu, il ne porte
     /// aucun `channels=` » : une ignorance MESURÉE, qui ne fait rien réduire
     /// mais qu'il est inutile de re-sonder à chaque piste. Une sonde
     /// INCONCLUANTE (SOAP en échec, Sink vide) n'entre jamais dans cette
     /// table — même règle que `dlna_lpcm_accepte` : un renderer endormi au
     /// démarrage ne doit pas se voir coller un verdict pour la session.
-    dlna_canaux_max: Mutex<HashMap<String, Option<u16>>>,
+    dlna_canaux_max: Mutex<HashMap<(String, String), Option<u16>>>,
     /// Zones dont une résolution gapless est en cours : les sessions créées
     /// pendant cette fenêtre pré-chargent la piste SUIVANTE — leur attacher
     /// un forwarder de niveaux daterait les fenêtres avec l'horloge de la
