@@ -6,6 +6,7 @@ on:
       - 'plugins/**'
       - 'tune-core/src/plugin_sdk.rs'
       - 'tune-server/src/premium_audio_plugins.rs'
+      - 'tune-server/src/plugins_host.rs'
       - 'tune-server/tests/fixtures/plugins/**'
       - 'scripts/plugin-public-catalog.py'
       - 'scripts/tests/test_plugin_public_catalog.py'
