@@ -596,7 +596,7 @@ impl StreamSession {
             .unwrap_or_else(|e| e.into_inner()) = Some(observateur);
     }
 
-    fn effective_output_info(&self) -> StreamInfo {
+    pub(crate) fn effective_output_info(&self) -> StreamInfo {
         let mut info = self.info.clone();
         if self.is_radio {
             info.radio_source = *self
