@@ -370,7 +370,7 @@ async fn le_transfert_passe_par_les_etapes_d_entree_de_play_6466() {
     b.orch
         .transferer_sur_l_appareil(b.enfants, ENFANTS, 0, &np, 0, false)
         .await
-        .expect("un lancement refusé n'est que journalisé");
+        .expect_err("un lancement refusé doit remonter au demandeur");
     // Chemin direct : une radio ne vit pas dans la file.
     let mut radio = np.clone();
     radio.source = "radio".into();
@@ -378,7 +378,7 @@ async fn le_transfert_passe_par_les_etapes_d_entree_de_play_6466() {
     b.orch
         .transferer_sur_l_appareil(b.enfants, ENFANTS, 0, &radio, 0, false)
         .await
-        .expect("un lancement refusé n'est que journalisé");
+        .expect_err("un lancement refusé doit remonter au demandeur");
     assert_eq!(
         b.lancements_sur_enfants().await,
         0,

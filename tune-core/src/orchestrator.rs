@@ -2305,6 +2305,7 @@ mod historique_conteneurs_tests_6466;
 #[cfg(test)]
 mod sortie_de_radio_dlna_6130_tests;
 mod transfert_en_pause_5050;
+pub use transfert_en_pause_5050::ErreurDeTransfert;
 
 /// La profondeur ANNONCÉE au renderer et celle réellement ÉCRITE dans le flux
 /// doivent être le même nombre (#1437).
