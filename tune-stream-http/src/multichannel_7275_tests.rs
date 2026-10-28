@@ -54,7 +54,7 @@ async fn soap(State(state): State<Renderer>, headers: HeaderMap, body: String) -
             let url = tag(&body, "CurrentURI");
             assert!(url.starts_with("http://127.0.0.1:"), "le banc reste sur la boucle locale : {url}");
             let didl = tag(&body, "CurrentURIMetaData");
-            let bytes = reqwest::get(url).await.unwrap().error_for_status().unwrap()
+            let bytes = tune_core::http::client::shared().get(url).send().await.unwrap().error_for_status().unwrap()
                 .bytes().await.unwrap().to_vec();
             *state.received.lock().await = Some(Received { didl, bytes });
             String::new()

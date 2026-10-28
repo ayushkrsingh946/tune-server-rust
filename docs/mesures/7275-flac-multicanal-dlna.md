@@ -103,3 +103,18 @@ repasse au vert : 3 réussis, 0 échec. Les tests de lecture des annonces passen
 (2 réussis) et `cargo test -p tune-core --no-default-features --lib canaux_annonces_4573`
 (6 réussis). Aucun test de la suite complète ni audit de sécurité n'a été lancé
 localement ; ces contrôles appartiennent à la CI.
+
+## Alignement des témoins existants après la CI
+
+La première CI a relevé deux bancs anciens qui attribuaient encore au FLAC la
+limite LPCM du relevé Denon. Le relevé `SINK_DENON` reste inchangé. Une annonce
+**synthétique** `SINK_FLAC_STEREO` protège désormais le repli explicite, et un
+nouveau témoin exige que le relevé Denon laisse passer les six et huit canaux
+FLAC. Le test de journal exige aussi le MIME associé à la valeur en cache.
+
+`cargo test -p tune-core --no-default-features --test canaux_reseau_branchement_4573 --test canaux_origine_journal_6599`
+passe : 6 tests de branchement et 1 test de journal réussis. Le banc HTTP
+utilise le client partagé du projet, conformément à la garde relevée par la
+CI. Après cette adaptation,
+`cargo test -p tune-core -p tune-stream-http --no-default-features --lib multichannel_7275`
+passe : 2 tests d'annonces et 3 tests de réception réussis.
