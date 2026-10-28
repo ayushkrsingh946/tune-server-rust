@@ -1,6 +1,7 @@
 """Behavioral contracts for the public exporter; no Cargo or network."""
 import importlib.util
 import json
+import re
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -49,6 +50,21 @@ class PublicCatalogTests(unittest.TestCase):
             return source
         with patch.object(Path, "read_text", read):
             self.assertFalse(self.entries()["assistant-ia"]["default_enabled"])
+
+    def test_bundled_wasm_activation_follows_the_loader_default(self):
+        for enabled in [True, False]:
+            def read(path, *args, **kwargs):
+                source = READ(path, *args, **kwargs)
+                if str(path).endswith("tune-server/src/plugins_host.rs"):
+                    pattern = r'(\.map\(\|v\| v != "false"\)\s*\.unwrap_or\()(?:true|false)(\);)'
+                    changed, count = re.subn(pattern, lambda match: match[1] + str(enabled).lower() + match[2], source, count=1)
+                    if count != 1:
+                        raise AssertionError("WASM activation fixture no longer matches its source")
+                    return changed
+                return source
+            with patch.object(Path, "read_text", read):
+                for identity in ["party", "playlists-converter"]:
+                    self.assertEqual(self.entries()[identity]["default_enabled"], enabled)
 
     def test_manifest_update_reaches_export_without_a_second_version_list(self):
         def read(path, *args, **kwargs):

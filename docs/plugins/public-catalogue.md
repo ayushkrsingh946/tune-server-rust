@@ -14,6 +14,8 @@ unsupported expressions fail instead of guessing. In-tree versions follow the
 provider's implementation (Tune build version or Cargo package version). Native
 providers use the version declared by their registry bridge, not the SDK ABI.
 WASM versions and minimum Tune versions come from their bundled manifests.
+Their initial activation is read from the actual WASM loader; the two bundled
+providers are enabled by default, rather than presented as uninstalled.
 
 `default_enabled` describes the initial activation policy, not whether a provider
 is compiled into the distribution. A compiled opt-in provider still requires

@@ -117,6 +117,14 @@ def export(root, tune_version):
             "default_enabled": native_enabled,
             "entitlement": manifest["entitlement"],
         })
+    host = (root / "tune-server/src/plugins_host.rs").read_text()
+    activation = re.search(
+        r'let enabled\s*=\s*settings\s*\.get\(&format!\("plugin_\{id\}_enabled"\)\)\s*'
+        r'\.ok\(\)\s*\.flatten\(\)\s*\.map\(\|v\| v != "false"\)\s*\.unwrap_or\((true|false)\);',
+        host, re.S)
+    if activation is None:
+        raise ValueError("unsupported bundled WASM activation default")
+    wasm_enabled = boolean(activation[1])
     for identity in ("party", "playlists-converter"):
         manifest = json.loads((root / "tune-server/tests/fixtures/plugins" / identity / "manifest.json").read_text())
         if manifest["id"] != identity:
@@ -125,7 +133,7 @@ def export(root, tune_version):
             "id": identity, "display_name": manifest["name"],
             "description": manifest["description"], "version": manifest["version"],
             "min_tune_version": manifest["min_server_version"], "kind": "wasm",
-            "default_enabled": False, "premium": manifest.get("premium", False),
+            "default_enabled": wasm_enabled, "premium": manifest.get("premium", False),
         })
     identities = [entry["id"] for entry in entries]
     if len(identities) != len(set(identities)):
