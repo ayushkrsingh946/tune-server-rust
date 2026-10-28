@@ -8,7 +8,7 @@ Contrat écrit avant le code : `contrat-reprise-de-lecture.md`.
 
 Un contexte n'entre dans la reprise qu'au démarrage d'un titre. L'instantané conserve les identifiants de bibliothèque ou de service, les métadonnées du conteneur, l'ordre réellement en file et le dernier titre démarré. Les ajouts contextualisés n'héritent pas de l'album de session. La reprise reconstruit atomiquement la file et rejoue ce titre depuis zéro. Le cas d'un titre seul ajouté depuis un conteneur retrouve sa suite dans l'album/playlist. Les artistes, labels et radios ne sont pas proposés par ce widget.
 
-Les podcasts conservent leur dernier épisode et sa position ; les nouveaux clients transmettent leur identifiant stable et leur image. Le recul est un réglage serveur exposé au web : entier 0–300, défaut 10 secondes, conformément à la décision du 28/10. Migration SQLite 135 / PostgreSQL 99 pour la table des reprises.
+Les podcasts conservent leur dernier épisode et sa position ; les nouveaux clients transmettent leur identifiant stable et leur image. Le recul est un réglage serveur exposé au web : entier 0–300, défaut 10 secondes, conformément à la décision du 28/10. Migration SQLite 135 / PostgreSQL 100 (99 réservée à la sentinelle des anciennes bascules) pour la table des reprises.
 
 ## Preuves déjà exécutées sur Shrek
 

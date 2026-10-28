@@ -7,4 +7,4 @@ CREATE TABLE IF NOT EXISTS listening_resumes (
  payload TEXT NOT NULL,
  updated_at TEXT NOT NULL,
  UNIQUE(zone_id, context_type, context_id, source)
-);
+)

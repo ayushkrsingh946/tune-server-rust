@@ -44,6 +44,7 @@ use crate::db::engine::{Engine, PostgresDialect};
 // and took the whole batch down with it — `pg_ensure_tables_failed`, once
 // per boot. A table that fails must never block the next one.
 pub(crate) const ENSURE_TABLES: &[&str] = &[
+    include_str!("../../migrations/continue_listening.sql"),
     "CREATE TABLE IF NOT EXISTS file_first_seen (file_path TEXT PRIMARY KEY, first_seen_at DOUBLE PRECISION NOT NULL, created_at DOUBLE PRECISION)",
     "CREATE SEQUENCE IF NOT EXISTS streaming_favorites_id_seq",
     "CREATE TABLE IF NOT EXISTS streaming_favorites (\
@@ -266,7 +267,6 @@ pub(crate) const ENSURE_TABLES: &[&str] = &[
 // Same rule as ENSURE_TABLES: one statement per entry, one round-trip
 // each, so a column that cannot be added never hides the ones after it.
 pub(crate) const ENSURE_COLUMNS: &[&str] = &[
-    include_str!("../../migrations/continue_listening.sql"),
     "ALTER TABLE alarms ADD COLUMN IF NOT EXISTS days_of_week TEXT DEFAULT '1111111'",
     "ALTER TABLE alarms ADD COLUMN IF NOT EXISTS multi_zone_ids TEXT",
     // SMALLINT, pas TEXT : cette colonne n'est declaree par AUCUN script

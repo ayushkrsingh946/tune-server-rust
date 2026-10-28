@@ -5654,8 +5654,9 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         "collection_folders_manual_order",
         include_str!("../../migrations/postgres/098_collection_folders_manual_order.sql"),
     ),
+    (99, "legacy_bascule_sentinel", "SELECT 1"),
     (
-        99,
+        100,
         "listening_resumes",
         include_str!("../../migrations/continue_listening.sql"),
     ),
@@ -9191,9 +9192,16 @@ mod tests {
         // 98 : `collection_folders_manual_order` (#6779), jumelle de la
         // SQLite 134. Pose la marque de la fratrie de rayons rangée à la
         // main, que toute lecture des dossiers de collections NOMME.
-        // ⚠️ La suivante sera la 99, la SENTINELLE de bascule de
-        // `run_pg_migrations` (`current == 99` y fait tout rejouer).
-        assert_eq!(pg_latest_version(), 98, "latest PG migration must be 98");
+        // 99 reste réservée à la sentinelle des anciennes bascules : entrée
+        // sans effet pour garder la chaîne contiguë, jamais un changement DDL.
+        // 100 : listening_resumes (#7280), jumelle de la SQLite 135.
+        assert_eq!(pg_latest_version(), 100, "latest PG migration must be 100");
+        assert!(
+            PG_MIGRATIONS.iter().any(|&(v, name, sql)| v == 99
+                && name == "legacy_bascule_sentinel"
+                && sql == "SELECT 1"),
+            "la version 99 doit rester sans effet pour les anciennes bascules"
+        );
         for wanted in [10, 11, 13, 36] {
             assert!(
                 PG_MIGRATIONS.iter().any(|&(v, _, _)| v == wanted),
