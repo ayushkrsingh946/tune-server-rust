@@ -2366,7 +2366,7 @@ mod tests {
     /// La vraie bascule conserve clé, ordre de service et position, même
     /// rejouée ; la sentinelle historique 99 est dépassée par la 100.
     #[tokio::test(flavor = "multi_thread")]
-    async fn pg_reprise_7280_la_bascule_conserve_la_file_et_sa_clef() {
+    async fn pg_bascule_reprise_7280_conserve_la_file_et_sa_clef() {
         use crate::db::listening_resume::Resume;
         use crate::db::play_queue_repo::QueueInput;
         let Ok(url) = std::env::var("TUNE_TEST_PG_URL") else {
