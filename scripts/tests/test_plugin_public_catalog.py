@@ -30,6 +30,26 @@ class PublicCatalogTests(unittest.TestCase):
         self.assertNotIn("dj", entries)
         self.assertNotIn("karaoke", entries)
 
+    def test_catalogue_visibility_inherits_the_actual_sdk_default(self):
+        def read(path, *args, **kwargs):
+            source = READ(path, *args, **kwargs)
+            if str(path).endswith("tune-core/src/plugin_sdk.rs"):
+                return source.replace("fn catalogued(&self) -> bool {\n        true", "fn catalogued(&self) -> bool {\n        false", 1)
+            return source
+        with patch.object(Path, "read_text", read):
+            entries = self.entries()
+            self.assertNotIn("bandcamp", entries)
+            self.assertIn("circle", entries)  # Explicit provider override wins.
+
+    def test_activation_inherits_the_actual_sdk_default(self):
+        def read(path, *args, **kwargs):
+            source = READ(path, *args, **kwargs)
+            if str(path).endswith("tune-core/src/plugin_sdk.rs"):
+                return source.replace("fn default_enabled(&self) -> bool {\n        true", "fn default_enabled(&self) -> bool {\n        false", 1)
+            return source
+        with patch.object(Path, "read_text", read):
+            self.assertFalse(self.entries()["assistant-ia"]["default_enabled"])
+
     def test_manifest_update_reaches_export_without_a_second_version_list(self):
         def read(path, *args, **kwargs):
             source = READ(path, *args, **kwargs)

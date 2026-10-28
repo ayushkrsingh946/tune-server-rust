@@ -8,7 +8,8 @@ instantiated, no playback starts, and no network discovery occurs.
 
 The existing `sdk/plugins.json` inventory determines the available source
 providers. A separate narrow public allowlist limits publication. The exporter
-reads the actual `TunePlugin` metadata declarations and respects `catalogued`;
+reads the actual `TunePlugin` metadata declarations, inherits defaults directly
+from `tune-core/src/plugin_sdk.rs`, and respects `catalogued`;
 unsupported expressions fail instead of guessing. In-tree versions follow the
 provider's implementation (Tune build version or Cargo package version). Native
 providers use the version declared by their registry bridge, not the SDK ABI.

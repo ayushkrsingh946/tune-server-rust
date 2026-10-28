@@ -58,13 +58,17 @@ def export(root, tune_version):
     inventory = json.loads((root / "sdk/plugins.json").read_text())
     if inventory.get("version") != 1:
         raise ValueError("unsupported SDK inventory")
+    trait = (root / "tune-core/src/plugin_sdk.rs").read_text()
+    defaults = {name: method(trait, name) for name in ("catalogued", "default_enabled")}
+    for expression in defaults.values():
+        boolean(expression)
     entries = []
     for plugin in inventory["in_tree"]:
         if plugin["id"] not in PUBLIC:
             continue
         crate = (root / "sdk" / plugin["crate"]).resolve()
         source = (crate / "src/lib.rs").read_text()
-        if not boolean(method(source, "catalogued", "true")):
+        if not boolean(method(source, "catalogued", defaults["catalogued"])):
             continue
         identity = literal(method(source, "name"))
         if identity != plugin["id"]:
@@ -83,7 +87,7 @@ def export(root, tune_version):
             "version": version,
             "min_tune_version": None,
             "kind": "in_tree",
-            "default_enabled": boolean(method(source, "default_enabled", "true")),
+            "default_enabled": boolean(method(source, "default_enabled", defaults["default_enabled"])),
         })
     bridge = (root / "tune-server/src/premium_audio_plugins.rs").read_text()
     native_version = literal(method(bridge, "version"))
