@@ -2192,7 +2192,10 @@ impl PositionPoller {
                     // its full 45s and a rip crawled at ~46s per track.
                     let in_track_load_grace = status.realtime
                         && ps.track_loaded_at.elapsed().as_secs() < TRACK_LOAD_GRACE_SECS
-                        && ps.peak_position_ms < 5_000;
+                        && ps.peak_position_ms < 5_000
+                        // #7097 — une piste de 3,7 s a pu finir sans jamais
+                        // atteindre 5 s : examiner alors sa fin normale.
+                        && !played_enough;
                     // A DSD track on a DLNA renderer whose peak reached the end.
                     // Gapless is intentionally not armed for a DSD next on DLNA
                     // (prepare_gapless / #402) and DLNA never reports
