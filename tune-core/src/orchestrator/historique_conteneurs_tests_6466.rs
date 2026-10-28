@@ -587,3 +587,26 @@ async fn reprise_fabien_7280_album_aleatoire_et_titre_seul() {
         "Seul"
     );
 }
+
+#[tokio::test]
+async fn reprise_fabien_7280_melange_client_avant_confirmation_ne_cree_pas_de_reprise() {
+    use crate::db::listening_resume;
+    let b = Banc::monter().await;
+    b.lire_l_album(b.salon).await;
+    let q = PlayQueueRepo::with_backend(b.db.clone());
+    q.set_current_pos(b.salon, 0).unwrap();
+    listening_resume::mark_current_shuffled(&b.db, b.salon).unwrap();
+    assert!(
+        listening_resume::recent(&b.db, Some(b.salon), 10)
+            .unwrap()
+            .is_empty(),
+        "une intention de mélange n'est pas un titre démarré"
+    );
+    b.jouer(b.salon, 1).await;
+    let rows = listening_resume::recent(&b.db, Some(b.salon), 10).unwrap();
+    assert!(
+        rows[0].shuffled,
+        "le mélange client doit survivre à une confirmation différée"
+    );
+    assert_eq!(rows[0].last_track_title, "Release My Heart");
+}

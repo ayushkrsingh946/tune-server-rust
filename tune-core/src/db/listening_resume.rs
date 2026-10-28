@@ -179,6 +179,12 @@ pub fn started(
             .unwrap_or_default(),
         _ => (None, None),
     };
+    let pending_key = format!("continue_listening_shuffle_row_{zone_id}");
+    let settings = super::settings_repo::SettingsRepo::with_backend(db.clone());
+    let pending_shuffle = settings
+        .get(&pending_key)?
+        .and_then(|v| v.parse::<i64>().ok())
+        .is_some_and(|row| queue_row_ids.contains(&row));
     let r = Resume {
         resume_key: uuid::Uuid::new_v4().to_string(),
         context_type: nature.into(),
@@ -207,7 +213,7 @@ pub fn started(
             .then(|| id.parse().ok())
             .flatten(),
         position,
-        shuffled: c.rang.is_none() || db.query_one(
+        shuffled: c.rang.is_none() || pending_shuffle || db.query_one(
             "SELECT payload, resume_key FROM listening_resumes WHERE zone_id = ? AND context_type = ? AND context_id = ? AND source = ?",
             &[&zone_id as &dyn ToSqlValue, &nature, &id, &service],
         )?.map(|row| decode(&row)).transpose()?.is_some_and(|r| r.shuffled && r.queue_row_ids.contains(&current.id)),
@@ -216,7 +222,11 @@ pub fn started(
         updated_at: chrono::Utc::now().to_rfc3339(),
         items: selected,
     };
-    save(db, zone_id, &r)
+    save(db, zone_id, &r)?;
+    if pending_shuffle {
+        settings.delete(&pending_key)?;
+    }
+    Ok(())
 }
 
 /// L'ordre aléatoire d'un client est déjà matérialisé : il doit rester
@@ -233,6 +243,13 @@ pub fn mark_current_shuffled(db: &Arc<dyn DbBackend>, zone_id: i64) -> Result<()
     {
         r.shuffled = true;
         save(db, zone_id, &r)?;
+    } else {
+        // Le navigateur confirme son démarrage plus tard : garder seulement
+        // l'intention liée à cette file, sans publier de reprise prématurée.
+        super::settings_repo::SettingsRepo::with_backend(db.clone()).set(
+            &format!("continue_listening_shuffle_row_{zone_id}"),
+            &current.id.to_string(),
+        )?;
     }
     Ok(())
 }
