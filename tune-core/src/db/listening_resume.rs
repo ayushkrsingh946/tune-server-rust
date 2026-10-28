@@ -258,6 +258,40 @@ pub fn rewind(position_ms: i64, seconds: u64) -> u64 {
     (position_ms.max(0) as u64).saturating_sub(seconds.min(300) * 1000)
 }
 
+/// Ne met à jour qu'un titre seul réellement démarré et encore courant.
+/// Le rang de file distingue aussi deux occurrences du même titre.
+pub fn track_position(
+    db: &Arc<dyn DbBackend>,
+    state: &crate::playback::ZoneState,
+) -> Result<(), String> {
+    let Some(np) = state.now_playing.as_ref() else {
+        return Ok(());
+    };
+    let queue = PlayQueueRepo::with_backend(db.clone()).get_ordered(state.zone_id)?;
+    let Some(current) = queue.iter().find(|e| e.is_current) else {
+        return Ok(());
+    };
+    for mut r in recent(db, Some(state.zone_id), 200)? {
+        if r.context_type != "track" || !r.queue_row_ids.contains(&current.id) {
+            continue;
+        }
+        let matches = r.items.first().is_some_and(|i| match i {
+            QueueInput::Local { track_id } => {
+                np.source == "local" && np.track_id == Some(*track_id)
+            }
+            QueueInput::Streaming {
+                source, source_id, ..
+            } => np.source == *source && np.source_id.as_deref() == Some(source_id.as_str()),
+        });
+        if matches && r.position_ms / 1000 != state.position_ms.max(0) / 1000 {
+            r.position_ms = state.position_ms.max(0);
+            r.updated_at = chrono::Utc::now().to_rfc3339();
+            save(db, state.zone_id, &r)?;
+        }
+    }
+    Ok(())
+}
+
 /// Podcast : ne met à jour que l'épisode qui est encore celui de la zone.
 pub fn podcast_position(
     db: &Arc<dyn DbBackend>,
@@ -447,5 +481,6 @@ pub fn refresh_started(
         &np.title,
         np.album_title.as_deref(),
         np.cover_path.as_deref(),
-    )
+    )?;
+    track_position(db, s)
 }

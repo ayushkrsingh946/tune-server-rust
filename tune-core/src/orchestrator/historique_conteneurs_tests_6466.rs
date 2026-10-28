@@ -574,7 +574,17 @@ async fn reprise_fabien_7280_album_aleatoire_et_titre_seul() {
         1,
         "le titre seul ne doit pas hériter de l'album précédent"
     );
-    listening_resume::restore(&b.db, b.enfants, seul).unwrap();
+    b.orch.playback.seek(b.salon, 42000).await;
+    b.orch.persist_position(b.salon).await;
+    let saved = listening_resume::load(&b.db, &seul.resume_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.position_ms, 42000,
+        "pause/arrêt doit mémoriser la position du titre seul"
+    );
+    assert_eq!(saved.items.len(), 1);
+    listening_resume::restore(&b.db, b.enfants, &saved).unwrap();
     b.jouer(b.enfants, 0).await;
     assert_eq!(
         b.orch

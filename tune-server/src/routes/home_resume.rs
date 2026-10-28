@@ -81,6 +81,11 @@ pub(super) async fn resume_listening(
         }
     }
     complete_single_container(&state, &mut r).await?;
+    let seek_ms = if r.context_type == "track" {
+        r.position_ms.max(0) as u64
+    } else {
+        0
+    };
     let shuffled = r.shuffled;
     resumes::restore(&state.backend, zone_id, &r).map_err(AppError::bad_request)?;
     state
@@ -106,7 +111,7 @@ pub(super) async fn resume_listening(
         .await;
     let result = state
         .orchestrator
-        .replay_context_from_queue(zone_id, r.position as i64)
+        .replay_context_from_queue(zone_id, r.position as i64, seek_ms)
         .await
         .map_err(AppError::internal)?;
     if let Some(error) = result.sortie_refusee() {
@@ -190,6 +195,93 @@ mod tests {
         assert_eq!(items[0]["cover_path"], "album.jpg");
         assert_eq!(items[0]["source"], "qobuz");
         assert!(items[0]["resume_key"].as_str().is_some());
+    }
+
+    #[test]
+    fn reprise_fabien_7280_services_memes_regles_et_meme_tirage() {
+        for source in ["qobuz", "tidal"] {
+            for nature in ["album", "playlist"] {
+                let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+                let zones = tune_core::db::zone_repo::ZoneRepo::with_backend(state.backend.clone());
+                let zone = zones.create("Origine", None, None).unwrap();
+                let target = zones.create("Reprise", None, None).unwrap();
+                let q = PlayQueueRepo::with_backend(state.backend.clone());
+                let inputs: Vec<_> = ["trois", "un", "deux"]
+                    .into_iter()
+                    .map(|id| QueueInput::Streaming {
+                        source: source.into(),
+                        source_id: id.into(),
+                        title: id.into(),
+                        artist: "Artiste".into(),
+                        album: None,
+                        cover_url: Some("piste.jpg".into()),
+                        duration_ms: 100000,
+                        track_number: None,
+                        disc_number: None,
+                        album_ref: None,
+                        artist_ref: None,
+                    })
+                    .collect();
+                q.append(zone, &inputs).unwrap();
+                q.set_current_pos(zone, 1).unwrap();
+                resumes::started(
+                    &state.backend,
+                    zone,
+                    &ContexteEcoute {
+                        nature: Some(nature),
+                        id: Some("conteneur-non-numerique"),
+                        rang: None,
+                        service: Some(source),
+                        titre: Some("Conteneur"),
+                        pochette: Some("service.jpg"),
+                    },
+                    source,
+                    Some("un"),
+                    "un",
+                    None,
+                    Some("piste.jpg"),
+                )
+                .unwrap();
+                let row = resumes::recent(&state.backend, Some(zone), 10)
+                    .unwrap()
+                    .remove(0);
+                assert!(row.shuffled, "un tirage de service doit rester mélangé");
+                assert_eq!(row.position, 1);
+                assert_eq!(row.cover_path.as_deref(), Some("service.jpg"));
+                assert_eq!(row.source, source);
+                assert_eq!(row.context_type, nature);
+                resumes::restore(&state.backend, target, &row).unwrap();
+                let restored = q.get_ordered(target).unwrap();
+                assert_eq!(
+                    restored
+                        .iter()
+                        .map(|e| e.source_id.as_deref().unwrap())
+                        .collect::<Vec<_>>(),
+                    ["trois", "un", "deux"],
+                    "le même tirage doit survivre sans remplacement par un ordre canonique"
+                );
+                assert!(restored[1].is_current);
+                assert_eq!(
+                    restored
+                        .iter()
+                        .skip(row.position)
+                        .map(|e| e.source_id.as_deref().unwrap())
+                        .collect::<Vec<_>>(),
+                    ["un", "deux"],
+                    "rejouer le dernier titre puis la suite, sans réentendre trois"
+                );
+                assert!(
+                    restored
+                        .iter()
+                        .all(|e| e.track_id.is_none() && e.source.as_deref() == Some(source)),
+                    "aucun identifiant de service ne devient local"
+                );
+                let response = fetch_continue_listening(&state, 10, Some(zone))
+                    .unwrap_or_else(|_| panic!("widget"));
+                assert_eq!(response[0]["cover_path"], "service.jpg");
+                assert_eq!(response[0]["last_track_title"], "un");
+            }
+        }
     }
 
     #[test]
@@ -698,6 +790,111 @@ mod replay_tests {
             q.get_ordered(zone).unwrap().len(),
             2,
             "la reprise doit reconstruire la file du contexte"
+        );
+    }
+    #[tokio::test]
+    async fn reprise_fabien_7280_un_titre_seul_reprend_sa_position_memorisee() {
+        let _pauses = crate::pauses_de_fond_tests::isoler().await;
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        state
+            .orchestrator
+            .sources_url()
+            .inscrire("circle", Arc::new(SourceMuette));
+        state.outputs.lock().await.register(Box::new(
+            tune_core::outputs::mock::MockOutput::new("mock-replay", "Muette").with_type("dlna"),
+        ));
+        let zone = tune_core::db::zone_repo::ZoneRepo::with_backend(state.backend.clone())
+            .create("Muette", Some("dlna"), Some("mock-replay"))
+            .unwrap();
+        let _lecture = LectureFactice(zone);
+        let q = PlayQueueRepo::with_backend(state.backend.clone());
+        let input = |id: &str| QueueInput::Streaming {
+            source: "circle".into(),
+            source_id: id.into(),
+            title: id.into(),
+            artist: "Artiste".into(),
+            album: None,
+            cover_url: None,
+            duration_ms: 100000,
+            track_number: None,
+            disc_number: None,
+            album_ref: None,
+            artist_ref: None,
+        };
+        q.append(zone, &[input("un"), input("deux")]).unwrap();
+        q.set_current_pos(zone, 1).unwrap();
+        resumes::started(
+            &state.backend,
+            zone,
+            &ContexteEcoute {
+                nature: Some("track"),
+                id: Some("deux"),
+                rang: None,
+                service: Some("circle"),
+                titre: Some("Playlist"),
+                pochette: None,
+            },
+            "circle",
+            Some("deux"),
+            "deux",
+            None,
+            None,
+        )
+        .unwrap();
+        let key = resumes::recent(&state.backend, None, 10).unwrap()[0]
+            .resume_key
+            .clone();
+        state
+            .playback
+            .play(
+                zone,
+                tune_core::playback::NowPlaying {
+                    title: "deux".into(),
+                    source: "circle".into(),
+                    source_id: Some("deux".into()),
+                    duration_ms: 100000,
+                    ..Default::default()
+                },
+            )
+            .await;
+        state.playback.seek(zone, 42000).await;
+        let played = state.playback.get_state(zone).await;
+        resumes::track_position(&state.backend, &played).unwrap();
+        let saved = resumes::load(&state.backend, &key).unwrap().unwrap();
+        assert_eq!(
+            saved.position_ms, 42000,
+            "la position du titre seul doit être persistée"
+        );
+        assert_eq!(
+            saved.items.len(),
+            1,
+            "le titre seul ne reprend pas les voisins"
+        );
+        state.playback.seek(zone, 17000).await;
+        let response = resume_listening(
+            State(state.clone()),
+            ActiveProfile(1),
+            Path(zone),
+            Json(ResumeRequest { resume_key: key }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("la reprise doit répondre"));
+        assert!(response.status().is_success());
+        let s = state.playback.get_state(zone).await;
+        assert_eq!(
+            s.position_ms, 42000,
+            "le titre seul reprend la position mémorisée, sans recul et sans seek récent"
+        );
+        assert_eq!(
+            s.now_playing.unwrap().source_id.as_deref(),
+            Some("deux"),
+            "la reprise doit rejouer le dernier titre démarré, pas la tête de la file"
+        );
+        assert_eq!(s.queue_position, 0);
+        assert_eq!(
+            q.get_ordered(zone).unwrap().len(),
+            1,
+            "la reprise du titre seul exclut les titres voisins"
         );
     }
 }

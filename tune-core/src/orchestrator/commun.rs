@@ -955,6 +955,7 @@ impl PlaybackOrchestrator {
 
     pub(super) async fn persist_position(&self, zone_id: i64) {
         let state = self.playback.get_state(zone_id).await;
+        let _ = crate::db::listening_resume::track_position(&self.db, &state);
         if let Some(ref np) = state.now_playing {
             if np.source == "podcast" {
                 if let Some(url) = np.source_id.as_deref() {
