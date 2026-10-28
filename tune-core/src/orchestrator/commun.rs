@@ -849,15 +849,56 @@ impl PlaybackOrchestrator {
             confirmations.noter(zone_id, stream_id, joue && en_attente);
         }
         if !en_attente {
+            if joue {
+                self.memoriser_position_du_lecteur(zone_id, stream_id, position_ms)
+                    .await;
+            }
             return SignalDuLecteur::RienEnAttente;
         }
         if !joue {
             return SignalDuLecteur::PasEncoreDeLecture;
         }
         if self.confirmer_lecture_navigateur(zone_id, stream_id).await {
+            self.memoriser_position_du_lecteur(zone_id, stream_id, position_ms)
+                .await;
             SignalDuLecteur::Confirmee
         } else {
             SignalDuLecteur::RienEnAttente
+        }
+    }
+
+    /// Position MESURÉE par le lecteur du flux courant, jamais une horloge estimée.
+    async fn memoriser_position_du_lecteur(&self, zone_id: i64, stream_id: &str, position_ms: i64) {
+        let state = self.playback.get_state(zone_id).await;
+        if position_ms <= 0
+            || state.state != PlayState::Playing
+            || !state
+                .now_playing
+                .as_ref()
+                .is_some_and(|np| np.stream_id.as_deref() == Some(stream_id))
+            || ZoneRepo::with_backend(self.db.clone())
+                .get(zone_id)
+                .ok()
+                .flatten()
+                .is_none_or(|zone| zone.output_type.as_deref() != Some("browser"))
+        {
+            return;
+        }
+        self.playback.update_position(zone_id, position_ms).await;
+        let state = self.playback.get_state(zone_id).await;
+        let _ = crate::db::listening_resume::track_position(&self.db, &state);
+        if let Some(np) = state
+            .now_playing
+            .as_ref()
+            .filter(|np| np.source == "podcast")
+            && let Some(url) = np.source_id.as_deref()
+        {
+            let _ = crate::db::listening_resume::podcast_position(
+                &self.db,
+                zone_id,
+                url,
+                state.position_ms,
+            );
         }
     }
 

@@ -279,4 +279,48 @@ async fn reprise_fabien_7280_titre_seul_navigateur_garde_sa_position_sans_fausse
             .is_empty(),
         "la position demandée n'est pas une écoute réellement démarrée"
     );
+    assert_eq!(
+        orch.signaler_lecture_navigateur(
+            zone_id,
+            &state.now_playing.unwrap().stream_id.unwrap(),
+            7500
+        )
+        .await,
+        super::SignalDuLecteur::Confirmee
+    );
+    let sid = orch
+        .playback
+        .get_state(zone_id)
+        .await
+        .now_playing
+        .unwrap()
+        .stream_id
+        .unwrap();
+    assert_eq!(
+        orch.signaler_lecture_navigateur(zone_id, &sid, 12500).await,
+        super::SignalDuLecteur::RienEnAttente
+    );
+    assert_eq!(
+        crate::db::listening_resume::recent(&orch.db, Some(zone_id), 10).unwrap()[0].position_ms,
+        12500,
+        "la reprise doit conserver la position mesurée après confirmation, pas la position initiale"
+    );
+    orch.signaler_lecture_navigateur(zone_id, "ancien-flux", 99000)
+        .await;
+    assert_eq!(
+        crate::db::listening_resume::recent(&orch.db, Some(zone_id), 10).unwrap()[0].position_ms,
+        12500,
+        "un ancien flux ne déplace pas la reprise courante"
+    );
+    let count = orch
+        .db
+        .query_one("SELECT COUNT(*) FROM listen_history", &[])
+        .unwrap()
+        .unwrap()[0]
+        .as_i64();
+    assert_eq!(
+        count,
+        Some(1),
+        "les positions suivantes ne créent pas de nouvelles écoutes"
+    );
 }
