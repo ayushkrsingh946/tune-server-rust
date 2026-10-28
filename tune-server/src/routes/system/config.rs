@@ -292,6 +292,10 @@ pub(super) async fn get_config(
     let settings = SettingsRepo::with_backend(state.backend.clone());
     let all = settings.all().unwrap_or_default();
     let mut config = serde_json::Map::new();
+    config.insert(
+        tune_core::db::listening_resume::REWIND_KEY.into(),
+        json!(tune_core::db::listening_resume::DEFAULT_REWIND),
+    );
     for (k, v) in all {
         // 🔴 Les préférences des AUTRES profils ne sortent pas d'ici.
         //
@@ -1735,6 +1739,13 @@ pub(super) async fn update_config(
     Json(body): Json<ConfigPatch>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut values = body.0;
+    if let Some(value) = values.get(tune_core::db::listening_resume::REWIND_KEY) {
+        if value.as_u64().is_none_or(|n| n > 300) {
+            return Err(AppError::bad_request(
+                "continue_listening_rewind_seconds : entier de 0 à 300 attendu",
+            ));
+        }
+    }
     // #2265 — refuser d'inscrire le nom du backend ACTIF comme s'il était un
     // réglage. Aucun repli, aucune réinterprétation vers `local_audio_backend` :
     // les deux informations sont différentes, et deviner laquelle est demandée
