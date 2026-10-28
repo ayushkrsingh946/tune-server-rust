@@ -2258,9 +2258,22 @@ async fn ancrer_position_demandee(
 /// `Seek` de la relecture (#2893). Sans reprise, rien ne change.
 async fn lancer_la_lecture(
     state: &AppState,
-    orch_req: tune_core::orchestrator::PlayRequest,
+    mut orch_req: tune_core::orchestrator::PlayRequest,
     reprise: Option<u64>,
 ) -> Result<tune_core::orchestrator::PlayResult, String> {
+    // Une lecture ou reprise générique doit respecter les mêmes restrictions
+    // que le bouton de lecture de la fiche radio.
+    if orch_req.source.as_deref() == Some("radio")
+        && let Some(url) = orch_req.source_id.as_deref()
+    {
+        let selected = super::radios::geofencing::stream_for_url(state, url)
+            .map_err(|error| error.message())?;
+        tune_core::poller::logo_de_lancement::retenir_le_logo_de_lancement(
+            &selected,
+            orch_req.cover_url.as_deref(),
+        );
+        orch_req.source_id = Some(selected);
+    }
     if reprise.is_some() {
         state
             .orchestrator
