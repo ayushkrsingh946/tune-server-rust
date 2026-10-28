@@ -90,6 +90,12 @@ fn protocole(brut: &str) -> Option<&'static str> {
         "sonos" => "sonos",
         "bluos" => "bluos",
         "devialet" | "devialet_air" => "devialet",
+        "hqplayer" => "hqplayer",
+        "squeezebox" => "squeezebox",
+        "slimproto" => "slimproto",
+        "sendspin" => "sendspin",
+        "oaat" => "oaat",
+        "oaat-multiroom" => "oaat-multiroom",
         _ => return None,
     })
 }
@@ -357,6 +363,54 @@ mod tests {
             Some(format(192000, 16)),
             "ne pas créer un 192/24 jamais lu ni publier le format échoué"
         );
+    }
+
+    #[test]
+    fn tune_tested_auto_conserve_les_autres_protocoles_publics_sans_format_invente() {
+        let settings = settings();
+        let mut observateur = Observateur::default();
+        for (index, protocol) in [
+            "hqplayer",
+            "squeezebox",
+            "slimproto",
+            "sendspin",
+            "oaat",
+            "oaat-multiroom",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                observateur
+                    .terminer(&settings, (7, index as u64 + 1, 0), protocol, true, None)
+                    .unwrap(),
+                "le protocole public {protocol} est perdu"
+            );
+        }
+        let devices = contribution(&settings).unwrap().devices;
+        assert_eq!(
+            devices.len(),
+            6,
+            "les chemins publics distincts ne doivent pas être fusionnés"
+        );
+        for (protocol, count) in [
+            ("hqplayer", 1),
+            ("squeezebox", 1),
+            ("slimproto", 1),
+            ("sendspin", 1),
+            ("oaat", 1),
+            ("oaat-multiroom", 1),
+        ] {
+            let device = devices
+                .iter()
+                .find(|device| device.protocol == protocol)
+                .unwrap();
+            assert_eq!(device.successful_plays, count);
+            assert_eq!(
+                device.best_format, None,
+                "aucun maximum ne se déduit du nom de protocole"
+            );
+        }
     }
 
     #[test]
