@@ -7126,3 +7126,6 @@ mod safari_radio_5975_tests {
 
 #[cfg(test)]
 mod reprise_chunkee_aac_6990;
+
+#[cfg(test)]
+mod multicanal_7275_tests;
