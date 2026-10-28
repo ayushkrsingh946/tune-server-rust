@@ -459,3 +459,164 @@ async fn une_ligne_d_une_autre_piste_ne_prete_pas_son_conteneur_6466() {
         None
     );
 }
+
+/// #7280 : les ajouts ne comptent qu'au démarrage, et le rang retenu est
+/// celui du conteneur, pas celui de la file composite.
+#[tokio::test]
+async fn reprise_fabien_7280_un_ajout_compte_quand_il_demarre_et_reconstruit_sa_suite() {
+    use crate::db::listening_resume;
+    let b = Banc::monter().await;
+    b.lire_l_album(b.salon).await;
+    let mut c = playlist();
+    c.titre = Some("Playlist demandée".into());
+    c.pochette = Some("playlist.jpg".into());
+    b.ajouter(
+        b.salon,
+        &[
+            piste("p:2", "Deux"),
+            piste("p:1", "Un"),
+            piste("p:3", "Trois"),
+        ],
+        &c,
+    );
+    assert!(
+        listening_resume::recent(&b.db, None, 10)
+            .unwrap()
+            .is_empty(),
+        "un contexte jamais démarré ne doit pas apparaître"
+    );
+    b.jouer(b.salon, 3).await;
+    let rows = listening_resume::recent(&b.db, None, 10).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "le contexte ajouté qui démarre doit être mémorisé"
+    );
+    let r = &rows[0];
+    assert_eq!(r.context_type, "playlist");
+    assert_eq!(
+        r.position, 1,
+        "le rang global de la file ne doit pas contaminer la reprise"
+    );
+    assert_eq!(r.last_track_title, "Un");
+    assert_eq!(r.cover_path.as_deref(), Some("playlist.jpg"));
+    listening_resume::restore(&b.db, b.enfants, r).unwrap();
+    let q = PlayQueueRepo::with_backend(b.db.clone())
+        .get_ordered(b.enfants)
+        .unwrap();
+    assert_eq!(
+        q.iter()
+            .map(|e| e.source_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["p:2", "p:1", "p:3"],
+        "la reprise doit garder l'ordre mémorisé"
+    );
+    b.jouer(b.enfants, r.position as i64).await;
+    assert_eq!(
+        b.orch
+            .playback
+            .get_state(b.enfants)
+            .await
+            .now_playing
+            .unwrap()
+            .title,
+        "Un",
+        "la reprise doit rejouer le dernier titre démarré"
+    );
+}
+
+#[tokio::test]
+async fn reprise_fabien_7280_album_aleatoire_et_titre_seul() {
+    use crate::db::listening_resume;
+    let b = Banc::monter().await;
+    b.lire_l_album(b.salon).await;
+    let q = PlayQueueRepo::with_backend(b.db.clone());
+    let entries = q.get_ordered(b.salon).unwrap();
+    q.reordonner(b.salon, &[entries[1].id, entries[0].id])
+        .unwrap();
+    b.orch.playback.set_shuffle(b.salon, true).await;
+    b.jouer(b.salon, 0).await;
+    let r = listening_resume::recent(&b.db, None, 10).unwrap().remove(0);
+    assert_eq!(r.context_type, "album");
+    assert_eq!(r.last_track_title, "Release My Heart");
+    listening_resume::restore(&b.db, b.enfants, &r).unwrap();
+    assert_eq!(
+        q.get_ordered(b.enfants).unwrap()[1].source_id.as_deref(),
+        Some("a:1"),
+        "l'ordre aléatoire doit survivre à la reprise"
+    );
+    b.orch.playback.set_shuffle(b.salon, false).await;
+    let mut normal = r.clone();
+    normal.shuffled = false;
+    listening_resume::save(&b.db, b.salon, &normal).unwrap();
+    listening_resume::mark_current_shuffled(&b.db, b.salon).unwrap();
+    b.jouer(b.salon, 1).await;
+    let client = listening_resume::recent(&b.db, Some(b.salon), 10)
+        .unwrap()
+        .remove(0);
+    assert!(
+        client.shuffled,
+        "l'ordre mélangé par le client doit survivre au titre suivant sans shuffle de zone"
+    );
+    b.ajouter(
+        b.salon,
+        &[piste("seul", "Seul")],
+        &ContexteDeFile::titre_seul(),
+    );
+    b.jouer(b.salon, 2).await;
+    let rows = listening_resume::recent(&b.db, None, 10).unwrap();
+    let seul = rows
+        .iter()
+        .find(|r| r.context_type == "track")
+        .expect("un titre seul doit être suivi");
+    assert_eq!(
+        seul.items.len(),
+        1,
+        "le titre seul ne doit pas hériter de l'album précédent"
+    );
+    b.orch.playback.seek(b.salon, 42000).await;
+    b.orch.persist_position(b.salon).await;
+    let saved = listening_resume::load(&b.db, &seul.resume_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.position_ms, 42000,
+        "pause/arrêt doit mémoriser la position du titre seul"
+    );
+    assert_eq!(saved.items.len(), 1);
+    listening_resume::restore(&b.db, b.enfants, &saved).unwrap();
+    b.jouer(b.enfants, 0).await;
+    assert_eq!(
+        b.orch
+            .playback
+            .get_state(b.enfants)
+            .await
+            .now_playing
+            .unwrap()
+            .title,
+        "Seul"
+    );
+}
+
+#[tokio::test]
+async fn reprise_fabien_7280_melange_client_avant_confirmation_ne_cree_pas_de_reprise() {
+    use crate::db::listening_resume;
+    let b = Banc::monter().await;
+    b.lire_l_album(b.salon).await;
+    let q = PlayQueueRepo::with_backend(b.db.clone());
+    q.set_current_pos(b.salon, 0).unwrap();
+    listening_resume::mark_current_shuffled(&b.db, b.salon).unwrap();
+    assert!(
+        listening_resume::recent(&b.db, Some(b.salon), 10)
+            .unwrap()
+            .is_empty(),
+        "une intention de mélange n'est pas un titre démarré"
+    );
+    b.jouer(b.salon, 1).await;
+    let rows = listening_resume::recent(&b.db, Some(b.salon), 10).unwrap();
+    assert!(
+        rows[0].shuffled,
+        "le mélange client doit survivre à une confirmation différée"
+    );
+    assert_eq!(rows[0].last_track_title, "Release My Heart");
+}
