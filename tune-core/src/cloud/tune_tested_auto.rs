@@ -96,7 +96,7 @@ fn protocole(brut: &str) -> Option<&'static str> {
 
 fn rang(format: &FormatObserve) -> (bool, u32, u16, &str, &str) {
     (
-        format.dsd_mode.is_some(),
+        format.codec == "dsd" || format.dsd_mode.is_some(),
         format.sample_rate.unwrap_or(0),
         format.bit_depth.unwrap_or(0),
         &format.codec,
@@ -525,5 +525,28 @@ mod tests {
         assert_ne!(hash, format!("{:x}", Sha256::digest(brut.as_bytes())));
         assert!(!hash.contains(brut));
         assert_ne!(hash, pseudonyme_serveur("autre installation"));
+    }
+
+    #[test]
+    fn tune_tested_auto_garde_la_famille_dsd_sans_inventer_le_mode_ni_la_resolution() {
+        let settings = settings();
+        let mut observateur = Observateur::default();
+        observateur
+            .terminer(&settings, (7, 1, 0), "dlna", true, Some(format(192000, 24)))
+            .unwrap();
+        let dsd = FormatObserve {
+            codec: "dsd".into(),
+            sample_rate: None,
+            bit_depth: Some(1),
+            dsd_mode: None,
+        };
+        observateur
+            .terminer(&settings, (7, 2, 0), "dlna", true, Some(dsd.clone()))
+            .unwrap();
+        assert_eq!(
+            contribution(&settings).unwrap().devices[0].best_format,
+            Some(dsd),
+            "ne ni perdre la famille DSD ni lui attribuer la résolution ou le mode d'une autre lecture"
+        );
     }
 }

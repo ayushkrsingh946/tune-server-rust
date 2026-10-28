@@ -143,7 +143,10 @@ fn format_de_session(info: &crate::http::streamer::StreamInfo, dop: bool) -> Opt
         } else {
             (info.bit_depth > 0).then_some(info.bit_depth)
         },
-        dsd_mode: dsd.then(|| if dop { "dop" } else { "native" }.into()),
+        // Un fichier DSF accepté sur HTTP ne révèle pas le transport du DAC.
+        // Seul un mode mesuré peut être déclaré ; le conteneur ne certifie
+        // jamais DSD natif.
+        dsd_mode: dop.then(|| "dop".into()),
     })
 }
 
@@ -184,5 +187,23 @@ mod tests {
         assert_eq!(format.dsd_mode.as_deref(), Some("dop"));
         info.format = "m4a".into();
         assert!(format_de_session(&info, false).is_none());
+    }
+
+    #[test]
+    fn tune_tested_auto_fichier_dsd_ne_certifie_pas_le_transport_natif() {
+        let info = StreamInfo {
+            format: "dsf".into(),
+            sample_rate: 2822400,
+            bit_depth: 1,
+            ..Default::default()
+        };
+        let observe = format_de_session(&info, false).unwrap();
+        assert_eq!(observe.codec, "dsd");
+        assert_eq!(observe.sample_rate, Some(2822400));
+        assert_eq!(observe.bit_depth, Some(1));
+        assert_eq!(
+            observe.dsd_mode, None,
+            "le format HTTP ne prouve pas le mode du DAC"
+        );
     }
 }
