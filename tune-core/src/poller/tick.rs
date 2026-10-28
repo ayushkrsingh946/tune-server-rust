@@ -8,6 +8,21 @@ impl PositionPoller {
         startup_at: &Instant,
     ) {
         let states = self.playback.all_states().await;
+        for s in &states {
+            if s.state == PlayState::Playing && s.position_ms > 0 {
+                if let Some(np) = s.now_playing.as_ref().filter(|np| np.source == "podcast") {
+                    if let Err(e) = crate::db::listening_resume::podcast_started_in_context(
+                        &self.db,
+                        s.zone_id,
+                        np,
+                        s.position_ms,
+                        s.session_context_id.as_deref(),
+                    ) {
+                        tracing::warn!(zone_id = s.zone_id, error = %e, "reprise_podcast_non_enregistree");
+                    }
+                }
+            }
+        }
 
         poll_states.retain(|zone_id, _| {
             states

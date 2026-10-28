@@ -672,6 +672,12 @@ impl PlaybackOrchestrator {
         })
         .ok();
 
+        if let Err(e) = crate::db::listening_resume::started(
+            &self.db, zone_id, &contexte, source, source_id, title, album, cover_url,
+        ) {
+            tracing::warn!(zone_id, error = %e, "reprise_non_enregistree");
+        }
+
         // NOTE: scrobbling is intentionally NOT dispatched here. It used to fire
         // at play-start, which (a) scrobbled a track the instant it began — so
         // skipping after a few seconds still scrobbled it, ignoring Last.fm's
@@ -950,6 +956,16 @@ impl PlaybackOrchestrator {
     pub(super) async fn persist_position(&self, zone_id: i64) {
         let state = self.playback.get_state(zone_id).await;
         if let Some(ref np) = state.now_playing {
+            if np.source == "podcast" {
+                if let Some(url) = np.source_id.as_deref() {
+                    let _ = crate::db::listening_resume::podcast_position(
+                        &self.db,
+                        zone_id,
+                        url,
+                        state.position_ms,
+                    );
+                }
+            }
             ZoneRepo::with_backend(self.db.clone())
                 .save_playback_position(
                     zone_id,

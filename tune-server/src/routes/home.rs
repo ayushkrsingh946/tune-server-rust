@@ -118,6 +118,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(home_page))
         .route("/continue-listening", get(continue_listening))
+        .route(
+            "/continue-listening/{zone_id}/resume",
+            axum::routing::post(resume_listening),
+        )
         .route("/recently-added", get(recently_added))
         .route("/recently-added/summary", get(recently_added_summary))
         .route("/recommendations", get(home_recommendations))
@@ -271,7 +275,33 @@ fn fetch_continue_listening(
     limit: i64,
     zone_id: Option<i64>,
 ) -> Result<Vec<Value>, AppError> {
-    fetch_continue_listening_borne(state, limit, zone_id, BORNE_SECOND_RANG)
+    let limit = limit.clamp(1, 200);
+    let fresh = tune_core::db::listening_resume::recent(&state.backend, zone_id, limit)
+        .map_err(AppError::internal)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut items: Vec<Value> = fresh.into_iter().map(|r| {
+        seen.insert((r.context_type.clone(), r.context_id.clone(), r.source.clone()));
+        json!({"resume_key": r.resume_key, "context_type": r.context_type, "context_id": r.context_id,
+            "source": r.source, "title": r.title, "last_track_title": r.last_track_title,
+            "cover_path": r.cover_path, "album_id": r.album_id, "id": r.album_id.unwrap_or(0),
+            "position": r.position, "position_ms": r.position_ms})
+    }).collect();
+    for old in fetch_continue_listening_borne(state, limit, zone_id, BORNE_SECOND_RANG)? {
+        let nature = old["context_type"].as_str().unwrap_or("album");
+        if !matches!(nature, "album" | "playlist" | "track" | "podcast") {
+            continue;
+        }
+        let key = (
+            nature.to_string(),
+            old["context_id"].as_str().unwrap_or_default().to_string(),
+            old["source"].as_str().unwrap_or("local").to_string(),
+        );
+        if seen.insert(key) {
+            items.push(old);
+        }
+    }
+    items.truncate(limit as usize);
+    Ok(items)
 }
 
 /// Le temps laisse au SECOND rang de « Continuer l'ecoute » (les albums
@@ -3805,3 +3835,7 @@ mod tests_autres_versions_grosse_bibliotheque {
         assert!(duree < std::time::Duration::from_secs(1), "{duree:?}");
     }
 }
+
+#[path = "home_resume.rs"]
+mod home_resume;
+use home_resume::resume_listening;

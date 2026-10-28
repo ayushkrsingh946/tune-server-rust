@@ -585,12 +585,15 @@ async fn depart_hors_bannis(
 }
 
 /// Persist the queue state for a zone to disk (non-blocking).
-fn persist_queue_async(state: &AppState, zone_id: i64) {
+pub(super) fn persist_queue_async(state: &AppState, zone_id: i64) {
     let db = state.backend.clone();
     let db_path = state.config.db_path.clone();
     let playback = state.playback.clone();
     tokio::spawn(async move {
         let zone_state = playback.get_state(zone_id).await;
+        if let Err(e) = tune_core::db::listening_resume::refresh_started(&db, &zone_state) {
+            tracing::warn!(zone_id, error = %e, "reprise_suite_non_actualisee");
+        }
         // #6526 — l'ordre d'avant l'aléatoire voyage avec l'instantané, pour
         // être rétabli même après un redémarrage.
         let ordre_d_origine = playback.ordre_d_origine(zone_id);

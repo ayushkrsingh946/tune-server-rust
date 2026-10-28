@@ -2701,6 +2701,7 @@ CREATE INDEX IF NOT EXISTS idx_radio_ecoutes_jour ON radio_ecoutes(jour);
         name: "collection_folders_manual_order",
         up: "",
     },
+    Migration { version: 135, name: "listening_resumes", up: include_str!("../../migrations/continue_listening.sql") },
 ];
 
 /// Migration 127 (#6257) : `tags.position`, 0 pour toutes les etiquettes
@@ -5652,6 +5653,11 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
         98,
         "collection_folders_manual_order",
         include_str!("../../migrations/postgres/098_collection_folders_manual_order.sql"),
+    ),
+    (
+        99,
+        "listening_resumes",
+        include_str!("../../migrations/continue_listening.sql"),
     ),
 ];
 

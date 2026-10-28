@@ -266,6 +266,7 @@ pub(crate) const ENSURE_TABLES: &[&str] = &[
 // Same rule as ENSURE_TABLES: one statement per entry, one round-trip
 // each, so a column that cannot be added never hides the ones after it.
 pub(crate) const ENSURE_COLUMNS: &[&str] = &[
+    include_str!("../../migrations/continue_listening.sql"),
     "ALTER TABLE alarms ADD COLUMN IF NOT EXISTS days_of_week TEXT DEFAULT '1111111'",
     "ALTER TABLE alarms ADD COLUMN IF NOT EXISTS multi_zone_ids TEXT",
     // SMALLINT, pas TEXT : cette colonne n'est declaree par AUCUN script
