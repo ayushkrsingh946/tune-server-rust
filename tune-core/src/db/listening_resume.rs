@@ -155,19 +155,18 @@ pub fn started(
         )?
         .map(|row| decode(&row))
         .transpose()?
-        .map(|r| r.queue_row_ids)
+        .map(|r| r.queue_row_ids.into_iter().collect::<std::collections::HashSet<_>>())
         .unwrap_or_default()
     } else {
-        Vec::new()
+        std::collections::HashSet::new()
     };
     for e in &queue {
         let explicit = contexts.get(&e.id);
         let belongs = explicit.is_none_or(|x| {
-            x[1].as_string()
-                .map_or(!current_explicit || inherited_rows.contains(&e.id), |n| {
-                    n == nature
-                })
-                && x[2].as_string().is_none_or(|v| v == id)
+            x[1].as_string().map_or_else(
+                || !current_explicit || inherited_rows.contains(&e.id),
+                |n| n == nature,
+            ) && x[2].as_string().is_none_or(|v| v == id)
                 && x[3].as_string().is_none_or(|v| v == service)
         });
         if !belongs || (nature == "track" && e.id != current.id) {
