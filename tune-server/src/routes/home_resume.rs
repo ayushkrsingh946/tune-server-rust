@@ -367,25 +367,30 @@ async fn complete_single_container(
             .collect()
     };
     let full: Vec<QueueInput> = full;
-    let position = full
-        .iter()
-        .position(|item| match (item, &current) {
-            (QueueInput::Local { track_id: a }, QueueInput::Local { track_id: b }) => a == b,
-            (
-                QueueInput::Streaming {
-                    source: a,
-                    source_id: ai,
-                    ..
-                },
-                QueueInput::Streaming {
-                    source: b,
-                    source_id: bi,
-                    ..
-                },
-            ) => a == b && ai == bi,
-            _ => false,
-        })
-        .ok_or_else(|| AppError::not_found("dernier titre absent du conteneur"))?;
+    let matches_current = |item: &QueueInput| match (item, &current) {
+        (QueueInput::Local { track_id: a }, QueueInput::Local { track_id: b }) => a == b,
+        (
+            QueueInput::Streaming {
+                source: a,
+                source_id: ai,
+                ..
+            },
+            QueueInput::Streaming {
+                source: b,
+                source_id: bi,
+                ..
+            },
+        ) => a == b && ai == bi,
+        _ => false,
+    };
+    // Une playlist peut contenir deux fois le même titre : conserver le
+    // rang mémorisé quand le conteneur le confirme, avant de chercher ailleurs.
+    let position = if full.get(r.position).is_some_and(&matches_current) {
+        Some(r.position)
+    } else {
+        full.iter().position(matches_current)
+    }
+    .ok_or_else(|| AppError::not_found("dernier titre absent du conteneur"))?;
     r.items = full;
     r.position = position;
     Ok(())
