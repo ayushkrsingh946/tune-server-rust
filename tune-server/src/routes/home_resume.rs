@@ -553,6 +553,28 @@ mod single_origin_tests {
             "plusieurs titres sélectionnés doivent aussi retrouver toute la suite de l'album"
         );
         assert_eq!(r.position, 1);
+        let playlists = tune_core::db::playlist_repo::PlaylistRepo::with_backend(db.clone());
+        let playlist = playlists.create("Doublons", None, 1).unwrap();
+        playlists
+            .add_tracks(playlist, &[ids[1], ids[0], ids[1]], None)
+            .unwrap();
+        r.context_type = "playlist".into();
+        r.context_id = playlist.to_string();
+        r.items = vec![
+            QueueInput::Local { track_id: ids[1] },
+            QueueInput::Local { track_id: ids[0] },
+            QueueInput::Local { track_id: ids[1] },
+        ];
+        r.position = 2;
+        complete_single_container(&state, &mut r)
+            .await
+            .unwrap_or_else(|_| panic!("playlist avec doublon"));
+        assert_eq!(
+            r.position, 2,
+            "le dernier titre doit rester la seconde occurrence de la playlist"
+        );
+        resumes::restore(db, zone, &r).unwrap();
+        assert!(q.get_ordered(zone).unwrap()[2].is_current);
     }
 }
 
