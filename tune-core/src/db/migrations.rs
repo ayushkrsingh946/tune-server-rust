@@ -5658,7 +5658,7 @@ pub(crate) const PG_MIGRATIONS: &[(i32, &str, &str)] = &[
     (
         100,
         "listening_resumes",
-        include_str!("../../migrations/continue_listening.sql"),
+        include_str!("../../migrations/postgres/100_listening_resumes.sql"),
     ),
 ];
 
