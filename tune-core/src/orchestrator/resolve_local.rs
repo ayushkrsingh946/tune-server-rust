@@ -895,7 +895,7 @@ impl PlaybackOrchestrator {
             )
             .await;
         transcodage.canaux_reduits = self
-            .decider_les_canaux_reseau(
+            .resolve_network_channels(
                 req,
                 source_format,
                 &source,
@@ -1486,20 +1486,20 @@ impl PlaybackOrchestrator {
 
     /// La limite porte sur le format servi, après choix du traitement.
     #[allow(clippy::too_many_arguments)]
-    async fn decider_les_canaux_reseau(
+    async fn resolve_network_channels(
         &self,
         req: &PlayRequest,
         source_format: Option<AudioFormat>,
         source: &SourceEtZone,
-        sorties: &Sorties,
-        forcages: &ForcagesReseau,
-        transcodage: &TranscodagePourLaSortie,
-        traitement: &Traitement,
+        outputs: &Sorties,
+        overrides: &ForcagesReseau,
+        transcode: &TranscodagePourLaSortie,
+        processing: &Traitement,
     ) -> Option<u16> {
-        let canaux_source = source.channels;
-        let is_network_output = sorties.is_network_output;
-        let dsd_passthrough = forcages.dsd_passthrough;
-        let canaux_renderer = if is_network_output && !dsd_passthrough && canaux_source > 2 {
+        let source_channels = source.channels;
+        let is_network_output = outputs.is_network_output;
+        let dsd_passthrough = overrides.dsd_passthrough;
+        let renderer_channels = if is_network_output && !dsd_passthrough && source_channels > 2 {
             let did = identifiant_du_renderer(
                 req.output_device_id.as_deref(),
                 source
@@ -1508,15 +1508,15 @@ impl PlaybackOrchestrator {
                     .and_then(|z| z.output_device_id.as_deref()),
             );
             let src = source_format.unwrap_or(AudioFormat::Flac);
-            let format = if transcodage.dlna_needs_wav
-                || traitement.dsp_progressif_wav
-                || traitement.flux_wav_reseau
+            let format = if transcode.dlna_needs_wav
+                || processing.dsp_progressif_wav
+                || processing.flux_wav_reseau
                 || src == AudioFormat::Dsd
             {
                 AudioFormat::Wav
-            } else if traitement.needs_downsample && !transcodage.needs_transcode_for_output {
+            } else if processing.needs_downsample && !transcode.needs_transcode_for_output {
                 AudioFormat::Flac
-            } else if transcodage.needs_transcode_for_output || traitement.eq_forces_transcode {
+            } else if transcode.needs_transcode_for_output || processing.eq_forces_transcode {
                 cible_encodable(src.dlna_transcode_target())
             } else {
                 src
@@ -1530,37 +1530,40 @@ impl PlaybackOrchestrator {
         // plafond, lu sous les mêmes gardes que la sonde. Elle ne fait que
         // réduire (plancher stéréo) ; le renderer garde le dernier mot quand
         // il annonce moins. Voir `plafond_de_canaux`.
-        let canaux_declares = if is_network_output && !dsd_passthrough && canaux_source > 2 {
+        let declared_channels = if is_network_output && !dsd_passthrough && source_channels > 2 {
             crate::audio::canaux_declares::disposition_declaree(&self.db, req.zone_id)
                 .map(|d| d.channel_count())
         } else {
             None
         };
-        let canaux_reduits = crate::audio::canaux_reseau_4573::canaux_a_servir(
+        let reduced_channels = crate::audio::canaux_reseau_4573::canaux_a_servir(
             is_network_output,
             dsd_passthrough,
-            canaux_source,
-            crate::audio::canaux_reseau_4573::plafond_de_canaux(canaux_renderer, canaux_declares),
+            source_channels,
+            crate::audio::canaux_reseau_4573::plafond_de_canaux(
+                renderer_channels,
+                declared_channels,
+            ),
         );
-        if let Some(cible) = canaux_reduits {
+        if let Some(target) = reduced_channels {
             // #6599 — la ligne dit QUI a fixé la cible : l'annonce du
             // renderer (sondée ou en cache), la disposition déclarée pour la
             // zone, ou les deux. Le rapport de l'A6 n'en disait rien.
             info!(
                 zone_id = req.zone_id,
-                canaux_source,
-                canaux_cible = cible,
-                canaux_renderer = ?canaux_renderer,
-                canaux_declares = ?canaux_declares,
+                canaux_source = source_channels,
+                canaux_cible = target,
+                canaux_renderer = ?renderer_channels,
+                canaux_declares = ?declared_channels,
                 origine = crate::audio::canaux_reseau_4573::origine_du_plafond(
-                    canaux_renderer,
-                    canaux_declares,
-                    cible,
+                    renderer_channels,
+                    declared_channels,
+                    target,
                 ),
                 "reduction_de_canaux_pour_le_renderer"
             );
         }
-        canaux_reduits
+        reduced_channels
     }
 
     /// Sixième temps : le traitement et ses cibles — le plafond de fréquence,

@@ -16,19 +16,19 @@ use tune_core::{
 #[derive(Clone)]
 struct Renderer {
     sink: String,
-    reception: Arc<Mutex<Option<Reception>>>,
+    received: Arc<Mutex<Option<Received>>>,
 }
 
-struct Reception {
+struct Received {
     didl: String,
-    octets: Vec<u8>,
+    bytes: Vec<u8>,
 }
 
-fn balise(xml: &str, nom: &str) -> String {
-    xml.split_once(&format!("<{nom}>"))
+fn tag(xml: &str, name: &str) -> String {
+    xml.split_once(&format!("<{name}>"))
         .unwrap()
         .1
-        .split_once(&format!("</{nom}>"))
+        .split_once(&format!("</{name}>"))
         .unwrap()
         .0
         .replace("&lt;", "<")
@@ -37,8 +37,8 @@ fn balise(xml: &str, nom: &str) -> String {
         .replace("&amp;", "&")
 }
 
-async fn soap(State(etat): State<Renderer>, entetes: HeaderMap, corps: String) -> String {
-    let action = entetes
+async fn soap(State(state): State<Renderer>, headers: HeaderMap, body: String) -> String {
+    let action = headers
         .get("soapaction")
         .unwrap()
         .to_str()
@@ -47,55 +47,55 @@ async fn soap(State(etat): State<Renderer>, entetes: HeaderMap, corps: String) -
         .rsplit('#')
         .next()
         .unwrap();
-    let resultat = match action {
-        "GetProtocolInfo" => format!("<Source></Source><Sink>{}</Sink>", etat.sink),
+    let result = match action {
+        "GetProtocolInfo" => format!("<Source></Source><Sink>{}</Sink>", state.sink),
         "GetTransportInfo" => "<CurrentTransportState>STOPPED</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>".into(),
         "SetAVTransportURI" => {
-            let url = balise(&corps, "CurrentURI");
+            let url = tag(&body, "CurrentURI");
             assert!(url.starts_with("http://127.0.0.1:"), "le banc reste sur la boucle locale : {url}");
-            let didl = balise(&corps, "CurrentURIMetaData");
-            let octets = reqwest::get(url).await.unwrap().error_for_status().unwrap()
+            let didl = tag(&body, "CurrentURIMetaData");
+            let bytes = reqwest::get(url).await.unwrap().error_for_status().unwrap()
                 .bytes().await.unwrap().to_vec();
-            *etat.reception.lock().await = Some(Reception { didl, octets });
+            *state.received.lock().await = Some(Received { didl, bytes });
             String::new()
         }
         _ => String::new(),
     };
     format!(
-        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:{action}Response xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">{resultat}</u:{action}Response></s:Body></s:Envelope>"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:{action}Response xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">{result}</u:{action}Response></s:Body></s:Envelope>"
     )
 }
 
-struct Serveur(tokio::task::JoinHandle<()>);
-impl Drop for Serveur {
+struct Server(tokio::task::JoinHandle<()>);
+impl Drop for Server {
     fn drop(&mut self) {
         self.0.abort();
     }
 }
 
-async fn servir(ecoute: tokio::net::TcpListener, routeur: axum::Router) -> Serveur {
-    Serveur(tokio::spawn(async move {
-        axum::serve(ecoute, routeur).await.unwrap();
+async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> Server {
+    Server(tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
     }))
 }
 
-async fn essai(sink: &str, attendus: u16) {
+async fn run_case(sink: &str, expected_channels: u16) {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("six-canaux.flac");
     // Six signaux distincts : un canal perdu, dupliqué ou réordonné se voit.
     let pcm: Vec<u8> = (0_i32..9600)
         .flat_map(|i| {
             (0..6).flat_map(move |c| {
-                let valeur = (((i * (c + 1)) % 997) - 498) * 1000;
-                let octets = valeur.to_le_bytes();
-                [octets[0], octets[1], octets[2]]
+                let value = (((i * (c + 1)) % 997) - 498) * 1000;
+                let bytes = value.to_le_bytes();
+                [bytes[0], bytes[1], bytes[2]]
             })
         })
         .collect();
-    let mut encodeur = AudioEncoder::new("flac", 96000, 24, 6);
-    encodeur.start().await.unwrap();
-    encodeur.write(&pcm).await.unwrap();
-    let original = encodeur.finish().await.unwrap();
+    let mut encoder = AudioEncoder::new("flac", 96000, 24, 6);
+    encoder.start().await.unwrap();
+    encoder.write(&pcm).await.unwrap();
+    let original = encoder.finish().await.unwrap();
     std::fs::write(&source, &original).unwrap();
 
     let db = SqliteDb::open_in_memory().unwrap();
@@ -118,31 +118,31 @@ async fn essai(sink: &str, attendus: u16) {
     let zone = zones
         .create("Lecteur simulé", Some("dlna"), Some(&device))
         .unwrap();
-    let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let streamer = Arc::new(AudioStreamer::new(ecoute.local_addr().unwrap().port()));
-    let _http = servir(ecoute, super::router(streamer.sessions_state())).await;
-    let ecoute = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let adresse = ecoute.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let streamer = Arc::new(AudioStreamer::new(listener.local_addr().unwrap().port()));
+    let _http = serve(listener, super::router(streamer.sessions_state())).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
     let renderer = Renderer {
         sink: sink.into(),
-        reception: Arc::new(Mutex::new(None)),
+        received: Arc::new(Mutex::new(None)),
     };
-    let _soap = servir(
-        ecoute,
+    let _soap = serve(
+        listener,
         axum::Router::new()
             .route("/control", post(soap))
             .with_state(renderer.clone()),
     )
     .await;
-    let controle = format!("http://{adresse}/control");
+    let control_url = format!("http://{address}/control");
     let mut outputs = OutputRegistry::new();
     outputs.register(Box::new(DlnaOutput::new(
         "Lecteur simulé".into(),
         device.clone(),
         "127.0.0.1".into(),
-        controle.clone(),
-        controle.clone(),
-        Some(controle),
+        control_url.clone(),
+        control_url.clone(),
+        Some(control_url),
     )));
     let orch = PlaybackOrchestrator::new(
         db,
@@ -158,7 +158,7 @@ async fn essai(sink: &str, attendus: u16) {
         orch.canaux_annonces_du_renderer(&device, "audio/L16").await,
         Some(2)
     );
-    let resultat = tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         orch.play(PlayRequest {
             zone_id: zone,
@@ -171,26 +171,29 @@ async fn essai(sink: &str, attendus: u16) {
     .await
     .expect("la lecture simulée doit aboutir")
     .expect("lecture acceptée");
-    let Reception { didl, octets: recu } = renderer
-        .reception
+    let Received {
+        didl,
+        bytes: received_bytes,
+    } = renderer
+        .received
         .lock()
         .await
         .take()
         .expect("le lecteur a reçu le flux");
     assert!(
-        didl.contains(&format!("nrAudioChannels=\"{attendus}\"")),
+        didl.contains(&format!("nrAudioChannels=\"{expected_channels}\"")),
         "DIDL incohérent : {didl}"
     );
     assert!(
         didl.contains("audio/flac"),
         "le format servi reste le FLAC : {didl}"
     );
-    let recu_path = dir.path().join("recu.flac");
-    std::fs::write(&recu_path, &recu).unwrap();
-    let decode = decode_to_pcm(recu_path.to_str().unwrap(), None, None, 0.0, 0.0).unwrap();
+    let received_path = dir.path().join("recu.flac");
+    std::fs::write(&received_path, &received_bytes).unwrap();
+    let decode = decode_to_pcm(received_path.to_str().unwrap(), None, None, 0.0, 0.0).unwrap();
     assert_eq!(
         decode.channels,
-        u32::from(attendus),
+        u32::from(expected_channels),
         "les canaux reçus doivent suivre le FLAC annoncé, pas le LPCM"
     );
     assert_eq!((decode.sample_rate, decode.bit_depth), (96000, 24));
@@ -202,34 +205,34 @@ async fn essai(sink: &str, attendus: u16) {
         .cloned()
         .collect();
     assert_eq!(ids.len(), 1);
-    let fil = streamer.stream_output_wire(&ids[0]).await.unwrap();
+    let wire = streamer.stream_output_wire(&ids[0]).await.unwrap();
     assert_eq!(
-        u32::from(fil.channels),
+        u32::from(wire.channels),
         decode.channels,
         "le chemin du signal décrit les canaux reçus"
     );
-    if attendus == 6 {
+    if expected_channels == 6 {
         assert_eq!(
-            recu, original,
+            received_bytes, original,
             "les six canaux doivent passer sans transcodage"
         );
         assert_eq!(decode.pcm_bytes(), pcm, "aucune voie perdue ou réordonnée");
     } else {
-        let libelle = tune_core::audio::canaux_reseau_4573::etiquette_de_reduction_reseau(
+        let label = tune_core::audio::canaux_reseau_4573::etiquette_de_reduction_reseau(
             6,
-            fil.channels,
+            wire.channels,
             None,
         );
         assert_eq!(
-            libelle.as_deref(),
+            label.as_deref(),
             Some("6 → 2 canaux (annoncés par le lecteur)")
         );
     }
     assert!(
-        resultat.output_sent,
-        "la sortie doit accepter la lecture : {resultat:?}"
+        result.output_sent,
+        "la sortie doit accepter la lecture : {result:?}"
     );
-    assert!(resultat.error.is_none(), "{resultat:?}");
+    assert!(result.error.is_none(), "{result:?}");
     orch.stop(zone, None).await;
     for id in ids {
         streamer.remove_session(&id).await;
@@ -237,8 +240,8 @@ async fn essai(sink: &str, attendus: u16) {
 }
 
 #[tokio::test]
-async fn multicanal_7275_flac_six_canaux_recu_intact() {
-    essai(
+async fn multichannel_7275_receives_six_channel_flac_unchanged() {
+    run_case(
         "http-get:*:audio/L16;channels=2:*,http-get:*:audio/flac;channels=6:*",
         6,
     )
@@ -246,13 +249,13 @@ async fn multicanal_7275_flac_six_canaux_recu_intact() {
 }
 
 #[tokio::test]
-async fn multicanal_7275_flac_inconnu_ne_reprend_pas_la_limite_lpcm() {
+async fn multichannel_7275_unknown_flac_does_not_inherit_lpcm_limit() {
     // Partie utile de l'annonce DMP-A6 du rapport ; le reste est sans lien
     // avec le FLAC et les entrées après la borne du journal restent inconnues.
-    essai("http-get:*:audio/L16;rate=44100;channels=1:*,http-get:*:audio/L16;rate=48000;channels=2:*,http-get:*:audio/x-flac:*,http-get:*:audio/flac:*,http-get:*:audio/mp4:DLNA.ORG_PN=AAC_MULT5_ISO", 6).await;
+    run_case("http-get:*:audio/L16;rate=44100;channels=1:*,http-get:*:audio/L16;rate=48000;channels=2:*,http-get:*:audio/x-flac:*,http-get:*:audio/flac:*,http-get:*:audio/mp4:DLNA.ORG_PN=AAC_MULT5_ISO", 6).await;
 }
 
 #[tokio::test]
-async fn multicanal_7275_stereo_repli_explicite_malgre_lpcm_huit_canaux() {
-    essai("http-get:*:audio/L16;channels=2:*,http-get:*:audio/L24;channels=8:*,http-get:*:audio/flac;channels=2:*", 2).await;
+async fn multichannel_7275_stereo_flac_has_explicit_fallback_despite_eight_channel_lpcm() {
+    run_case("http-get:*:audio/L16;channels=2:*,http-get:*:audio/L24;channels=8:*,http-get:*:audio/flac;channels=2:*", 2).await;
 }

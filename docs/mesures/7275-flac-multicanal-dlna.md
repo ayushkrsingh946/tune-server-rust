@@ -65,7 +65,7 @@ ne suffit plus à imposer ce plafond au FLAC.
 
 ## Essais ciblés, sans son
 
-Le banc `tune-stream-http/src/multicanal_7275_tests.rs` génère un FLAC 96 kHz,
+Le banc `tune-stream-http/src/multichannel_7275_tests.rs` génère un FLAC 96 kHz,
 24 bits, six voies distinctes. Il appelle la lecture réelle, avec une sortie
 `DlnaOutput`, un ConnectionManager/AVTransport simulé et le vrai routeur de
 flux HTTP. Le lecteur simulé télécharge l'URI reçue, puis les octets sont
@@ -88,18 +88,18 @@ copie du fichier corrigé, puis annulé en recopiant cette sauvegarde.
 
 1. Dans `resolve_direct.rs`, remplacer le calcul par MIME par
    `let canaux = caps.canaux_max;`. Commande :
-   `cargo test -p tune-stream-http --lib multicanal_7275_flac_inconnu_ne_reprend_pas_la_limite_lpcm`.
+   `cargo test -p tune-stream-http --lib multichannel_7275_unknown_flac_does_not_inherit_lpcm_limit`.
    Le test compile et échoue : `DIDL incohérent`, avec
    `nrAudioChannels="2"` au lieu des six attendus. Bilan : 0 réussi, 1 échec.
 2. Dans `protocol_sink_supports_mime`, rétablir la comparaison du champ MIME
    entier, sans retirer ses paramètres. Commande :
-   `cargo test -p tune-stream-http --lib multicanal_7275_flac_six_canaux_recu_intact`.
+   `cargo test -p tune-stream-http --lib multichannel_7275_receives_six_channel_flac_unchanged`.
    Le test compile et échoue : `le format servi reste le FLAC`, alors que le
    DIDL reçu annonce `audio/wav`, 16 bits. Bilan : 0 réussi, 1 échec.
 
-Après restauration, `cargo test -p tune-stream-http --lib multicanal_7275`
+Après restauration, `cargo test -p tune-stream-http --lib multichannel_7275`
 repasse au vert : 3 réussis, 0 échec. Les tests de lecture des annonces passent
-également : `cargo test -p tune-core --no-default-features --lib multicanal_7275`
+également : `cargo test -p tune-core --no-default-features --lib multichannel_7275`
 (2 réussis) et `cargo test -p tune-core --no-default-features --lib canaux_annonces_4573`
 (6 réussis). Aucun test de la suite complète ni audit de sécurité n'a été lancé
 localement ; ces contrôles appartiennent à la CI.

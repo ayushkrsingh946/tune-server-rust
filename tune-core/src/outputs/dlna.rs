@@ -4013,7 +4013,7 @@ pub struct RendererCapabilities {
     pub dsd: bool,
     /// Maximum des valeurs explicites, tous formats confondus, pour le
     /// diagnostic uniquement. Ce résumé ne limite pas un format : la lecture
-    /// utilise `canaux_annonces_pour_mime` sur les entrées du Sink.
+    /// utilise `advertised_channels_for_mime` sur les entrées du Sink.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canaux_max: Option<u16>,
     /// Raw Sink entries, for an advanced/debug view.
@@ -4057,30 +4057,30 @@ pub fn canaux_annonces_par_le_sink(sink: &[String]) -> Option<u16> {
 
 /// Limite annoncée pour le format servi, sans emprunter celle d'un autre
 /// codec. Un FLAC sans `channels=` reste inconnu même si le LPCM est stéréo.
-pub fn canaux_annonces_pour_mime(sink: &[String], mime: &str) -> Option<u16> {
-    let normaliser = |mime: &str| {
+pub fn advertised_channels_for_mime(sink: &[String], mime: &str) -> Option<u16> {
+    let normalize = |mime: &str| {
         mime.trim()
             .to_ascii_lowercase()
             .replace("audio/x-", "audio/")
     };
-    let mime = normaliser(mime);
+    let mime = normalize(mime);
     sink.iter()
-        .filter_map(|entree| {
-            let champs: Vec<_> = entree.splitn(4, ':').collect();
-            if champs.len() != 4 || !champs[0].eq_ignore_ascii_case("http-get") {
+        .filter_map(|entry| {
+            let fields: Vec<_> = entry.splitn(4, ':').collect();
+            if fields.len() != 4 || !fields[0].eq_ignore_ascii_case("http-get") {
                 return None;
             }
-            let mut parametres = champs[2].split(';');
-            if normaliser(parametres.next()?) != mime {
+            let mut parameters = fields[2].split(';');
+            if normalize(parameters.next()?) != mime {
                 return None;
             }
-            parametres
-                .filter_map(|parametre| {
-                    let (nom, valeur) = parametre.trim().split_once('=')?;
-                    if !nom.trim().eq_ignore_ascii_case("channels") {
+            parameters
+                .filter_map(|parameter| {
+                    let (name, value) = parameter.trim().split_once('=')?;
+                    if !name.trim().eq_ignore_ascii_case("channels") {
                         return None;
                     }
-                    valeur.trim().parse::<u16>().ok().filter(|n| *n > 0)
+                    value.trim().parse::<u16>().ok().filter(|n| *n > 0)
                 })
                 .max()
         })
@@ -6147,7 +6147,7 @@ mod canaux_annonces_4573 {
     /// Le Sink relevé par Xavier Joly sur le Denon AVR-X1600H (20/09/2026) :
     /// LPCM en 1 et 2 canaux, FLAC sans `channels=`.
     #[test]
-    fn le_resume_du_sink_releve_le_maximum_explicite() {
+    fn sink_summary_reports_highest_explicit_count() {
         let sink = v(&[
             "http-get:*:audio/L16;rate=44100;channels=1:*",
             "http-get:*:audio/L16;rate=44100;channels=2:*",
@@ -6204,22 +6204,22 @@ mod canaux_annonces_4573 {
 }
 
 #[cfg(test)]
-mod multicanal_7275 {
-    use super::canaux_annonces_pour_mime;
+mod multichannel_7275 {
+    use super::advertised_channels_for_mime;
 
     #[test]
-    fn la_limite_lpcm_ne_plafonne_pas_le_flac() {
+    fn lpcm_limit_does_not_cap_flac() {
         let sink = [
             "http-get:*:audio/L16;rate=48000;channels=2:*".into(),
             "http-get:*:audio/flac:*".into(),
             "http-get:*:audio/mp4:DLNA.ORG_PN=AAC_MULT5_ISO".into(),
         ];
-        assert_eq!(canaux_annonces_pour_mime(&sink, "audio/flac"), None);
-        assert_eq!(canaux_annonces_pour_mime(&sink, "audio/L16"), Some(2));
+        assert_eq!(advertised_channels_for_mime(&sink, "audio/flac"), None);
+        assert_eq!(advertised_channels_for_mime(&sink, "audio/L16"), Some(2));
     }
 
     #[test]
-    fn chaque_codec_garde_ses_canaux_et_ses_alias() {
+    fn each_codec_keeps_its_channels_and_aliases() {
         let sink = [
             "http-get:*:audio/L24;channels=8:*".into(),
             "http-get:*:audio/x-flac; channels = 2 :*".into(),
@@ -6228,8 +6228,8 @@ mod multicanal_7275 {
             "http-get:*:video/flac;channels=32:*".into(),
             "rtsp-rtp-udp:*:audio/flac;channels=64:*".into(),
         ];
-        assert_eq!(canaux_annonces_pour_mime(&sink, "audio/flac"), Some(6));
-        assert_eq!(canaux_annonces_pour_mime(&sink, "audio/L24"), Some(8));
-        assert_eq!(canaux_annonces_pour_mime(&sink, "audio/wav"), None);
+        assert_eq!(advertised_channels_for_mime(&sink, "audio/flac"), Some(6));
+        assert_eq!(advertised_channels_for_mime(&sink, "audio/L24"), Some(8));
+        assert_eq!(advertised_channels_for_mime(&sink, "audio/wav"), None);
     }
 }

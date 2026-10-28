@@ -105,8 +105,8 @@ impl PlaybackOrchestrator {
         // sans AUCUNE ligne de sonde pour l'A6 : la réponse venait du cache,
         // muet, d'une sonde faite avant la fenêtre du rapport. On ne pouvait
         // plus dire d'où venait le 2.
-        let cle = (device_id.to_string(), mime.to_string());
-        let en_cache = self.dlna_canaux_max.lock().await.get(&cle).copied();
+        let cache_key = (device_id.to_string(), mime.to_string());
+        let en_cache = self.dlna_canaux_max.lock().await.get(&cache_key).copied();
         if let Some(connu) = en_cache {
             tracing::info!(
                 device_id,
@@ -144,7 +144,7 @@ impl PlaybackOrchestrator {
             );
             return None;
         }
-        let canaux = crate::outputs::dlna::canaux_annonces_pour_mime(&caps.sink, mime);
+        let canaux = crate::outputs::dlna::advertised_channels_for_mime(&caps.sink, mime);
         tracing::info!(
             device_id,
             mime,
@@ -152,7 +152,7 @@ impl PlaybackOrchestrator {
             origine = "sonde",
             "dlna_canaux_annonces_sondes"
         );
-        self.dlna_canaux_max.lock().await.insert(cle, canaux);
+        self.dlna_canaux_max.lock().await.insert(cache_key, canaux);
         canaux
     }
 }
