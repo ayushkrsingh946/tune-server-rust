@@ -120,6 +120,16 @@ pub(super) async fn resume_listening(
 }
 
 #[cfg(test)]
+struct LectureFactice(i64);
+
+#[cfg(test)]
+impl Drop for LectureFactice {
+    fn drop(&mut self) {
+        tune_core::taches_de_fond::priorite::oublier_la_zone(self.0);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tune_core::db::play_queue_repo::{PlayQueueRepo, QueueInput};
@@ -233,6 +243,7 @@ mod route_tests {
     use super::*;
     #[tokio::test]
     async fn reprise_fabien_7280_la_route_recale_le_vrai_controle_de_sortie_factice() {
+        let _pauses = crate::pauses_de_fond_tests::isoler().await;
         let state = AppState::new(":memory:", 0, Default::default()).unwrap();
         let mock =
             tune_core::outputs::mock::MockOutput::new("mock-reprise", "Muette").with_type("dlna");
@@ -240,6 +251,7 @@ mod route_tests {
         let zone = tune_core::db::zone_repo::ZoneRepo::with_backend(state.backend.clone())
             .create("Muette", Some("dlna"), Some("mock-reprise"))
             .unwrap();
+        let _lecture = LectureFactice(zone);
         SettingsRepo::with_backend(state.backend.clone())
             .set(resumes::REWIND_KEY, "17")
             .unwrap();
@@ -598,6 +610,7 @@ mod replay_tests {
 
     #[tokio::test]
     async fn reprise_fabien_7280_la_route_rejoue_le_dernier_titre_depuis_zero_meme_apres_un_seek() {
+        let _pauses = crate::pauses_de_fond_tests::isoler().await;
         let state = AppState::new(":memory:", 0, Default::default()).unwrap();
         state
             .orchestrator
@@ -609,6 +622,7 @@ mod replay_tests {
         let zone = tune_core::db::zone_repo::ZoneRepo::with_backend(state.backend.clone())
             .create("Muette", Some("dlna"), Some("mock-replay"))
             .unwrap();
+        let _lecture = LectureFactice(zone);
         let q = PlayQueueRepo::with_backend(state.backend.clone());
         let input = |id: &str| QueueInput::Streaming {
             source: "circle".into(),
@@ -698,6 +712,7 @@ mod server_shuffle_tests {
 
     #[tokio::test]
     async fn reprise_fabien_7280_le_menu_album_aleatoire_memorise_son_ordre() {
+        let _pauses = crate::pauses_de_fond_tests::isoler().await;
         let state = AppState::new(":memory:", 0, Default::default()).unwrap();
         state.outputs.lock().await.register(Box::new(
             tune_core::outputs::mock::MockOutput::new("mock-album-shuffle", "Muette")
@@ -706,6 +721,7 @@ mod server_shuffle_tests {
         let zone = tune_core::db::zone_repo::ZoneRepo::with_backend(state.backend.clone())
             .create("Muette", Some("dlna"), Some("mock-album-shuffle"))
             .unwrap();
+        let _lecture = LectureFactice(zone);
         state
             .backend
             .execute("INSERT INTO albums (title) VALUES ('Album mélangé')", &[])
