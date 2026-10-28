@@ -806,3 +806,8 @@ path = "tests/wav24_chaine_progressive_b209bf.rs"
 [[test]]
 name = "scripts_image_dossier_de_travail_4770"
 path = "tests/scripts_image_dossier_de_travail_4770.rs"
+
+# #7340 : sélection des canaux APO, banc déclaré car autotests=false.
+[[test]]
+name = "autoeq_canaux_7340"
+path = "tests/autoeq_canaux_7340.rs"
