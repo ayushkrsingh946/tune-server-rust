@@ -87,6 +87,90 @@ fn le_repli_7011_ne_remplace_pas_un_id_externe_et_n_invente_pas_un_id_absent() {
     }
 }
 
+// #7200 — Café del Mar (fil forum 2476), validée par l'administrateur radio
+// sur le portail : une fiche du portail, comme Radio Bonheur (#7011). Forme
+// de la fiche réelle du portail relevée pour #7011 (external_id=null, source,
+// statut, forme des flux) ; nom, flux, format et débit sont ceux de la
+// station. L'`id` du portail est inventé pour l'essai : la fiche réelle n'a
+// pas pu être relue.
+const FICHE_CAFE_DEL_MAR_7200: &str =
+    include_str!("fixtures/annuaire_portail_7200_cafe_del_mar.json");
+const FLUX_CAFE_DEL_MAR: &str = "https://streams.radio.co/se1a320b47/listen";
+
+/// Une station locale qui sert un MP3 192 kbit/s : la vraie n'est jamais
+/// contactée par un essai.
+async fn station_locale_mp3() -> String {
+    let corps: &'static [u8] = include_bytes!("../../tune-core/tests/fixtures/test.mp3");
+    let app = axum::Router::new().route(
+        "/se1a320b47/listen",
+        axum::routing::get(move || async move { ([("content-type", "audio/mpeg")], corps) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    format!("http://127.0.0.1:{port}/se1a320b47/listen")
+}
+
+/// #7200 — le geste du testeur : l'annuaire montre Café del Mar, le client
+/// lit sa clé dans `items[].external_id` et appelle
+/// `/radios/directory/{clé}/play/{zone}`. En rc8.1, une fiche du portail
+/// rendait `external_id: null` : le client appelait `/directory/null/play/…`,
+/// le serveur répondait 404 avant toute tentative de lecture, et l'écran
+/// restait muet, sans message. Le témoin exige que ce clic atteigne la
+/// lecture.
+#[tokio::test]
+async fn cafe_del_mar_du_portail_se_joue_depuis_l_annuaire_7200() {
+    let brut: Value = serde_json::from_str(FICHE_CAFE_DEL_MAR_7200).unwrap();
+    let reelle = tune_server::routes::radios::annuaire_depuis_json(std::slice::from_ref(&brut));
+    assert_eq!(reelle.len(), 1, "la fiche publiée est retenue");
+    assert_eq!(reelle[0].stream_url, FLUX_CAFE_DEL_MAR);
+    assert_eq!(reelle[0].codec.as_deref(), Some("MP3"));
+    assert_eq!(reelle[0].bitrate, Some(192));
+
+    // Même fiche, flux servi en local.
+    let local = station_locale_mp3().await;
+    let texte = FICHE_CAFE_DEL_MAR_7200.replace(FLUX_CAFE_DEL_MAR, &local);
+    let fiches = tune_server::routes::radios::annuaire_depuis_json(&[
+        serde_json::from_str::<Value>(&texte).unwrap(),
+    ]);
+    let state = etat();
+    *state.annuaire_radios.write().unwrap() = fiches;
+    let app = tune_server::routes::router(state.clone());
+
+    let (status, page) = requete(&app, "GET", "/api/v1/radios/directory?q=cafe", None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let item = &page["items"][0];
+    assert_eq!(item["name"], "Café del Mar", "{page}");
+    // Ce que fait le client : la clé telle quelle, `null` devenant « null ».
+    let cle = match &item["external_id"] {
+        Value::String(s) => s.replace(':', "%3A"),
+        autre => autre.to_string(),
+    };
+
+    let (status, zone) = requete(
+        &app,
+        "POST",
+        "/api/v1/zones",
+        Some(json!({"name": "Onglet 7200", "output_type": "browser"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{zone}");
+    let zone_id = zone["id"].as_i64().unwrap();
+
+    let chemin = format!("/api/v1/radios/directory/{cle}/play/{zone_id}");
+    let (status, lecture) = requete(&app, "POST", &chemin, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Café del Mar, fiche du portail : le clic « Écouter » de l'annuaire doit \
+         atteindre la lecture, pas un {status} sur {chemin} ({lecture})"
+    );
+    assert_eq!(lecture["radio"], "Café del Mar", "{lecture}");
+    assert_eq!(lecture["zone_id"], zone_id, "{lecture}");
+}
+
 fn etat() -> tune_server::state::AppState {
     tune_server::state::AppState::new(":memory:", 0, Default::default()).unwrap()
 }

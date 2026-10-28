@@ -1926,14 +1926,16 @@ impl PlaybackOrchestrator {
         // Coût nul sur une lecture qui démarre : on n'entre dans ce bloc que
         // lorsqu'une sortie a EXPLICITEMENT refusé le flux.
         if let Some(ref bus) = self.event_bus {
-            bus.emit(
-                "zone.playback_error",
-                serde_json::json!({
-                    "zone_id": req.zone_id,
-                    "error": output_error.as_deref().unwrap_or_default(),
-                    "fatal": true,
-                }),
-            );
+            let message = output_error.as_deref().unwrap_or_default();
+            let mut charge = serde_json::json!({
+                "zone_id": req.zone_id,
+                "error": message,
+                "fatal": true,
+            });
+            if message == crate::outputs::hqplayer::MESSAGE_ECHEC_DE_SORTIE {
+                charge["code"] = crate::outputs::hqplayer::CODE_ECHEC_DE_SORTIE.into();
+            }
+            bus.emit("zone.playback_error", charge);
         }
         // La session de flux ne se détruit que si la commande n'a
         // certainement PAS été exécutée. Sur un timeout, elle a pu atteindre
@@ -3777,6 +3779,27 @@ impl PlaybackOrchestrator {
             .flatten()
             .and_then(|z| z.output_type);
         let is_network = is_network_output_type(zone_output_type.as_deref());
+
+        // #6982 — même renderer et même défaut qu'en bibliothèque (#6333),
+        // mais le proxy Qobuz ne commence pas à la position après un Seek.
+        // La résolution de la relecture fabrique un FLAC décalé et inscrit
+        // son départ : seek_output_after_replay ne lui ajoute aucun Seek.
+        if zone_output_type.as_deref() == Some("dlna")
+            && let Some(np) = state.now_playing.as_ref()
+            && np.source == "qobuz"
+            && self
+                .deplacement_hi_res_par_nouveau_flux(zone_id, did, np.bit_depth)
+                .await
+        {
+            if let Err(e) = self
+                .replay_zone_at_position(zone_id, position_ms, "seek_qobuz_hi_res")
+                .await
+            {
+                self.playback.seek(zone_id, original_position_ms).await;
+                return Err(OutputCommandError::failed(OutputCommand::Seek, e));
+            }
+            return Ok(());
+        }
 
         if is_streaming_source && is_network {
             // Check if the current stream session supports Range seeking

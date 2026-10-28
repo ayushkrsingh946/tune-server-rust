@@ -1121,6 +1121,9 @@ mod volume_pure_5695_tests;
 
 /// #6233 — radio sur sortie locale : le contrat de signal relu à chaque tour.
 mod contrat_radio_locale_6233;
+mod etat_air_6912;
+#[cfg(test)]
+mod etat_air_6912_tests;
 /// #6739 — un relevé du volume de l'appareil ne remonte jamais la consigne.
 mod releve_ne_monte_pas_6739;
 /// #6739 — ses témoins, sur le vrai sondeur et le vrai orchestrateur.

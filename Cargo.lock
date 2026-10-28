@@ -6892,6 +6892,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "lofty",
+ "md-5 0.10.6",
  "mdns-sd",
  "minisign-verify",
  "quick-xml 0.41.0",

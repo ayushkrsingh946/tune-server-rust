@@ -2123,6 +2123,48 @@ impl ZoneRepo {
         Ok(())
     }
 
+    /// #6912 — une observation ne remonte jamais le volume enregistré et ne
+    /// remplace ni un nouvel appareil ni une consigne modifiée depuis sa lecture.
+    pub(crate) fn adopter_controles_air_attendus(
+        &self,
+        zone: &Zone,
+        volume: f64,
+        muted: bool,
+    ) -> Result<bool, String> {
+        if !volume.is_finite() || volume < 0.0 || volume > zone.volume {
+            return Ok(false);
+        }
+        let Some(id) = zone.id else {
+            return Ok(false);
+        };
+        let Some(did) = zone.output_device_id.as_deref() else {
+            return Ok(false);
+        };
+        let d: &dyn SqlDialect = match self.db.engine() {
+            Engine::Sqlite => &SqliteDialect,
+            Engine::Postgres => &PostgresDialect,
+        };
+        let p: Vec<_> = (1..=8).map(|i| d.placeholder(i)).collect();
+        let sql = format!(
+            "UPDATE zones SET volume = {}, muted = {} WHERE id = {} AND output_type = 'devialet_air' AND output_device_id = {} AND volume = {} AND muted = {} AND fixed_volume = {} AND volume >= {}",
+            p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]
+        );
+        let ancien_mute = i64::from(zone.muted);
+        let nouveau_mute = i64::from(muted);
+        let fixe = i64::from(zone.fixed_volume);
+        let params: [&dyn ToSqlValue; 8] = [
+            &volume,
+            &nouveau_mute,
+            &id,
+            &did,
+            &zone.volume,
+            &ancien_mute,
+            &fixe,
+            &volume,
+        ];
+        Ok(self.db.execute(&sql, &params)? == 1)
+    }
+
     pub fn update_muted(&self, id: i64, muted: bool) -> Result<(), String> {
         let val: i64 = i64::from(muted);
         let sql = self.update_field_sql("muted");

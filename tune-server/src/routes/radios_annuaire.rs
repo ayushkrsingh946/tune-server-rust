@@ -593,6 +593,7 @@ fn correspond(f: &StationAnnuaire, motif: &str) -> bool {
     }
     std::iter::once(f.name.as_str())
         .chain(f.genre.as_deref())
+        .chain(f.genres.iter().map(String::as_str))
         .chain(f.country.as_deref())
         .chain(f.description.as_deref())
         .chain(f.categories.iter().map(String::as_str))
@@ -611,11 +612,13 @@ fn meme_pays(f: &StationAnnuaire, pays: Option<&str>) -> bool {
     })
 }
 
+/// #7215 — vrai si le genre demandé est L'UN des genres de la fiche
+/// (`genres`, sinon `genre`) : « OuiFM Blues & Rock » sort sous blues ET rock.
 fn meme_genre(f: &StationAnnuaire, genre: Option<&str>) -> bool {
     genre.is_none_or(|g| {
-        f.genre
-            .as_deref()
-            .is_some_and(|x| x.eq_ignore_ascii_case(g))
+        f.genres_ou_genre()
+            .iter()
+            .any(|x| x.eq_ignore_ascii_case(g))
     })
 }
 
@@ -675,10 +678,16 @@ pub fn corps_annuaire_avec_liens(
         {
             *pays_comptes.entry(c.to_ascii_uppercase()).or_default() += 1;
         }
-        if meme_pays(f, pays)
-            && let Some(g) = f.genre.as_deref()
-        {
-            *genres_comptes.entry(g.to_ascii_lowercase()).or_default() += 1;
+        // #7215 — une fiche compte dans CHACUN de ses genres (une fois chacun).
+        if meme_pays(f, pays) {
+            let mut vus: Vec<String> = Vec::new();
+            for g in f.genres_ou_genre() {
+                let cle = g.to_ascii_lowercase();
+                if !vus.contains(&cle) {
+                    *genres_comptes.entry(cle.clone()).or_default() += 1;
+                    vus.push(cle);
+                }
+            }
         }
     }
     let retenues: Vec<(usize, &StationAnnuaire)> = qui_cherchent
@@ -705,6 +714,8 @@ pub fn corps_annuaire_avec_liens(
                 "logo_url": f.logo_url,
                 "country_code": f.country.as_deref().map(str::to_ascii_uppercase),
                 "genre": f.genre,
+                // #7215 — tous les genres de la fiche (repli : `[genre]`).
+                "genres": f.genres_ou_genre(),
                 "categories": f.categories,
                 // #7194 (web#2400) — les mots-clés de la fiche : le diffuseur
                 // (NPR, BBC, Radio France…), dont la carte fait ses réseaux.

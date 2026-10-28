@@ -1844,6 +1844,8 @@ mod transport;
 mod repli_de_peripherique;
 
 mod resolve_stream;
+// #7148 — la sentinelle de streaming : résolution et décodage réels, sans son.
+pub mod sentinelle_streaming;
 // #6130 — quitter une radio sur une sortie DLNA : Stop, puis attendre le renderer.
 mod sortie_de_radio_dlna_6130;
 // #6130 — le contexte d'un flux de conversion, pour son journal.
@@ -2363,3 +2365,6 @@ mod refus_asio_bloque_4556;
 /// ont ete rejoues sur la requete qui l'a pris.
 #[cfg(test)]
 mod refus_amont_4366;
+
+#[cfg(test)]
+mod deplacement_qobuz_6982_tests;
