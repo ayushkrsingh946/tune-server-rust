@@ -105,7 +105,7 @@ pub(super) async fn resume_listening(
         .await;
     let result = state
         .orchestrator
-        .play_from_queue(zone_id, r.position as i64)
+        .replay_context_from_queue(zone_id, r.position as i64)
         .await
         .map_err(AppError::internal)?;
     if let Some(error) = result.sortie_refusee() {

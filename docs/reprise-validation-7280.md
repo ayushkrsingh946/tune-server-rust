@@ -23,3 +23,6 @@ Un premier témoin core a trouvé dans le correctif un rang global 3 au lieu du 
 La contre-épreuve compilable et Clippy attendent le garde d'admission de Shrek (mémoire / plafond de builds). Un sixième témoin de la route musicale vérifie aussi le rejeu depuis zéro après un seek récent et le dernier titre sélectionné. Aucun résultat de contre-épreuve non exécuté n'est annoncé. La CI complète est demandée avec `ci:full`, conformément à la règle de 10 h 45 ; aucune suite complète locale.
 
 Aucune sortie réelle, aucun son, aucun accès au .18 ni service réel. Les témoins utilisent SQLite et des sorties/provisions d'URL factices ; PostgreSQL et la batterie complète restent à la CI. Pas de fusion, version, tag ou publication.
+
+### Rejeu explicite après un seek
+Le sixième témoin a révélé la coalescence d’une reprise avec la lecture courante : 42000 ms conservées au lieu de zéro. La route passe désormais par `replay_context_from_queue`, entrée explicite distincte des doubles appuis, qui efface le seek précédent et la garde réseau de cette zone. Les gestes ordinaires gardent leurs protections. Rejeu ciblé et contre-épreuve en cours sur Shrek ; aucun vert supplémentaire annoncé avant leur résultat.

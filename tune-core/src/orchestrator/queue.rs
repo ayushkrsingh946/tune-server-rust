@@ -659,6 +659,18 @@ impl PlaybackOrchestrator {
             .await
     }
 
+    /// Rejouer le dernier titre d'un contexte depuis zéro (#7280).
+    /// Ce geste explicite ne doit pas être absorbé comme un double appui.
+    pub async fn replay_context_from_queue(
+        &self,
+        zone_id: i64,
+        position: i64,
+    ) -> Result<PlayResult, String> {
+        self.playback.oublier_le_deplacement(zone_id).await;
+        self.play_from_queue_inner(zone_id, position, true, Entree::RepriseDeContexte)
+            .await
+    }
+
     /// #6735 — `play_from_queue` pour l'enchaînement du sondeur à la fin
     /// constatée d'une piste. Seule différence : les gardes anti-double-appui
     /// (`RETAP_DEDUP_WINDOW`, `DUPLICATE_NET_PLAY_WINDOW`) ne s'appliquent
