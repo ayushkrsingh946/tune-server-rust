@@ -2047,6 +2047,7 @@ impl PositionPoller {
                         .gapless_sent_at
                         .map(|t| t.elapsed().as_millis() as u64)
                         .unwrap_or(0);
+                    let pic = ps.peak_position_ms;
                     info!(
                         zone_id,
                         prev_pos = prev_position_ms,
@@ -2059,7 +2060,6 @@ impl PositionPoller {
                     // Retire de l'etat, gardee sous la main : c'est elle qui
                     // dit ou avancer (#3026).
                     let arme_avant = ps.gapless_armed.take();
-                    let progression_finie = ps.peak_position_ms;
                     ps.stopped_ticks = 0;
                     ps.past_end_ticks = 0;
                     ps.peak_position_ms = 0;
@@ -2104,7 +2104,7 @@ impl PositionPoller {
                                 track_duration_ms,
                             )
                             .await;
-                        self.noter_fin_tune_tested(zone_state, &device_id, progression_finie)
+                        self.noter_fin_tune_tested(zone_state, &device_id, pic)
                             .await;
                         info!(zone_id, next_pos, "gapless_advance_on_position_reset");
                         let avance = self
@@ -3147,6 +3147,7 @@ impl PositionPoller {
                             .gapless_sent_at
                             .map(|t| t.elapsed().as_millis() as u64)
                             .unwrap_or(0);
+                        let pic = ps.peak_position_ms;
                         info!(
                             zone_id,
                             renderer_dur = status.duration_ms,
@@ -3159,7 +3160,6 @@ impl PositionPoller {
                         ps.gapless_sent_at = None;
                         // Voir `position_a_avancer` (#3026).
                         let arme_avant = ps.gapless_armed.take();
-                        let progression_finie = ps.peak_position_ms;
                         ps.peak_position_ms = 0;
                         ps.last_position_ms = 0;
                         ps.last_bytes_sent = 0;
@@ -3179,7 +3179,7 @@ impl PositionPoller {
                             .position_a_avancer(zone_id, zone_state, arme_avant)
                             .await
                         {
-                            self.noter_fin_tune_tested(zone_state, &device_id, progression_finie)
+                            self.noter_fin_tune_tested(zone_state, &device_id, pic)
                                 .await;
                             info!(zone_id, next_pos, "gapless_advance_metadata");
                             if let Err(e) = self
