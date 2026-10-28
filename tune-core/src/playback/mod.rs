@@ -225,6 +225,15 @@ impl NowPlaying {
     }
 }
 
+/// Un état reçu de l'appareil ; jamais une demande de volume.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObservationVolumeAppareil {
+    pub device_id: String,
+    pub volume: f64,
+    pub volume_db: f64,
+    pub muted: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoneState {
     pub zone_id: i64,
@@ -376,6 +385,9 @@ pub struct ZoneState {
     /// the slider from bouncing back on slow DLNA renderers.
     #[serde(skip)]
     pub last_volume_set_at: Option<Instant>,
+    /// #6912 — observation distincte de la consigne, absente sans annonce fraîche.
+    #[serde(default)]
+    pub device_volume_observation: Option<ObservationVolumeAppareil>,
     /// Timestamp of the last stall-recovery restart of this zone, stamped by
     /// the OAAT stall supervisor. The supervisor replays the CURRENT track
     /// from 0; the poller reads this to suppress a gapless position-reset
@@ -632,6 +644,7 @@ impl Default for ZoneState {
             paused_at: None,
             last_seek_at: None,
             last_volume_set_at: None,
+            device_volume_observation: None,
             last_restart_at: None,
             last_play_started_at: None,
             session_profile_id: None,
@@ -1937,6 +1950,88 @@ impl PlaybackManager {
         });
     }
 
+    /// Publier l'état matériel n'émet aucune commande et ne change pas la consigne.
+    pub async fn noter_observation_volume_appareil(
+        &self,
+        zone_id: i64,
+        volume_initial: f64,
+        muted_initial: bool,
+        observation: Option<ObservationVolumeAppareil>,
+    ) {
+        let mut zones = self.zones.lock().await;
+        if observation.is_none() && !zones.contains_key(&zone_id) {
+            return;
+        }
+        let state = zones.entry(zone_id).or_insert_with(|| ZoneState {
+            zone_id,
+            volume: volume_initial.clamp(0.0, 1.0),
+            muted: muted_initial,
+            ..Default::default()
+        });
+        if state.device_volume_observation == observation {
+            return;
+        }
+        state.device_volume_observation = observation.clone();
+        self.emit(PlaybackEvent {
+            event: "device_volume_observation".into(),
+            zone_id,
+            data: serde_json::json!({ "device_volume_observation": observation }),
+        });
+    }
+
+    pub(crate) async fn marquer_geste_air(&self, zone_id: i64, volume: f64, muted: bool) {
+        let mut zones = self.zones.lock().await;
+        let state = zones.entry(zone_id).or_insert_with(|| ZoneState {
+            zone_id,
+            volume,
+            muted,
+            ..Default::default()
+        });
+        state.last_volume_set_at = Some(Instant::now());
+    }
+
+    /// La comparaison protège aussi une modification directe de l'état en mémoire.
+    pub(crate) async fn adopter_controles_air(
+        &self,
+        zone_id: i64,
+        attendu_volume: f64,
+        attendu_muted: bool,
+        volume: f64,
+        muted: bool,
+    ) -> bool {
+        let mut zones = self.zones.lock().await;
+        let Some(state) = zones.get_mut(&zone_id) else {
+            return false;
+        };
+        if !volume.is_finite()
+            || volume < 0.0
+            || volume > state.volume
+            || (state.volume - attendu_volume).abs() > 1e-9
+            || state.muted != attendu_muted
+        {
+            return false;
+        }
+        let volume_change = (state.volume - volume).abs() > 1e-9;
+        let mute_change = state.muted != muted;
+        state.volume = volume;
+        state.muted = muted;
+        if volume_change {
+            self.emit(PlaybackEvent {
+                event: "volume".into(),
+                zone_id,
+                data: serde_json::json!({ "volume": volume }),
+            });
+        }
+        if mute_change {
+            self.emit(PlaybackEvent {
+                event: "muted".into(),
+                zone_id,
+                data: serde_json::json!({ "muted": muted }),
+            });
+        }
+        true
+    }
+
     pub async fn mark_volume_changed(&self, zone_id: i64) {
         let mut zones = self.zones.lock().await;
         if let Some(state) = zones.get_mut(&zone_id) {
@@ -2458,6 +2553,7 @@ mod tests {
             paused_at: None,
             last_seek_at: None,
             last_volume_set_at: None,
+            device_volume_observation: None,
             last_restart_at: None,
             last_play_started_at: None,
             session_profile_id: None,

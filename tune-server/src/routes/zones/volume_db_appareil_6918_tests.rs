@@ -210,3 +210,107 @@ async fn changer_la_course_garde_le_niveau_et_n_envoie_rien_6918() {
     let v = state.playback.get_state(air).await.volume;
     assert!(proche(v, 0.2), "−52 dB sur −60..−20 = 20 % : {v}");
 }
+
+/// Le relevé haut s'affiche séparément : ni une lecture ni l'évènement ne commande.
+#[tokio::test]
+async fn l_observation_air_est_distincte_de_la_consigne_sur_les_routes_6912() {
+    let (app, state, air, _) = serveur().await;
+    ZoneRepo::with_backend(state.backend.clone())
+        .update_volume(air, 40.0)
+        .unwrap();
+    state
+        .playback
+        .noter_observation_volume_appareil(
+            air,
+            0.4,
+            false,
+            Some(tune_core::playback::ObservationVolumeAppareil {
+                device_id: AMPLI.into(),
+                volume: 0.8,
+                volume_db: -24.0,
+                muted: false,
+            }),
+        )
+        .await;
+    for chemin in [
+        format!("/api/v1/zones/{air}"),
+        format!("/api/v1/zones/{air}/status"),
+    ] {
+        let (statut, zone) = appeler(&app, "GET", &chemin, None).await;
+        assert_eq!(statut, StatusCode::OK, "{zone}");
+        assert_eq!(
+            zone["volume"], 0.4,
+            "le relevé AIR ne doit pas remplacer la consigne API"
+        );
+        assert_eq!(zone["device_volume_db"], -52.0);
+        assert_eq!(
+            zone["device_volume_observation"]["volume_db"], -24.0,
+            "les dB observés doivent être publiés séparément de la consigne"
+        );
+        assert_eq!(zone["device_volume_observation"]["device_id"], AMPLI);
+    }
+    let (_, liste) = appeler(&app, "GET", "/api/v1/zones", None).await;
+    let zone = liste
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|z| z["id"] == air)
+        .unwrap();
+    assert_eq!(
+        zone["device_volume_observation"]["volume_db"], -24.0,
+        "la liste de zones doit aussi porter l'observation AIR"
+    );
+    assert_eq!(zone["volume"], 0.4);
+    assert_eq!(
+        ZoneRepo::with_backend(state.backend.clone())
+            .get(air)
+            .unwrap()
+            .unwrap()
+            .volume,
+        40.0
+    );
+    assert!(
+        recus(&state, AMPLI).await.is_empty(),
+        "lire une observation AIR ne doit envoyer aucun volume"
+    );
+}
+
+#[tokio::test]
+async fn retirer_l_annonce_air_retire_aussi_son_observation_api_6912() {
+    let (app, state, air, _) = serveur().await;
+    ZoneRepo::with_backend(state.backend.clone())
+        .update_volume(air, 40.0)
+        .unwrap();
+    state
+        .playback
+        .noter_observation_volume_appareil(
+            air,
+            0.4,
+            false,
+            Some(tune_core::playback::ObservationVolumeAppareil {
+                device_id: AMPLI.into(),
+                volume: 1.0,
+                volume_db: 0.0,
+                muted: false,
+            }),
+        )
+        .await;
+    state
+        .playback
+        .noter_observation_volume_appareil(air, 0.4, false, None)
+        .await;
+    for chemin in [
+        format!("/api/v1/zones/{air}"),
+        format!("/api/v1/zones/{air}/status"),
+    ] {
+        let (statut, zone) = appeler(&app, "GET", &chemin, None).await;
+        assert_eq!(statut, StatusCode::OK);
+        assert!(
+            zone.get("device_volume_observation")
+                .is_some_and(Value::is_null),
+            "une annonce absente ne doit plus afficher un ancien relevé AIR"
+        );
+        assert_eq!(zone["volume"], 0.4);
+    }
+    assert!(recus(&state, AMPLI).await.is_empty());
+}

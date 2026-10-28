@@ -490,6 +490,12 @@ pub(super) async fn get_config(
             tune_core::taches_de_fond::vitesse::CLE_LEVER_LE_BRIDAGE,
             json!(tune_core::taches_de_fond::vitesse::LEVER_LE_BRIDAGE_DEFAUT),
         ),
+        // #6286 — le rappel périodique de l'audit d'intégrité, en jours.
+        // Éteint (0) par défaut, publié avec son défaut.
+        (
+            tune_core::audio::audit_integrite::rappel::CLE_RAPPEL_JOURS,
+            json!(tune_core::audio::audit_integrite::rappel::RAPPEL_JOURS_DEFAUT),
+        ),
         // #5593 — le périmètre des passes de fond qui décodent : les racines
         // de bibliothèque exclues (ReplayGain, plage dynamique, empreintes,
         // CLAP). Vide par défaut : rien d'exclu, le comportement d'avant.
@@ -1359,6 +1365,28 @@ fn normaliser_levee_du_bridage(
     Ok(())
 }
 
+/// #6286 — le rappel de l'audit d'intégrité : un entier de jours de 0 (éteint)
+/// à 365, nu ou en chaîne, écrit nu ; sinon 400 en nommant les bornes.
+fn normaliser_rappel_audit_integrite(
+    values: &mut serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    use tune_core::audio::audit_integrite::rappel::{CLE_RAPPEL_JOURS, valider};
+    let Some(brut) = values.get(CLE_RAPPEL_JOURS) else {
+        return Ok(());
+    };
+    let texte = match brut {
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        autre => autre.to_string(),
+    };
+    let jours = valider(&texte).map_err(AppError::bad_request)?;
+    values.insert(
+        CLE_RAPPEL_JOURS.to_string(),
+        Value::String(jours.to_string()),
+    );
+    Ok(())
+}
+
 /// #5594 — les deux options des mesures communautaires : un booléen (ou
 /// `"true"`/`"false"`), sinon 400. Une autre valeur, gardée telle quelle, se
 /// relirait « non » sans un mot — et un opt-in ne se devine pas.
@@ -1752,6 +1780,7 @@ pub(super) async fn update_config(
     normaliser_vitesse_des_analyses(&mut values)?;
     normaliser_nom_du_serveur(&mut values)?;
     normaliser_levee_du_bridage(&mut values)?;
+    normaliser_rappel_audit_integrite(&mut values)?;
     normaliser_mesures_communautaires(&mut values)?;
     let politique_de_lecture = normaliser_politique_de_lecture(&mut values)?;
     let perimetre_touche = normaliser_perimetre_des_analyses(&mut values)?;
@@ -2652,6 +2681,16 @@ pub(super) async fn get_env(State(state): State<AppState>) -> Json<Value> {
         "spotify_redirect_uri": spotify_redirect_uri,
         "spotify_redirect_uri_refus": spotify_redirect_uri_refus,
         "spotify_client_id_configure": spotify_client_id_configure,
+        // renesenses/tune-server-rust#7074 — Tune tourne-t-il dans un conteneur ?
+        // « Redémarrer » relance le binaire en place (`execv`, PID 1 dans
+        // l'image) ; s'il échoue, le conteneur sort et ne revient que sous une
+        // politique de redémarrage. Le client le dit avant de redémarrer.
+        "container": crate::conteneur::detecter(),
+        "container_id": std::env::var("HOSTNAME")
+            .ok()
+            .as_deref()
+            .and_then(crate::conteneur::identifiant_court)
+            .map(str::to_string),
     }))
 }
 
@@ -4033,6 +4072,11 @@ pub(super) async fn stop(_admin: crate::auth::RequireAdmin) -> impl IntoResponse
 }
 
 pub(super) async fn restart(_admin: crate::auth::RequireAdmin) -> impl IntoResponse {
+    if let Some(moteur) = crate::conteneur::detecter() {
+        // #7074 — dans un conteneur, un `execv` qui échoue arrête le
+        // conteneur : le journal le dit, c'est ce qu'on cherchera.
+        tracing::info!(moteur, "restart_in_container");
+    }
     tokio::spawn(async {
         // Let the HTTP response flush before we swap the process image.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -6161,6 +6205,79 @@ mod levee_du_bridage_6713_tests {
                 .unwrap()
                 .clone();
             assert!(normaliser_levee_du_bridage(&mut v).is_err(), "{mauvais}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod rappel_audit_integrite_6286_tests {
+    use super::{get_config, normaliser_rappel_audit_integrite, update_config};
+    use crate::auth::RequireAdmin;
+    use crate::routes::active_profile::{ActiveProfile, DEFAULT_PROFILE_ID};
+    use crate::state::AppState;
+    use axum::Json;
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
+    use serde_json::{Value, json};
+    use tune_core::audio::audit_integrite::rappel::{CLE_RAPPEL_JOURS, rappel_jours};
+
+    /// Publié ÉTEINT (0) par défaut ; le PATCH l'écrit, l'audit le relit.
+    #[tokio::test]
+    async fn eteint_par_defaut_puis_regle_par_le_patch() {
+        let state = AppState::new(":memory:", 0, Default::default()).unwrap();
+        let c = get_config(
+            HeaderMap::new(),
+            ActiveProfile(DEFAULT_PROFILE_ID),
+            State(state.clone()),
+        )
+        .await
+        .0;
+        assert_eq!(c[CLE_RAPPEL_JOURS], json!(0), "{c}");
+        assert_eq!(rappel_jours(&state.backend), 0);
+        let mut corps = serde_json::Map::new();
+        corps.insert(CLE_RAPPEL_JOURS.to_string(), json!(30));
+        let _reponse = update_config(
+            RequireAdmin,
+            ActiveProfile(DEFAULT_PROFILE_ID),
+            State(state.clone()),
+            Json(super::ConfigPatch(corps)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("update_config a échoué"))
+        .into_response();
+        assert_eq!(
+            rappel_jours(&state.backend),
+            30,
+            "le PATCH doit régler le rappel"
+        );
+    }
+
+    #[test]
+    fn hors_bornes_refuse() {
+        for (brut, attendu) in [(json!(0), "0"), (json!("90"), "90"), (json!(365), "365")] {
+            let mut v: serde_json::Map<String, Value> = json!({ CLE_RAPPEL_JOURS: brut })
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(normaliser_rappel_audit_integrite(&mut v).is_ok(), "{brut}");
+            assert_eq!(v[CLE_RAPPEL_JOURS], json!(attendu), "{brut}");
+        }
+        for mauvais in [
+            json!(366),
+            json!(-1),
+            json!("souvent"),
+            json!(null),
+            json!(true),
+        ] {
+            let mut v: serde_json::Map<String, Value> = json!({ CLE_RAPPEL_JOURS: mauvais })
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(
+                normaliser_rappel_audit_integrite(&mut v).is_err(),
+                "{mauvais}"
+            );
         }
     }
 }

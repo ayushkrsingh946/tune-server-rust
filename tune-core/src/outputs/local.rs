@@ -5302,16 +5302,15 @@ pub(crate) fn ouverture_encore_voulue(force_silent: bool, stop_recu: bool) -> bo
 
 /// #4177 — la pause doit-elle RENDRE le périphérique ?
 ///
-/// Règle pure : sous Windows, en mode exclusif (WASAPI exclusif comme ASIO,
-/// les deux tiennent le point de sortie pour eux seuls), et seulement quand un
-/// flux joue. Le chemin partagé (mixeur Windows), macOS et Linux ne changent
-/// pas : leur pause reste un booléen, et une pause sans flux n'a rien à rendre.
+/// Sous Windows, tout flux actif rend son endpoint en pause : même une session
+/// WASAPI partagée peut empêcher un moteur ASIO de changer de cadence (#7244).
+/// macOS/Linux restent inchangés ; sans flux, il n'y a rien à rendre.
 pub(crate) fn la_pause_rend_le_peripherique(
     windows: bool,
-    exclusive_mode: bool,
+    _exclusive_mode: bool,
     playing: bool,
 ) -> bool {
-    windows && exclusive_mode && playing
+    windows && playing
 }
 
 #[async_trait::async_trait]
@@ -7662,7 +7661,7 @@ impl OutputTarget for LocalOutput {
     }
 
     async fn pause(&self) -> Result<(), String> {
-        // #4177 — en exclusif Windows (WASAPI exclusif ou ASIO), la pause ne
+        // #4177/#7244 — sous Windows (partagé, exclusif ou ASIO), la pause ne
         // posait qu'un booléen : le fil de rendu poussait du silence et le
         // périphérique restait PRIS — plus un son d'aucune autre application
         // sur ce point de sortie tant que Tune était en pause (Jean Valjean,
@@ -7681,7 +7680,7 @@ impl OutputTarget for LocalOutput {
                 device = %self.device_name,
                 backend = %self.audio_backend,
                 position_ms,
-                "local_audio_exclusive_device_released_on_pause"
+                "local_audio_device_released_on_pause"
             );
             self.stop().await?;
             // `stop()` remet la position à zéro ; une pause, elle, la garde :

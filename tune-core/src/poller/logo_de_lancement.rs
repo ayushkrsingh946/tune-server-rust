@@ -84,7 +84,7 @@ pub(crate) fn logo_de_lancement(url_flux: &str) -> Option<String> {
 
 /// Le logo de la station qui joue : celui de « Mes radios » quand elle y est
 /// et en a un, sinon celui avec lequel elle a été lancée.
-pub(crate) fn logo_de_la_station(station: Option<&RadioStation>, url_flux: &str) -> Option<String> {
+pub fn logo_de_la_station(station: Option<&RadioStation>, url_flux: &str) -> Option<String> {
     renseigne(station.and_then(|s| s.logo_url.as_deref()))
         .map(str::to_string)
         .or_else(|| logo_de_lancement(url_flux))

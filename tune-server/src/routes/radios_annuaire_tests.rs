@@ -340,3 +340,159 @@ fn l_annuaire_rend_les_mots_cles_de_chaque_fiche_pour_les_reseaux_de_la_carte() 
         "aucun mot-clé : liste vide"
     );
 }
+
+/// #7215 — trois fiches au format du site du 27/10/2026 (`genres`) et une
+/// fiche d'un site plus ancien (`genre` seul).
+fn fiches_genres_7215() -> Vec<StationAnnuaire> {
+    let brut = serde_json::json!([
+        {"external_id": "S100001", "name": "OuiFM Blues & Rock", "stream_url": "https://ouifm.example/bluesrock",
+         "country": "FR", "genre": "blues", "genres": ["blues", "rock"]},
+        {"external_id": "S100002", "name": "FIP Metal", "stream_url": "https://fip.example/metal",
+         "country": "FR", "genre": "rock", "genres": ["rock", "metal", "Rock", " "]},
+        {"external_id": "S100003", "name": "Radio Tout", "stream_url": "https://tout.example/live",
+         "country": "BE", "genre": "eclectic", "genres": ["eclectic"]},
+        {"external_id": "S100004", "name": "Vieux Jazz", "stream_url": "https://jazz.example/live",
+         "country": "FR", "genre": "jazz"}
+    ]);
+    annuaire_depuis_json(brut.as_array().unwrap())
+}
+
+fn ids_du_genre_7215(f: &[StationAnnuaire], genre: &str) -> Vec<String> {
+    let corps = corps_annuaire(
+        f,
+        &[],
+        &FiltresAnnuaire {
+            genre: Some(genre.into()),
+            ..Default::default()
+        },
+        &EtatAnnuaire::default(),
+    );
+    corps["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["external_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn temoin_7215_ouifm_blues_et_rock_sort_sous_chacun_de_ses_genres() {
+    let f = fiches_genres_7215();
+    assert_eq!(
+        ids_du_genre_7215(&f, "blues"),
+        vec!["S100001"],
+        "OuiFM Blues & Rock doit sortir sous blues"
+    );
+    assert_eq!(
+        ids_du_genre_7215(&f, "rock"),
+        vec!["S100001", "S100002"],
+        "OuiFM Blues & Rock doit AUSSI sortir sous rock (son 2e genre), FIP Metal sous rock"
+    );
+    assert_eq!(ids_du_genre_7215(&f, "METAL"), vec!["S100002"]);
+}
+
+#[test]
+fn les_genres_7215_sont_lus_sans_doublon_et_rendus_par_l_annuaire() {
+    let f = fiches_genres_7215();
+    let metal = f.iter().find(|s| s.name == "FIP Metal").unwrap();
+    assert_eq!(metal.genre.as_deref(), Some("rock"));
+    assert_eq!(metal.genres, vec!["rock".to_string(), "metal".to_string()]);
+
+    let corps = corps_annuaire(
+        &f,
+        &[],
+        &FiltresAnnuaire::default(),
+        &EtatAnnuaire::default(),
+    );
+    let ouifm = corps["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["external_id"] == "S100001")
+        .unwrap();
+    assert_eq!(ouifm["genre"], "blues", "le genre v1 reste le premier");
+    assert_eq!(ouifm["genres"], serde_json::json!(["blues", "rock"]));
+}
+
+#[test]
+fn les_compteurs_7215_comptent_une_fiche_dans_chacun_de_ses_genres() {
+    let f = fiches_genres_7215();
+    let corps = corps_annuaire(
+        &f,
+        &[],
+        &FiltresAnnuaire::default(),
+        &EtatAnnuaire::default(),
+    );
+    let comptes: std::collections::BTreeMap<String, u64> = corps["genres"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| {
+            (
+                g["key"].as_str().unwrap().to_string(),
+                g["count"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let attendu: std::collections::BTreeMap<String, u64> = [
+        ("rock", 2),
+        ("blues", 1),
+        ("metal", 1),
+        ("eclectic", 1),
+        ("jazz", 1),
+    ]
+    .into_iter()
+    .map(|(k, n)| (k.to_string(), n))
+    .collect();
+    assert_eq!(comptes, attendu, "{}", corps["genres"]);
+
+    // Les genres proposés suivent le pays choisi.
+    let be = corps_annuaire(
+        &f,
+        &[],
+        &FiltresAnnuaire {
+            country: Some("BE".into()),
+            ..Default::default()
+        },
+        &EtatAnnuaire::default(),
+    );
+    assert_eq!(
+        be["genres"],
+        serde_json::json!([{"key": "eclectic", "count": 1}])
+    );
+}
+
+#[test]
+fn ancien_format_7215_sans_genres_se_replie_sur_genre() {
+    let f = fiches_genres_7215();
+    let vieux = f.iter().find(|s| s.name == "Vieux Jazz").unwrap();
+    assert_eq!(vieux.genres, vec!["jazz".to_string()]);
+    assert_eq!(ids_du_genre_7215(&f, "jazz"), vec!["S100004"]);
+
+    // Une fiche construite sans `genres` (aucun site) : repli sur `genre`.
+    let construite = StationAnnuaire {
+        name: "Construite".into(),
+        stream_url: "https://c.example/s".into(),
+        external_id: Some("C000001".into()),
+        genre: Some("folk".into()),
+        ..Default::default()
+    };
+    assert_eq!(construite.genres_ou_genre(), vec!["folk"]);
+    assert_eq!(ids_du_genre_7215(&[construite], "folk"), vec!["C000001"]);
+}
+
+#[test]
+fn contre_epreuve_7215_un_genre_que_la_fiche_n_a_pas_ne_la_trouve_pas() {
+    let f = fiches_genres_7215();
+    assert!(
+        ids_du_genre_7215(&f, "metal")
+            .iter()
+            .all(|id| id != "S100001")
+    );
+    assert!(
+        ids_du_genre_7215(&f, "jazz")
+            .iter()
+            .all(|id| id != "S100001")
+    );
+    assert!(ids_du_genre_7215(&f, "funk").is_empty());
+}
