@@ -1509,7 +1509,7 @@ mod tests_contextes {
     /// l'ARTISTE DEMANDE, pas celui de la derniere piste jouee : sur une
     /// compilation les deux different.
     #[test]
-    fn un_artiste_remonte_comme_artiste_avec_le_nom_demande() {
+    fn un_artiste_est_exclu_de_la_reprise_selon_la_regle_de_fabien() {
         let state = AppState::new(":memory:", 0, Default::default()).unwrap();
         state
             .backend
@@ -1532,15 +1532,10 @@ mod tests_contextes {
             panic!("la requete doit repondre")
         };
 
-        assert_eq!(items.len(), 1, "l'artiste n'apparait pas : {items:?}");
-        assert_eq!(items[0]["context_type"], "artist");
-        assert_eq!(items[0]["title"], "Miles Davis");
-        assert_eq!(
-            items[0]["artist_name"], "Miles Davis",
-            "c'est l'artiste DEMANDE qui compte, pas « Artiste invite » lu sur \
-             la derniere ligne d'historique"
+        assert!(
+            items.is_empty(),
+            "la reprise ne suit pas les artistes : {items:?}"
         );
-        assert_eq!(items[0]["position"].as_i64(), Some(3));
     }
 
     // --- LABEL ------------------------------------------------------------
@@ -1550,7 +1545,7 @@ mod tests_contextes {
     /// CHAINE. `context_id` EST donc le nom du label, et il est son propre
     /// titre.
     #[test]
-    fn un_label_remonte_comme_label_et_est_son_propre_titre() {
+    fn un_label_est_exclu_de_la_reprise_selon_la_regle_de_fabien() {
         let state = AppState::new(":memory:", 0, Default::default()).unwrap();
         ecoute_avec_contexte(
             &state,
@@ -1568,11 +1563,10 @@ mod tests_contextes {
             panic!("la requete doit repondre")
         };
 
-        assert_eq!(items.len(), 1, "le label n'apparait pas : {items:?}");
-        assert_eq!(items[0]["context_type"], "label");
-        assert_eq!(items[0]["context_id"], "Blue Note");
-        assert_eq!(items[0]["title"], "Blue Note");
-        assert_eq!(items[0]["position"].as_i64(), Some(11));
+        assert!(
+            items.is_empty(),
+            "la reprise ne suit pas les labels : {items:?}"
+        );
     }
 
     // --- TITRE ISOLE ------------------------------------------------------
@@ -1755,10 +1749,11 @@ mod tests_contextes {
         );
     }
 
-    /// Les cinq natures cote a cote, du geste le plus recent au plus ancien.
+    /// Les cinq contextes historiques sont présents ; seules les natures
+    /// suivies par la règle du 28/10 sortent, dans leur ordre chronologique.
     /// L'auditeur relit son histoire, pas « les albums puis le reste ».
     #[test]
-    fn les_cinq_natures_cohabitent_et_sortent_du_plus_recent_au_plus_ancien() {
+    fn seules_les_natures_suivies_sortent_du_plus_recent_au_plus_ancien() {
         let state = AppState::new(":memory:", 0, Default::default()).unwrap();
         let album = poser_album(&state, "Pulp", "Different Class", 12);
         state
@@ -1803,8 +1798,8 @@ mod tests_contextes {
             .collect();
         assert_eq!(
             natures,
-            vec!["track", "label", "artist", "playlist", "album"],
-            "les cinq natures doivent cohabiter, du plus recent au plus \
+            vec!["track", "playlist", "album"],
+            "les natures suivies doivent cohabiter sans artiste ni label, du plus recent au plus \
              ancien : {items:?}"
         );
     }
@@ -1815,14 +1810,23 @@ mod tests_contextes {
     fn la_limite_demandee_est_respectee_toutes_natures_confondues() {
         let state = AppState::new(":memory:", 0, Default::default()).unwrap();
         for n in 0..9 {
+            let nom = format!("Playlist {n}");
+            state
+                .backend
+                .execute(
+                    "INSERT INTO playlists (name) VALUES (?)",
+                    &[&nom as &dyn ToSqlValue],
+                )
+                .unwrap();
+            let playlist = state.backend.last_insert_rowid();
             ecoute_avec_contexte(
                 &state,
                 "Take Five",
                 None,
                 None,
                 None,
-                "label",
-                &format!("Label {n}"),
+                "playlist",
+                &playlist.to_string(),
                 Some(0),
                 &format!("2026-08-28T22:4{n}:00Z"),
             );
