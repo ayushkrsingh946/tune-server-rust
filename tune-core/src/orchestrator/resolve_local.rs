@@ -1983,8 +1983,12 @@ impl PlaybackOrchestrator {
             // #7362 : le DSF commence au bloc précédent, pas exactement à la
             // milliseconde demandée. Une même taille physique pour HEAD/GET
             // et l'en-tête, sans changer le lecteur ni les octets DoP.
-            let taille_dsf_dop = if ext == "dsf" {
+            let taille_dop_exacte = if ext == "dsf" {
                 crate::audio::dsf::parse_dsf(&file_path)
+                    .ok()
+                    .and_then(|info| info.taille_wav_dop(tranche))
+            } else if ext == "dff" {
+                crate::audio::dff::parse_dff(&file_path)
                     .ok()
                     .and_then(|info| info.taille_wav_dop(tranche))
             } else {
@@ -1996,7 +2000,7 @@ impl PlaybackOrchestrator {
                 sample_rate: dop_rate,
                 bit_depth: 24,
                 channels: dop_channels,
-                file_size: taille_dsf_dop,
+                file_size: taille_dop_exacte,
                 duration_ms: Some(duree_ms),
                 ..Default::default()
             };
@@ -2063,7 +2067,7 @@ impl PlaybackOrchestrator {
                 // même chose qu'avant, sans quoi ce correctif échangerait un
                 // défaut contre un autre — une taille de 2 Gio là où le
                 // `Content-Length` annonce la vraie longueur.
-                let wav_hdr = match taille_dsf_dop.and_then(|taille| taille.checked_sub(44)) {
+                let wav_hdr = match taille_dop_exacte.and_then(|taille| taille.checked_sub(44)) {
                     Some(data) => match u32::try_from(data).ok().filter(|n| *n <= u32::MAX - 36) {
                         Some(data) => crate::audio::wav::build_wav_header_with_data_size(
                             dop_channels,
@@ -4080,3 +4084,7 @@ mod tranche_dop_tests_6456 {
 #[cfg(test)]
 #[path = "dsf_dop_longueur_7362_tests.rs"]
 mod dsf_dop_longueur_7362_tests;
+
+#[cfg(test)]
+#[path = "dff_dop_longueur_7362_tests.rs"]
+mod dff_dop_longueur_7362_tests;
