@@ -271,7 +271,14 @@ pub fn track_position(
     let Some(current) = queue.iter().find(|e| e.is_current) else {
         return Ok(());
     };
-    for mut r in recent(db, Some(state.zone_id), 200)? {
+    // Les instantanés album/playlist peuvent contenir une très grande file :
+    // ne pas les décoder à chaque relevé d'une position de titre seul.
+    let rows = db.query_many(
+        "SELECT payload, resume_key FROM listening_resumes WHERE zone_id = ? AND context_type = 'track' ORDER BY updated_at DESC LIMIT 200",
+        &[&state.zone_id as &dyn ToSqlValue],
+    )?;
+    for row in rows {
+        let mut r = decode(&row)?;
         if r.context_type != "track" || !r.queue_row_ids.contains(&current.id) {
             continue;
         }
