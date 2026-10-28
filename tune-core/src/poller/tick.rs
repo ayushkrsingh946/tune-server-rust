@@ -55,6 +55,7 @@ impl PositionPoller {
             if zone_id == 0 {
                 continue;
             }
+            self.relever_controles_air(zone, startup_at).await;
             let device_id = match zone.output_device_id.as_deref() {
                 Some(id) if !id.is_empty() => id.to_string(),
                 _ => continue,
