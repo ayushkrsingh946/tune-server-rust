@@ -65,6 +65,18 @@ impl PositionPoller {
         device_id: Option<&str>,
     ) {
         use crate::db::zone_repo::{AutoplayMode, ZoneRepo};
+        // #6634 — le contrôleur UPnP décide de la suite. Sa dernière piste
+        // ne doit pas amorcer la radio ou un album de la bibliothèque locale.
+        // Les pistes indexées d’un serveur média gardent leur autoplay Tune.
+        // Les suivantes explicitement confiées passent par handle_track_end.
+        if zone_state
+            .now_playing
+            .as_ref()
+            .is_some_and(|np| np.source == "upnp" && np.track_id.is_none())
+        {
+            self.orchestrator.stop(zone_id, device_id).await;
+            return;
+        }
         // #5395 — une radio artiste en cours passe AVANT le réglage d'auto-
         // lecture : elle est sans fin par décision, et c'est l'auditeur qui l'a
         // lancée. Sans contexte de radio, ou si la file ne s'achève pas sur un
