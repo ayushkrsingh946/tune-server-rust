@@ -2557,8 +2557,8 @@ mod tests_page_connexion_b209sso {
 
     #[test]
     fn langue_hors_du_serveur_ignoree() {
-        // « pl » est une langue du client web que le serveur ne parle pas.
-        let p = page_connexion_demandee(&q(&[("ui_locales", "pl")]));
+        // « pt » n'est pas une langue du serveur (le polonais l'est depuis la rc9).
+        let p = page_connexion_demandee(&q(&[("ui_locales", "pt")]));
         assert_eq!(p.langue, None);
     }
 
